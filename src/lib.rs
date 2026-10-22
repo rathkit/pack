@@ -14,3 +14,5 @@ pub mod minify;
 pub mod purity;
 pub mod module;
 pub mod sourcemap;
+pub mod css;
+pub mod loader;
