@@ -13,3 +13,4 @@ pub(crate) mod compress;
 pub mod minify;
 pub mod purity;
 pub mod module;
+pub mod sourcemap;
