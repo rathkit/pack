@@ -16,3 +16,4 @@ pub mod module;
 pub mod sourcemap;
 pub mod css;
 pub mod loader;
+pub mod estree;
