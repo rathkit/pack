@@ -1,0 +1,4 @@
+target/
+*:Zone.Identifier
+__pycache__/
+*.pyc

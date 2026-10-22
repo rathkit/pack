@@ -1,0 +1,39 @@
+[package]
+name = "rathkit-pack"
+version = "0.0.0"
+edition = "2024"
+description = "A fast, zero-dependency JavaScript and TypeScript bundler"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+name = "rathkit_pack"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rathkit-pack"
+path = "src/main.rs"
+
+[[bin]]
+name = "prof"
+path = "src/bin/prof.rs"
+# Linux x86-64 only, so it is opt-in: see the header of src/bin/prof.rs.
+required-features = ["profiling"]
+
+[features]
+profiling = []
+
+# Zero dependencies is a hard rule. `pnpm`-style enforcement lives in tools/check-zero-deps.mjs.
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+# Used only for profiling: optimized, with symbols. Build with
+# RUSTFLAGS="-C force-frame-pointers=yes" so the sampling profiler can walk stacks.
+[profile.profiling]
+inherits = "release"
+debug = true
