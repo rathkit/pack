@@ -1,0 +1,19 @@
+{
+  "name": "rathkit-pack-bench",
+  "private": true,
+  "type": "module",
+  "description": "Other bundlers and the libraries the benchmark bundles; see README.md",
+  "dependencies": {
+    "@rspack/cli": "2.2.9",
+    "@rspack/core": "2.2.9",
+    "esbuild": "0.28.2",
+    "lodash-es": "4.18.1",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "rolldown": "1.2.15",
+    "rxjs": "7.8.2",
+    "three": "0.186.1",
+    "ts5": "npm:typescript@5.9.3",
+    "vite": "8.3.5"
+  }
+}
