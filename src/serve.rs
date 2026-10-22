@@ -1,0 +1,363 @@
+//! The development server of `rathkit-pack serve`: the build kept in memory, served over HTTP, with the page told
+//! to reload (or to swap its style sheets) when a rebuild finishes.
+//!
+//! No dependencies: a `TcpListener`, a thread per connection, and server-sent events for the page. Plugins take part
+//! through the host (Vite's `configureServer`, `transformIndexHtml`, `handleHotUpdate`); this side does the HTTP.
+//!
+//! What a page cannot have is module-by-module hot replacement: the output is one scope-hoisted program, so a script
+//! change reloads the page. Style sheets are swapped without a reload, and `import.meta.hot` exists so code written
+//! for it runs (its `accept` callbacks are not used; `dispose` callbacks run before the reload).
+
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use crate::plugins::PluginHost;
+
+const CLIENT: &str = include_str!("serve/client.js");
+
+pub struct ServeState {
+    pub cwd: PathBuf,
+    pub host: Option<Arc<PluginHost>>,
+    files: Mutex<HashMap<String, Vec<u8>>>,
+    /// Entry file (as written on the command line, relative to the project) and the output file that holds it.
+    entries: Mutex<Vec<(PathBuf, String)>>,
+    clients: Mutex<Vec<TcpStream>>,
+    middlewares: Mutex<bool>,
+    last_error: Mutex<Option<String>>,
+    /// Listening beyond this machine: only `public/` is served from disk, and host names must be addresses.
+    exposed: Mutex<bool>,
+    bound_host: Mutex<String>,
+}
+
+impl ServeState {
+    pub fn new(cwd: PathBuf, host: Option<Arc<PluginHost>>) -> Arc<ServeState> {
+        Arc::new(ServeState { cwd, host, files: Mutex::new(HashMap::new()), entries: Mutex::new(Vec::new()), clients: Mutex::new(Vec::new()), middlewares: Mutex::new(false), last_error: Mutex::new(None), exposed: Mutex::new(false), bound_host: Mutex::new(String::new()) })
+    }
+
+    /// The finished build: files by name, and which file holds which entry.
+    pub fn publish(&self, files: Vec<(String, Vec<u8>)>, entries: Vec<(PathBuf, String)>) {
+        *self.files.lock().unwrap() = files.into_iter().collect();
+        *self.entries.lock().unwrap() = entries;
+        *self.last_error.lock().unwrap() = None;
+    }
+
+    pub fn style_sheets(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.files.lock().unwrap().keys().filter(|n| n.ends_with(".css")).cloned().collect();
+        names.sort();
+        names
+    }
+
+    pub fn set_error(&self, message: &str) {
+        *self.last_error.lock().unwrap() = Some(message.to_string());
+    }
+
+    /// Sends a JSON message to every page that is listening.
+    pub fn broadcast(&self, json: &str) {
+        let mut clients = self.clients.lock().unwrap();
+        let line = format!("data: {json}\n\n");
+        clients.retain_mut(|c| c.write_all(line.as_bytes()).and_then(|()| c.flush()).is_ok());
+    }
+
+    pub fn broadcast_error(&self, message: &str) {
+        self.set_error(message);
+        self.broadcast(&format!("{{\"type\":\"error\",\"message\":{}}}", crate::loader::quote(message)));
+    }
+}
+
+/// Binds the address and serves in the background. Returns the port.
+pub fn start(state: Arc<ServeState>, host: &str, port: u16) -> std::io::Result<u16> {
+    let listener = TcpListener::bind((host, port))?;
+    let port = listener.local_addr()?.port();
+    let loopback = listener.local_addr()?.ip().is_loopback();
+    *state.exposed.lock().unwrap() = !loopback;
+    *state.bound_host.lock().unwrap() = host.to_string();
+    if let Some(plugins) = &state.host {
+        let sink_state = state.clone();
+        plugins.set_page_sink(Some(Arc::new(move |payload: &str| sink_state.broadcast(payload))));
+        if let Ok(has) = plugins.configure_server(port, host) {
+            *state.middlewares.lock().unwrap() = has;
+        }
+    }
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let state = state.clone();
+            std::thread::spawn(move || {
+                let _ = handle(stream, &state);
+            });
+        }
+    });
+    Ok(port)
+}
+
+struct Request {
+    method: String,
+    target: String,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut line = String::new();
+    if reader.read_line(&mut line)? == 0 {
+        return Ok(None);
+    }
+    let mut parts = line.split_whitespace();
+    let (Some(method), Some(target)) = (parts.next(), parts.next()) else { return Ok(None) };
+    let (method, target) = (method.to_string(), target.to_string());
+    let mut headers = Vec::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            break;
+        }
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() {
+            break;
+        }
+        if let Some((k, v)) = trimmed.split_once(':') {
+            headers.push((k.trim().to_ascii_lowercase(), v.trim().to_string()));
+        }
+    }
+    let length = headers.iter().find(|(k, _)| k == "content-length").and_then(|(_, v)| v.parse::<usize>().ok()).unwrap_or(0).min(16 << 20);
+    let mut body = vec![0u8; length];
+    reader.read_exact(&mut body)?;
+    Ok(Some(Request { method, target, headers, body }))
+}
+
+fn respond(stream: &mut TcpStream, status: u16, headers: &[(String, String)], body: &[u8]) -> std::io::Result<()> {
+    let reason = match status {
+        200 => "OK",
+        204 => "No Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        304 => "Not Modified",
+        400 => "Bad Request",
+        403 => "Forbidden",
+        404 => "Not Found",
+        500 => "Internal Server Error",
+        _ => "OK",
+    };
+    let mut head = format!("HTTP/1.1 {status} {reason}\r\n");
+    for (k, v) in headers {
+        if !k.eq_ignore_ascii_case("content-length") && !k.eq_ignore_ascii_case("transfer-encoding") && !k.eq_ignore_ascii_case("connection") {
+            head.push_str(&format!("{k}: {v}\r\n"));
+        }
+    }
+    head.push_str(&format!("content-length: {}\r\nconnection: close\r\n\r\n", body.len()));
+    stream.write_all(head.as_bytes())?;
+    stream.write_all(body)?;
+    stream.flush()
+}
+
+fn content_type(name: &str) -> &'static str {
+    match name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).as_deref() {
+        Some("html" | "htm") => "text/html; charset=utf-8",
+        Some("js" | "mjs") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("json" | "map") => "application/json; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("ico") => "image/x-icon",
+        Some("woff") => "font/woff",
+        Some("woff2") => "font/woff2",
+        Some("ttf") => "font/ttf",
+        Some("wasm") => "application/wasm",
+        Some("txt") => "text/plain; charset=utf-8",
+        Some("mp4") => "video/mp4",
+        Some("webm") => "video/webm",
+        _ => "application/octet-stream",
+    }
+}
+
+/// A path below `base`, or none if it climbs out or names a hidden file.
+fn safe_join(base: &Path, url_path: &str) -> Option<PathBuf> {
+    let decoded = percent_decode(url_path);
+    let mut out = base.to_path_buf();
+    for part in decoded.split('/').filter(|p| !p.is_empty()) {
+        if part == ".." || part.starts_with('.') || part.contains('\\') || part.contains('\0') {
+            return None;
+        }
+        out.push(part);
+    }
+    Some(out)
+}
+
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(v) = u8::from_str_radix(&text[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Keeps other web sites from using the server through the visitor's browser: the `Host` must be an address or a
+/// local name (DNS rebinding comes with a foreign name), and a request that names an `Origin` must come from this server.
+fn check_origin(request: &Request, state: &ServeState) -> Result<(), &'static str> {
+    let header = |name: &str| request.headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
+    let host_of = |value: &str| -> String {
+        let value = value.trim();
+        match value.strip_prefix('[') {
+            Some(rest) => format!("[{}", rest.split(']').next().unwrap_or("")) + "]",
+            None => value.rsplit_once(':').map_or(value, |(h, p)| if p.chars().all(|c| c.is_ascii_digit()) { h } else { value }).to_string(),
+        }
+    };
+    if let Some(host) = header("host") {
+        let name = host_of(host).to_ascii_lowercase();
+        let bound = state.bound_host.lock().unwrap().to_ascii_lowercase();
+        let is_address = name.parse::<std::net::IpAddr>().is_ok() || (name.starts_with('[') && name.ends_with(']'));
+        let local = name == "localhost" || name.ends_with(".localhost");
+        if !(is_address || local || name == bound) {
+            return Err("Blocked: unexpected Host header");
+        }
+        if let Some(origin) = header("origin") {
+            let origin_host = origin.split("://").nth(1).unwrap_or("");
+            if origin != "null" && !origin_host.eq_ignore_ascii_case(host.trim()) {
+                return Err("Blocked: cross-origin request");
+            }
+            if origin == "null" {
+                return Err("Blocked: cross-origin request");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn handle(mut stream: TcpStream, state: &Arc<ServeState>) -> std::io::Result<()> {
+    let Some(request) = read_request(&mut stream)? else { return Ok(()) };
+    if let Err(reason) = check_origin(&request, state) {
+        return respond(&mut stream, 403, &[], reason.as_bytes());
+    }
+    let (path, _query) = request.target.split_once('?').map_or((request.target.as_str(), ""), |(p, q)| (p, q));
+    match path {
+        "/__rathkit/client.js" => return respond(&mut stream, 200, &[("content-type".into(), "text/javascript; charset=utf-8".into()), ("cache-control".into(), "no-store".into())], CLIENT.as_bytes()),
+        "/__rathkit/events" => {
+            // A page that stops reading must not hold up every broadcast.
+            stream.set_write_timeout(Some(std::time::Duration::from_secs(2)))?;
+            stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: keep-alive\r\n\r\n")?;
+            let first = match state.last_error.lock().unwrap().clone() {
+                Some(message) => format!("data: {{\"type\":\"connected\"}}\n\ndata: {{\"type\":\"error\",\"message\":{}}}\n\n", crate::loader::quote(&message)),
+                None => "data: {\"type\":\"connected\"}\n\n".to_string(),
+            };
+            stream.write_all(first.as_bytes())?;
+            stream.flush()?;
+            state.clients.lock().unwrap().push(stream);
+            return Ok(());
+        }
+        "/__rathkit/send" if request.method == "POST" => {
+            if let Some(host) = &state.host {
+                let _ = host.page_message(&String::from_utf8_lossy(&request.body));
+            }
+            return respond(&mut stream, 204, &[], b"");
+        }
+        _ => {}
+    }
+    // Plugins' middlewares come first, as in Vite.
+    if *state.middlewares.lock().unwrap() {
+        if let Some(host) = &state.host {
+            if let Ok(Some((status, headers, body))) = host.serve_request(&request.method, &request.target, &request.headers, &request.body) {
+                return respond(&mut stream, status, &headers, &body);
+            }
+        }
+    }
+    if request.method != "GET" && request.method != "HEAD" {
+        return respond(&mut stream, 404, &[], b"Not found");
+    }
+    let name = path.trim_start_matches('/');
+    // An output file.
+    if let Some(bytes) = state.files.lock().unwrap().get(name).cloned() {
+        return respond(&mut stream, 200, &[("content-type".into(), content_type(name).into()), ("cache-control".into(), "no-store".into())], &bytes);
+    }
+    // A page: the project's own, or one made for the entries.
+    let is_page = name.is_empty() || name.ends_with('/') || name.ends_with(".html");
+    if is_page {
+        let file = if name.is_empty() || name.ends_with('/') { format!("{name}index.html") } else { name.to_string() };
+        let html = match safe_join(&state.cwd, &file).and_then(|p| std::fs::read_to_string(p).ok()) {
+            Some(text) => text,
+            None if name.is_empty() => default_page(state),
+            None => return respond(&mut stream, 404, &[], b"Not found"),
+        };
+        let html = match &state.host {
+            Some(host) => host.transform_index_html(&html, path).unwrap_or(html),
+            None => html,
+        };
+        let page = prepare_page(&html, state);
+        return respond(&mut stream, 200, &[("content-type".into(), "text/html; charset=utf-8".into()), ("cache-control".into(), "no-store".into())], page.as_bytes());
+    }
+    // Files from `public/`, then from the project.
+    let exposed = *state.exposed.lock().unwrap();
+    let bases: Vec<PathBuf> = if exposed { vec![state.cwd.join("public")] } else { vec![state.cwd.join("public"), state.cwd.clone()] };
+    for base in bases {
+        if let Some(file) = safe_join(&base, path) {
+            // Dependencies and the project's own configuration are not for pages.
+            let relative = file.strip_prefix(&state.cwd).unwrap_or(&file).to_string_lossy().into_owned();
+            let private = relative.split('/').any(|part| part == "node_modules") || relative.starts_with("rathkit.config.") || relative == "package.json" || relative == "Cargo.toml";
+            if file.is_file() && !private {
+                if let Ok(bytes) = std::fs::read(&file) {
+                    return respond(&mut stream, 200, &[("content-type".into(), content_type(name).into()), ("cache-control".into(), "no-store".into())], &bytes);
+                }
+            }
+        }
+    }
+    respond(&mut stream, 404, &[], b"Not found")
+}
+
+/// A page for entries that come with none: their script, their style sheets and the reload client.
+fn default_page(state: &ServeState) -> String {
+    let entries = state.entries.lock().unwrap().clone();
+    let mut head = String::from("<meta charset=\"utf-8\">\n");
+    for sheet in state.style_sheets() {
+        head.push_str(&format!("<link rel=\"stylesheet\" href=\"/{sheet}\">\n"));
+    }
+    let mut body = String::from("<div id=\"app\"></div>\n<div id=\"root\"></div>\n");
+    for (_, file) in &entries {
+        if file.ends_with(".js") || file.ends_with(".mjs") {
+            body.push_str(&format!("<script type=\"module\" src=\"/{file}\"></script>\n"));
+        }
+    }
+    format!("<!doctype html>\n<html>\n<head>\n{head}</head>\n<body>\n{body}</body>\n</html>\n")
+}
+
+/// Points an html file's scripts at the built files, and adds the style sheets and the reload client.
+fn prepare_page(html: &str, state: &ServeState) -> String {
+    let entries = state.entries.lock().unwrap().clone();
+    let mut out = html.to_string();
+    // `<script type="module" src="/src/main.ts">` names an entry; the built file replaces it.
+    for (entry, file) in &entries {
+        let relative = entry.strip_prefix(&state.cwd).unwrap_or(entry).to_string_lossy().replace('\\', "/");
+        let relative = relative.trim_start_matches("./").to_string();
+        for needle in [format!("/{relative}"), format!("./{relative}"), relative.clone()] {
+            for quote in ['"', '\''] {
+                out = out.replace(&format!("src={quote}{needle}{quote}"), &format!("src={quote}/{file}{quote}"));
+            }
+        }
+    }
+    let mut extra = String::new();
+    for sheet in state.style_sheets() {
+        if !out.contains(&format!("/{sheet}")) {
+            extra.push_str(&format!("<link rel=\"stylesheet\" href=\"/{sheet}\">\n"));
+        }
+    }
+    extra.push_str("<script type=\"module\" src=\"/__rathkit/client.js\"></script>\n");
+    match out.to_ascii_lowercase().find("</head>") {
+        Some(at) => out.insert_str(at, &extra),
+        None => out = format!("{extra}{out}"),
+    }
+    out
+}

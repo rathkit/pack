@@ -23,3 +23,4 @@ pub mod shake;
 pub mod tsconfig;
 pub mod bundle;
 pub mod plugins;
+pub mod serve;
