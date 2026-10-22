@@ -6,3 +6,5 @@ pub mod dump;
 pub mod fxhash;
 pub mod parser;
 pub mod semantic;
+pub mod json;
+pub mod resolve;
