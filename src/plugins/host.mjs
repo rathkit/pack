@@ -11,6 +11,14 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 import * as nodeModule from 'node:module';
 
 const { createRequire } = nodeModule;
+
+// Node 24 is the oldest release this host supports (`module.registerHooks`, `require()` of ES modules, and the
+// rest of what plugins now expect are all there). A clear message beats a failure somewhere inside a plugin.
+const MINIMUM_NODE = 24;
+if (Number(process.versions.node.split('.')[0]) < MINIMUM_NODE) {
+  process.stderr.write(`error: plugins need Node.js ${MINIMUM_NODE} or later, and this is ${process.version}. Install a newer Node, or set RATHKIT_NODE to one.\n`);
+  process.exit(1);
+}
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';

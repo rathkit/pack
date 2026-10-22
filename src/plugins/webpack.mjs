@@ -1987,50 +1987,18 @@ const installWebpackShims = () => {
   });
   const keyOf = (specifier) => Object.keys(table).find((k) => table[k].match(specifier));
   const missing = (error) => ['ERR_MODULE_NOT_FOUND', 'MODULE_NOT_FOUND', 'ERR_PACKAGE_PATH_NOT_EXPORTED'].includes(error?.code);
-  // `require`: every Node version.
-  const Module = nodeModule.Module ?? nodeModule.default;
-  if (Module && typeof Module._resolveFilename === 'function') {
-    const original = Module._resolveFilename;
-    Module._resolveFilename = function (request, ...rest) {
+  // Resolution is tried as usual; only when the project does not have the package does the stand-in answer.
+  nodeModule.registerHooks({
+    resolve(specifier, context, nextResolve) {
       try {
-        return original.call(this, request, ...rest);
+        return nextResolve(specifier, context);
       } catch (error) {
-        const key = typeof request === 'string' ? keyOf(request) : null;
-        if (key && missing(error)) return files[key];
-        throw error;
+        const key = keyOf(specifier);
+        if (!key || !missing(error)) throw error;
+        // `require` gets a CommonJS file, `import` an ES module.
+        return context.conditions?.includes('require') ? { url: pathToFileURL(files[key]).href, shortCircuit: true, format: 'commonjs' } : { url: urls[key], shortCircuit: true, format: 'module' };
       }
-    };
-  }
-  // `import`: through `registerHooks` (Node 22.15, 23.5), or the older asynchronous hooks (Node 18.19, 20.6).
-  if (typeof nodeModule.registerHooks === 'function') {
-    nodeModule.registerHooks({
-      resolve(specifier, context, nextResolve) {
-        try {
-          return nextResolve(specifier, context);
-        } catch (error) {
-          const key = keyOf(specifier);
-          if (key && missing(error)) return { url: urls[key], shortCircuit: true, format: 'module' };
-          throw error;
-        }
-      },
-    });
-  } else if (typeof nodeModule.register === 'function') {
-    const rules = Object.keys(table).map((k) => [k, k === 'webpack' ? 'prefix' : 'exact']);
-    const source = `
-const rules = ${JSON.stringify(rules)};
-let urls;
-export async function initialize(data) { urls = data.urls; }
-export async function resolve(specifier, context, nextResolve) {
-  try { return await nextResolve(specifier, context); }
-  catch (error) {
-    const hit = rules.find(([name, mode]) => specifier === name || (mode === 'prefix' && specifier.startsWith(name + '/')));
-    if (hit && ['ERR_MODULE_NOT_FOUND', 'MODULE_NOT_FOUND', 'ERR_PACKAGE_PATH_NOT_EXPORTED'].includes(error?.code)) return { url: urls[hit[0]], shortCircuit: true, format: 'module' };
-    throw error;
-  }
-}`;
-    nodeModule.register('data:text/javascript;base64,' + Buffer.from(source).toString('base64'), { parentURL: import.meta.url, data: { urls } });
-  } else {
-    log('warn', `this Node (${process.version}) cannot supply stand-ins for "webpack" or "@parcel/plugin" to \`import\`; a plugin that imports them needs the project to install them`);
-  }
+    },
+  });
   process.on('exit', () => fs.rmSync(dir, { recursive: true, force: true }));
 };

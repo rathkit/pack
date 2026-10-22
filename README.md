@@ -204,10 +204,10 @@ The numbers above were measured on the development machine against its own `node
 
 ## Requirements
 
-Rust (stable) to build. Node.js is needed only when plugins are used (`--config`, `.parcelrc`, `serve` with plugin hooks).
-The plugin suite, `--watch` and `serve` pass on Node 18.20, 20.18, 22.12, 22.14, 22.15 and 26.12. Node 18.19 and 20.6 are the
-oldest releases that can supply the stand-ins for `webpack`, `tapable` and `@parcel/*` that plugins may import without
-installing them (`module.register`); on an older Node everything else works and such a plugin needs those packages installed.
+Rust (stable) to build. Node.js **24 or later** is needed only when plugins are used (`--config`, `.parcelrc`, `serve` with
+plugin hooks); plain builds never start it. An older Node is refused with a message that says so. The plugin suite,
+`--watch` and `serve` are checked on Node 24.0 and 26.12. Plugins may import `webpack`, `tapable`, `webpack-sources` and
+`@parcel/*` without installing them: stand-ins answer when the project has none.
 
 ## Zero dependencies
 
