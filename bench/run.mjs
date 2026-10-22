@@ -46,7 +46,6 @@ const workloads = {
 };
 // three needs a browser to run; the others print something every tool must agree on.
 const runnable = new Set(['ts5', 'react', 'rxjs', 'app1500', 'tsapp500']);
-const only = args.filter((a) => !a.startsWith('--'));
 const externals = [...builtinModules, ...builtinModules.map((m) => 'node:' + m)];
 const NODE_ENV = '"production"';
 
@@ -72,6 +71,8 @@ const tools = {
   },
 };
 const selected = option('--tools', Object.keys(tools).join(',')).split(',');
+// What is left after the options are the workloads to run (all of them when none are named).
+const only = args.filter((a) => !a.startsWith('--'));
 
 for (const need of [existsSync(RK) ? null : `the rathkit-pack binary (cargo build --release, or RATHKIT_PACK_BIN): ${RK}`, existsSync(join(here, 'node_modules')) ? null : 'npm install (in bench/)', existsSync(join(here, 'inputs/generated')) ? null : 'node generate.mjs']) {
   if (need) {
