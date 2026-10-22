@@ -5,8 +5,9 @@
 //! or throw on `undefined`), an assignment, anything not understood. Wrongly keeping code costs
 //! bytes; wrongly dropping it breaks the program.
 //!
-//! Known gaps, all on the safe side: no `/* @__PURE__ */` annotations yet, and a read of a
-//! module-level binding is assumed to be free of the temporal dead zone error.
+//! `/* @__PURE__ */` (or `#__PURE__`) in front of a call or `new` says the author guarantees it does
+//! nothing but make a value, so it is droppable when its arguments are. A known gap, on the safe
+//! side: a read of a module-level binding is assumed to be free of the temporal dead zone error.
 
 use crate::ast::{Ast, BinOp, NodeId, NodeKind, UnaryOp, flags};
 use crate::semantic::Semantic;
@@ -22,6 +23,8 @@ const SAFE_GLOBALS: &[&str] = &[
 ];
 
 pub struct Purity<'a> {
+    /// The module's text, where the `@__PURE__` comments are.
+    pub source: &'a str,
     pub ast: &'a Ast,
     pub semantic: &'a Semantic,
     /// With `--define`: branches that never run do not count.
@@ -124,8 +127,20 @@ impl Purity<'_> {
             },
             NodeKind::Conditional { test, cons, alt } => self.expr_is_pure(test) && self.expr_is_pure(cons) && self.expr_is_pure(alt),
             NodeKind::Sequence(items) => ast.list(items).iter().all(|&e| self.expr_is_pure(e)),
+            // A call the author marked as free of effects: only evaluating its arguments can matter.
+            NodeKind::Call { args, .. } | NodeKind::New { args, .. } => self.is_marked_pure(id) && ast.list(args).iter().all(|&a| self.expr_is_pure(a)),
             _ => false,
         }
+    }
+
+    /// Whether a `/* @__PURE__ */` or `/* #__PURE__ */` comment comes right before the expression
+    /// (with only blanks and opening parentheses between).
+    fn is_marked_pure(&self, id: NodeId) -> bool {
+        let start = self.ast[id].span.start as usize;
+        let before = self.source.get(..start).unwrap_or("").trim_end_matches(|c: char| c.is_whitespace() || c == '(');
+        let Some(body) = before.strip_suffix("*/") else { return false };
+        let Some(open) = body.rfind("/*") else { return false };
+        matches!(body[open + 2..].trim(), "@__PURE__" | "#__PURE__")
     }
 
     fn member_is_pure(&self, member: NodeId) -> bool {
@@ -178,8 +193,18 @@ mod tests {
     fn pure(src: &str) -> bool {
         let parsed = parse(src, ParseOptions::new(true)).unwrap_or_else(|e| panic!("{}: {src}", e.message));
         let NodeKind::Program(body) = parsed.ast[parsed.ast.root].kind else { unreachable!() };
-        let analysis = Purity { ast: &parsed.ast, semantic: &parsed.semantic, defines: None };
+        let analysis = Purity { source: src, ast: &parsed.ast, semantic: &parsed.semantic, defines: None };
         analysis.statement_is_pure(parsed.ast.list(body)[0])
+    }
+
+    #[test]
+    fn marked_calls_are_pure_when_their_arguments_are() {
+        for src in ["const a = /* @__PURE__ */ make(1, 'x');", "const b = /*#__PURE__*/ new Thing([1, 2]);", "const c = /*#__PURE__*/(0, make)(1);", "export default /* @__PURE__ */ factory();"] {
+            assert!(pure(src), "{src}");
+        }
+        for src in ["const a = make(1);", "const b = /* @__PURE__ */ make(effect());", "const c = /* not pure */ make();", "const d = /* @__PURE__ */ make(...args);"] {
+            assert!(!pure(src), "{src}");
+        }
     }
 
     #[test]

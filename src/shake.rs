@@ -54,6 +54,11 @@ pub struct ModuleShake {
     pub parts: Vec<Part>,
     /// Parallel to `parts`: the statement stays.
     pub live: Vec<bool>,
+    /// Module-level symbols that something that stays asks for. A declaration kept for what its
+    /// initializer does, whose name is not here, does not need the name.
+    pub demanded: std::collections::HashSet<SymbolId>,
+    /// `demanded` is complete (tree shaking ran); without it every name must be assumed to be used.
+    pub demand_known: bool,
 }
 
 #[derive(Debug)]
@@ -103,6 +108,9 @@ pub fn shake(graph: &Graph, linked: &Linked) -> Shaken {
         shaker.work.push(Work::AllExports(entry));
     }
     shaker.run();
+    for module in &mut modules {
+        module.demand_known = true;
+    }
     Shaken { modules }
 }
 
@@ -240,6 +248,7 @@ impl Shaker<'_> {
 
     fn use_symbol(&mut self, id: ModuleId, symbol: SymbolId) {
         self.include(id);
+        self.modules[id.index()].demanded.insert(symbol);
         if let Some(binding) = self.linked.binding(id, symbol) {
             self.work.push(Work::Binding(binding.clone()));
             return;
@@ -292,7 +301,7 @@ fn build_parts(graph: &Graph, id: ModuleId) -> ModuleShake {
     use crate::ast::NodeKind;
     let (ast, semantic) = (&parsed.ast, &parsed.semantic);
     let defines = Some(&graph.defines).filter(|d| !d.is_empty());
-    let purity = Purity { ast, semantic, defines };
+    let purity = Purity { source: &module.source, ast, semantic, defines };
     let root = semantic.root_scope();
     let NodeKind::Program(body) = ast[ast.root].kind else { return ModuleShake::default() };
     let mut parts = Vec::new();
@@ -370,7 +379,7 @@ fn build_parts(graph: &Graph, id: ModuleId) -> ModuleShake {
         parts.push(Part { stmt, declares, uses, effects: !purity.statement_is_pure(stmt), default_value });
     }
     let live = vec![false; parts.len()];
-    ModuleShake { included: false, parts, live }
+    ModuleShake { included: false, parts, live, demanded: Default::default(), demand_known: false }
 }
 
 #[cfg(test)]

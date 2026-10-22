@@ -129,6 +129,9 @@ struct Stmt {
     trailer: Vec<Piece>,
     /// Needs a `;` after it when the text does not end with one.
     terminate: bool,
+    /// `const x = f();` kept for the call, with `x` unused: only `f();` is written (the initializer's span, and
+    /// whether it needs parentheses to start a statement).
+    drop_binding: Option<((u32, u32), bool)>,
 }
 
 struct EsmCode {
@@ -1691,6 +1694,8 @@ impl<'a> Scanner<'_, 'a> {
                 }
             } else if form_default {
                 match ast[decl].kind {
+                    // `export default name;` of a binding that stands for itself: nothing to write.
+                    NodeKind::Ident(_) if matches!(self.bundler.graph.module(id).record.export("default").map(|e| &e.source), Some(crate::module::ExportSource::Local(_))) => continue,
                     NodeKind::Function { name: Some(_), .. } => Form::Plain,
                     NodeKind::Function { name: None, .. } if ast[decl].has(flags::DECL) => {
                         let key = Key::Default(id);
@@ -1766,9 +1771,37 @@ impl<'a> Scanner<'_, 'a> {
             let (start, end) = self.span(decl);
             self.add_erasures(start, end);
             let edits = std::mem::take(&mut self.edits);
-            stmts.push(Stmt { start, end, edits, form, shape, declares, trailer, terminate });
+            let drop_binding = self.unused_binding(id, decl, &form, &shape);
+            stmts.push(Stmt { start, end, edits, form, shape, declares, trailer, terminate, drop_binding });
         }
         Code::Esm(EsmCode { stmts, has_tla: self.has_tla, hoistable })
+    }
+
+    /// A top-level `const x = init;` whose statement stays for what `init` does and whose name nothing uses:
+    /// the span of `init` and whether it must be parenthesized to begin a statement.
+    fn unused_binding(&self, id: ModuleId, decl: NodeId, form: &Form, shape: &Shape) -> Option<((u32, u32), bool)> {
+        let ast = self.ast;
+        let (Form::Plain, Shape::Vars(declarators)) = (form, shape) else { return None };
+        let NodeKind::VarDecl { decls, .. } = ast[decl].kind else { return None };
+        let [only] = ast.list(decls) else { return None };
+        let NodeKind::VarDeclarator { target, init: Some(init) } = ast[*only].kind else { return None };
+        let [_] = declarators.as_slice() else { return None };
+        let NodeKind::BindingIdent(_) = ast[target].kind else { return None };
+        let sym = self.semantic.symbol_of(target)?;
+        let symbol = self.semantic.symbol(sym);
+        if symbol.scope != self.semantic.root_scope() || self.semantic.scope(symbol.scope).flags & crate::semantic::scope_flags::HAS_EVAL != 0 || symbol.flags & crate::semantic::symbol_flags::DYNAMIC != 0 {
+            return None;
+        }
+        let shake = &self.bundler.shaken.modules[id.index()];
+        if !shake.demand_known || shake.demanded.contains(&sym) {
+            return None;
+        }
+        let wrap = match ast[init].kind {
+            NodeKind::Object(_) | NodeKind::Class { .. } => true,
+            NodeKind::Function { .. } => !ast[init].has(flags::ARROW),
+            _ => false,
+        };
+        Some((self.span(init), wrap))
     }
 
     /// A CommonJS module: its whole text goes inside a function.
@@ -2559,6 +2592,10 @@ impl Bundler<'_> {
 
     /// One statement as it appears in the output, edits applied and the form written out.
     fn render_stmt(&self, id: ModuleId, stmt: &Stmt, names: &HashMap<Key, String>) -> String {
+        if let Some(((start, end), wrap)) = stmt.drop_binding {
+            let text = self.render(id, start, end, &stmt.edits, names);
+            return if wrap { format!("({text});") } else { format!("{text};") };
+        }
         let text = self.render_stmt_body(id, stmt, names);
         match &stmt.shape {
             Shape::Declared { symbol, needs_var: true } => format!("var {};\n{text}", names[&Key::Symbol(id, *symbol)]),

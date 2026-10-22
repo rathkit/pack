@@ -309,9 +309,18 @@ impl Builder<'_> {
             }
             _ => None,
         };
-        let source = match named {
-            Some(sym) => ExportSource::Local(sym),
-            None => ExportSource::DefaultValue(value),
+        // `export default name;` of a module-level `const`, or of a function, class or import nobody assigns to, is that binding under another name:
+        // no copy of it is needed (`var name_default = name` is what a bundler would otherwise write).
+        let aliased = match self.ast[value].kind {
+            NodeKind::Ident(_) => self.semantic.symbol_of(value).filter(|&sym| {
+                let symbol = self.semantic.symbol(sym);
+                symbol.scope == self.semantic.root_scope() && (symbol.kind == SymbolKind::Const || (symbol.writes == 0 && matches!(symbol.kind, SymbolKind::Function | SymbolKind::LexicalFunction | SymbolKind::Class | SymbolKind::Import)))
+            }),
+            _ => None,
+        };
+        let source = match (named, aliased) {
+            (Some(sym), _) | (None, Some(sym)) => ExportSource::Local(sym),
+            (None, None) => ExportSource::DefaultValue(value),
         };
         self.record.exports.push(ExportEntry { exported: "default".to_string(), source, node });
     }
