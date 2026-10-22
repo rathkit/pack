@@ -115,3 +115,25 @@ function elseAfterGone(a) {
   return r;
 }
 log(elseAfterGone(1), elseAfterGone(0));
+
+// conditions written as expressions, joined returns, typeof comparisons, endless loops
+let calls = [];
+const t = (name, value) => (calls.push(name), value);
+function conds(a, b) {
+  if (a) t('and');
+  if (!a) t('or');
+  if (a) t('then'); else t('else');
+  if (a) { t('block-then') } else { t('block-else') }
+  if (a && b) t('both');
+  if (!(a || b)) t('neither');
+  if (a) b = 1;
+  if (a) return b ? 'x' : 'y'; return 'z';
+}
+log(conds(1, 0), conds(0, 1), calls.join());
+function joined(a, b) { if (a) return 1; else return b ? 2 : 3 }
+log(joined(1, 0), joined(0, 1), joined(0, 0));
+function undef(x) { return [typeof x === 'undefined', typeof x !== 'undefined', typeof x == 'undefined', typeof x != 'undefined', typeof x === 'string'] }
+log(undef(undefined).join(), undef(1).join(), undef('s').join());
+let count = 0;
+while (true) { if (++count > 3) break; }
+log(count, ((count % 3) + 3) % 3, (count, count + 1), -(-count), (count ** 2) ** 2, 2 ** (count ** 2));

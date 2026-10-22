@@ -86,6 +86,9 @@ function token(lines, line, col) {
 function isSyntaxRewrite(g, s) {
   if (["true", "false", "undefined"].includes(s.text)) return ["!", "void", "("].includes(g.text);
   if (g.kind === "num" && s.kind === "num") return true;
+  // `.5` for `0.5`, and an operator for the punctuation it replaces (`)` becomes `?`, `}` becomes `:` or `;`).
+  if (s.kind === "num" && g.text === ".") return true;
+  if (g.kind === "punct" && s.kind === "punct") return true;
   if (s.kind === "punct" && ['"', "'"].includes(s.text)) return g.kind === "id";
   if (s.text === "[") return g.text === ".";
   if (s.text === "{" || s.text === "return") return g.text === "(" || g.kind === "id" || g.kind === "punct";

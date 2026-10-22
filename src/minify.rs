@@ -988,6 +988,78 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
             if rewritten {
                 continue;
             }
+            // `if` written as an expression statement, `typeof x === "undefined"` as `typeof x > "u"`, `while (true)` as `for (;;)`.
+            let sole = |tree: &parser::Parsed, s: NodeId| -> Option<NodeId> {
+                match tree.ast[s].kind {
+                    NodeKind::ExprStmt(e) => Some(e),
+                    NodeKind::Block(list) if tree.ast.list(list).len() == 1 => match tree.ast[tree.ast.list(list)[0]].kind {
+                        NodeKind::ExprStmt(e) => Some(e),
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            };
+            match (&nx.kind, &ny.kind) {
+                (NodeKind::If { test, cons, alt }, NodeKind::ExprStmt(ey)) => match (&b.ast[*ey].kind, alt) {
+                    (NodeKind::Binary { op: crate::ast::BinOp::LogAnd, left, right }, None) => {
+                        if let Some(ce) = sole(&a, *cons) {
+                            stack.push((Side::node(*test), Side::node(*left)));
+                            stack.push((Side::node(ce), Side::node(*right)));
+                            continue;
+                        }
+                    }
+                    (NodeKind::Binary { op: crate::ast::BinOp::LogOr, left, right }, None) => {
+                        if let (Some(ce), NodeKind::Unary { op: crate::ast::UnaryOp::Not, arg }) = (sole(&a, *cons), &a.ast[*test].kind) {
+                            stack.push((Side::node(*arg), Side::node(*left)));
+                            stack.push((Side::node(ce), Side::node(*right)));
+                            continue;
+                        }
+                    }
+                    (NodeKind::Conditional { test: ct, cons: cc, alt: ca_ }, Some(alt)) => {
+                        if let (Some(ce), Some(ae)) = (sole(&a, *cons), sole(&a, *alt)) {
+                            stack.push((Side::node(*test), Side::node(*ct)));
+                            stack.push((Side::node(ce), Side::node(*cc)));
+                            stack.push((Side::node(ae), Side::node(*ca_)));
+                            continue;
+                        }
+                    }
+                    _ => {}
+                },
+                (NodeKind::Binary { op, left, right }, NodeKind::Binary { op: ob, left: lb, right: rb }) => {
+                    use crate::ast::BinOp::*;
+                    let is_undefined_text = matches!(a.ast[*right].kind, NodeKind::Str(t) if a.ast.atom(t) == "undefined") && matches!(b.ast[*rb].kind, NodeKind::Str(t) if b.ast.atom(t) == "u");
+                    if is_undefined_text && matches!(a.ast[*left].kind, NodeKind::Unary { op: crate::ast::UnaryOp::Typeof, .. }) && matches!((op, ob), (StrictEq | Eq, Gt) | (StrictNe | Ne, Lt)) {
+                        stack.push((Side::node(*left), Side::node(*lb)));
+                        continue;
+                    }
+                }
+                // `if (c) return a; else return b;` that stands alone (the body of an `else`) written as `return c ? a : b;`.
+                (NodeKind::If { test, cons, alt: Some(alt) }, NodeKind::Return(Some(joined))) => {
+                    if let NodeKind::Conditional { test: ct, cons: cc, alt: ca_ } = &b.ast[*joined].kind {
+                        let returned = |s: NodeId| -> Option<NodeId> {
+                            match a.ast[s].kind {
+                                NodeKind::Return(Some(arg)) => Some(arg),
+                                NodeKind::Block(list) if a.ast.list(list).len() == 1 => match a.ast[a.ast.list(list)[0]].kind {
+                                    NodeKind::Return(Some(arg)) => Some(arg),
+                                    _ => None,
+                                },
+                                _ => None,
+                            }
+                        };
+                        if let (Some(first), Some(second)) = (returned(*cons), returned(*alt)) {
+                            stack.push((Side::node(*test), Side::node(*ct)));
+                            stack.push((Side::node(first), Side::node(*cc)));
+                            stack.push((Side::node(second), Side::node(*ca_)));
+                            continue;
+                        }
+                    }
+                }
+                (NodeKind::While { test, body }, NodeKind::For { init: None, test: None, update: None, body: bb }) if matches!(a.ast[*test].kind, NodeKind::Bool(true)) => {
+                    stack.push((Side::node(*body), Side::node(*bb)));
+                    continue;
+                }
+                _ => {}
+            }
         }
         if std::mem::discriminant(&nx.kind) != std::mem::discriminant(&ny.kind) {
             return Err(format!("shape differs at {}: {:?} vs {:?}", nx.span.start, nx.kind, ny.kind));
@@ -1064,14 +1136,50 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
             // Statements the minifier removed: `if (false) ...;` without an `else`.
             let mut aligned = Vec::with_capacity(ca.len());
             let mut j = 0;
-            for item in ca {
+            let in_list = matches!(nx.kind, NodeKind::Program(_) | NodeKind::Block(_) | NodeKind::StaticBlock(_) | NodeKind::Case { .. });
+            let mut i = 0;
+            while i < ca.len() {
+                let item = ca[i].clone();
+                i += 1;
                 let removable = item.declarators.is_none() && removable(&a, item.id);
-                if removable && matches!(nx.kind, NodeKind::Program(_) | NodeKind::Block(_) | NodeKind::StaticBlock(_) | NodeKind::Case { .. }) {
+                if removable && in_list {
                     continue;
                 }
                 let Some(other) = cb.get(j) else {
                     return Err(format!("{:?} at {} has more children than the result", nx.kind, nx.span.start));
                 };
+                // `if (c) return a; return b;` and `if (c) return a; else return b;` written as `return c ? a : b;`.
+                if in_list && item.declarators.is_none() {
+                    if let (NodeKind::If { test, cons, alt }, NodeKind::Return(Some(joined))) = (&a.ast[item.id].kind, &b.ast[other.id].kind) {
+                        if let NodeKind::Conditional { test: ct, cons: cc, alt: ca_ } = &b.ast[*joined].kind {
+                            let returned = |s: NodeId| -> Option<NodeId> {
+                                match a.ast[s].kind {
+                                    NodeKind::Return(Some(arg)) => Some(arg),
+                                    NodeKind::Block(list) if a.ast.list(list).len() == 1 => match a.ast[a.ast.list(list)[0]].kind {
+                                        NodeKind::Return(Some(arg)) => Some(arg),
+                                        _ => None,
+                                    },
+                                    _ => None,
+                                }
+                            };
+                            let second = match alt {
+                                Some(alt) => returned(*alt).map(|arg| (arg, 0)),
+                                None => ca.get(i).and_then(|next| match a.ast[next.id].kind {
+                                    NodeKind::Return(Some(arg)) if next.declarators.is_none() => Some((arg, 1)),
+                                    _ => None,
+                                }),
+                            };
+                            if let (Some(first), Some((second, extra))) = (returned(*cons), second) {
+                                aligned.push((Side::node(*test), Side::node(*ct)));
+                                aligned.push((Side::node(first), Side::node(*cc)));
+                                aligned.push((Side::node(second), Side::node(*ca_)));
+                                i += extra;
+                                j += 1;
+                                continue;
+                            }
+                        }
+                    }
+                }
                 aligned.push((item, other.clone()));
                 j += 1;
             }
@@ -1147,13 +1255,41 @@ mod tests {
 
     #[test]
     fn braces_go_unless_an_else_would_move() {
-        assert_eq!(syntax("if (a) { b() } else { c() }"), "if(a)b();else c()");
-        assert_eq!(syntax("if (a) { if (b) c() } else d()"), "if(a){if(b)c()}else d()");
-        assert_eq!(syntax("if (a) { for (;;) { if (b) c() } } else d()"), "if(a){for(;;)if(b)c()}else d()");
+        assert_eq!(syntax("if (a) { b() } else { c() }"), "a?b():c()");
+        assert_eq!(syntax("if (a) { if (b) c() } else d()"), "if(a){b&&c()}else d()");
+        assert_eq!(syntax("if (a) { for (;;) { if (b) c() } } else d()"), "if(a){for(;;)b&&c()}else d()");
         assert_eq!(syntax("if (a) { let x = 1; f(x) }"), "if(a){let x=1;f(x)}");
         assert_eq!(syntax("if (a) { let x = 1 }"), "if(a){let x=1}");
         assert_eq!(syntax("for (;;) { x() }\ny()"), "for(;;)x();y()");
         assert_eq!(syntax("do { x() } while (y)"), "do x();while(y)");
+    }
+
+    #[test]
+    fn conditions_become_expressions() {
+        assert_eq!(syntax("if (a) b(); if (!a) b(); if (a) b(); else c()"), "a&&b();a||b();a?b():c()");
+        assert_eq!(syntax("if (a) { b() } else { c() }"), "a?b():c()");
+        // No shorter, or not the same: left alone.
+        assert_eq!(syntax("if (a || b) c(); if (a) b = 1; if (a) b(), c()"), "if(a||b)c();if(a)b=1;if(a)b(),c()");
+        assert_eq!(syntax("if (a) b(); else if (c) d()"), "if(a)b();else c&&d()");
+    }
+
+    #[test]
+    fn returns_join() {
+        assert_eq!(syntax("function f() { if (a) return 1; return 2 }"), "function f(){return a?1:2}");
+        assert_eq!(syntax("function f() { if (a) { return 1 } else { return 2 } }"), "function f(){return a?1:2}");
+        assert_eq!(syntax("function f() { if (a) return 1; return }"), "function f(){if(a)return 1;return}");
+    }
+
+    #[test]
+    fn typeof_undefined_is_compared_by_order() {
+        assert_eq!(syntax("x = typeof a === 'undefined'; y = typeof b != \"undefined\"; z = typeof c === 'string'"), "x=typeof a>\"u\";y=typeof b<\"u\";z=typeof c==='string'");
+    }
+
+    #[test]
+    fn endless_loops_and_parentheses() {
+        assert_eq!(syntax("while (true) { x() }"), "for(;;)x()");
+        assert_eq!(syntax("x = ((a % b) + b) % b; y = (a, b); z = (a && b) || c; w = a && (b || c); v = (-a) ** 2; u = -(-a)"), "x=(a%b+b)%b;y=(a,b);z=a&&b||c;w=a&&(b||c);v=(-a)**2;u=-(-a)");
+        assert_eq!(syntax("a = (b = 1); c = [(d = 2), (e, f)]; (g = 1), (h = 2); new (i.j)(k); new (l())(); (m.n)(); (o?.p)()"), "a=b=1;c=[d=2,(e,f)];g=1,h=2;new i.j(k);new(l());m.n();(o?.p)()");
     }
 
     #[test]
@@ -1184,7 +1320,7 @@ mod tests {
     #[test]
     fn a_line_break_that_stood_for_a_semicolon_survives() {
         assert_eq!(syntax("a = 1\nif (true) b()\nc()"), "a=1;b();c()");
-        assert_eq!(syntax("a = () => { return 1 }\n(b)"), "a=()=>1;(b)");
+        assert_eq!(syntax("a = () => { return 1 }\n(b)"), "a=()=>1;b");
     }
 
     fn spaces(source: &str) -> String {
