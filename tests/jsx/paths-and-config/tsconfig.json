@@ -1,0 +1,11 @@
+{
+  // Aliases and JSX settings, with a comment and a trailing comma.
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "baseUrl": ".",
+    "paths": {
+      "@components/*": ["src/components/*"],
+      "@lib": ["src/lib/index.ts"],
+    },
+  },
+}

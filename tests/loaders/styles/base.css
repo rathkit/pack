@@ -1,0 +1,3 @@
+/* base */
+@font-face { font-family: X; src: url(f.woff2) format("woff2"); }
+body { margin: 0; background: url("img/logo.png"); }

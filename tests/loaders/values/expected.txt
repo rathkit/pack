@@ -1,0 +1,7 @@
+text true
+base64 true
+empty {}
+file url true
+file copied true
+dataurl true
+binary true 0,1,2,254,255

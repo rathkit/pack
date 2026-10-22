@@ -1,0 +1,7 @@
+__FLAG__=true
+__COUNT__=3
+__TEXT__="hello"
+CONFIG={"name": "c", "list": [1, 2, 3]}
+ROOT=globalThis
+__NOTHING__=undefined
+__NULL__=null

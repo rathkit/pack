@@ -1,0 +1,9 @@
+@import url("https://fonts.example/x.css");
+.a5pdx_card { padding: 1px; animation: a5pdx_fade 1s; }
+.a5pdx_title {  color: blue; }
+.legacy .a5pdx_card:hover { x: 1 }
+@keyframes a5pdx_fade { from { opacity: 0 } }
+/* base */
+@font-face { font-family: X; src: url(./f-gc7othr6.woff2) format("woff2"); }
+body { margin: 0; background: url("./logo-5ozpa2ni.png"); }
+.title { color: red; }

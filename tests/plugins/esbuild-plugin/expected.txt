@@ -1,0 +1,1 @@
+{"mode":"plugin","node":"object"} thing:main.js! plain text from a loader

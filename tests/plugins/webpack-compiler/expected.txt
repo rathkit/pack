@@ -1,0 +1,9 @@
+ignored is empty
+prod fixture jq(x)
+stamp: bundle +optimized
+child says hello
+/*! built by webpack-compiler fixture */
+order ok: true
+emit taps: emit:async,emit:promise
+assets: bundle,child.txt,stamp.txt
+errors: false warnings: false

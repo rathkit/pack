@@ -1,0 +1,4 @@
+.card { padding: 1px; animation: fade 1s; }
+.title { composes: card; color: blue; }
+:global(.legacy) .card:hover { x: 1 }
+@keyframes fade { from { opacity: 0 } }

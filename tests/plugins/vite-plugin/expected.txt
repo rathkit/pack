@@ -1,0 +1,1 @@
+v1 build vite-plugin normal-transformed

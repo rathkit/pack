@@ -1,0 +1,11 @@
+{
+  // The default configuration is what the bundler already does; the plugins here come on top.
+  "extends": "@parcel/config-default",
+  "transformers": { "*.txt": ["./plugins/transformer-upper.mjs"] },
+  "resolvers": ["./plugins/resolver-virtual.mjs", "..."],
+  "validators": { "*.js": ["./plugins/validator-todo.mjs"] },
+  "optimizers": { "*.{js,mjs,cjs}": ["./plugins/optimizer-tag.mjs", "..."] },
+  "compressors": { "*.{js,mjs,cjs}": ["./plugins/compressor-reverse.mjs"] },
+  "runtimes": ["./plugins/runtime-flag.mjs"],
+  "reporters": ["./plugins/reporter-log.mjs", "..."],
+}

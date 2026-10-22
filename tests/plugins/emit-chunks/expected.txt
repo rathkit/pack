@@ -1,0 +1,4 @@
+true true
+hello from main
+hello from worker
+{"seen":{"imports":["node:fs","node:path","shared.js"],"importers":0,"entry":true,"sharedImporters":["main.js","worker.js"],"exports":["greet"]},"worker":{"entry":true,"dynamic":false,"facade":"worker.js","exports":["default"],"modules":["worker.js"]},"chunks":["main.js","shared","worker.mjs"]}

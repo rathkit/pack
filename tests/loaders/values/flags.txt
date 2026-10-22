@@ -1,0 +1,1 @@
+--loader .dat=base64 --loader .dat2=empty --loader .url=dataurl --loader .bin=binary

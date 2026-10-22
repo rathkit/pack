@@ -1,0 +1,3 @@
+.title { composes: surface from "./b.module.css"; composes: pad; color: red; }
+.pad { padding: 0; }
+.also { composes: surface raised from './b.module.css'; }

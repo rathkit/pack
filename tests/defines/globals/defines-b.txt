@@ -1,0 +1,7 @@
+__FLAG__=false
+__COUNT__=-1.5
+__TEXT__='it\'s "quoted"'
+CONFIG={"name": "d", "list": []}
+ROOT=globalThis
+__NOTHING__=undefined
+__NULL__="not null"

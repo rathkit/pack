@@ -1,0 +1,5 @@
+PARCEL SAYS HI! 42 ran
+true
+N chars
+buildStart,buildSuccess bundles: js+size
+validated 2 file(s)
