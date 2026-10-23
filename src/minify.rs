@@ -602,8 +602,15 @@ impl Facts {
                     }
                 }
             }
-            // Most used first; the order they were declared in breaks ties.
-            todo.sort_by_key(|&c| std::cmp::Reverse(uses[c]));
+            // Where every name gets one letter, the order only decides which letter, and the
+            // order they were declared in compresses best: neighbors in the text get neighbors in
+            // the alphabet. Otherwise the most used names get the one-letter names, and the rest
+            // go in declaration order too.
+            if todo.len() > FIRST.len() {
+                let position: HashMap<usize, usize> = todo.iter().enumerate().map(|(i, &c)| (c, i)).collect();
+                todo.sort_by_key(|&c| std::cmp::Reverse(uses[c]));
+                todo[FIRST.len()..].sort_by_key(|c| position[c]);
+            }
             let mut index = 0usize;
             for c in todo {
                 let name = loop {
