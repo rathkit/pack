@@ -1,0 +1,1 @@
+{ "name": "hint", "remotes": { "inner": "internal ./src/container.js" }, "shared": { "react": { "singleton": true, "requiredVersion": "^19.0.0" } } }

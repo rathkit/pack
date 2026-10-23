@@ -135,6 +135,11 @@ pub struct Federation {
     graph_options: Mutex<Option<crate::graph::GraphOptions>>,
     bundle_options: Mutex<Option<crate::bundle::Options>>,
     shaken: Mutex<Vec<(String, String)>>,
+    /// Why a shared package got no copy with only the exports in use, said once the build is done.
+    shaken_skipped: Mutex<Vec<String>>,
+    /// The modules of the application that are containers (remotes written as `internal`).
+    internal: Mutex<Vec<PathBuf>>,
+    plugins: std::sync::atomic::AtomicBool,
     /// The declarations written for the exposed modules by the last run, and whether another run is going.
     types_cache: Mutex<Option<Vec<OutputFile>>>,
     types_running: std::sync::atomic::AtomicBool,
@@ -432,6 +437,9 @@ impl Federation {
             graph_options: Mutex::new(None),
             bundle_options: Mutex::new(None),
             shaken: Mutex::new(Vec::new()),
+            shaken_skipped: Mutex::new(Vec::new()),
+            internal: Mutex::new(Vec::new()),
+            plugins: std::sync::atomic::AtomicBool::new(false),
             types_cache: Mutex::new(None),
             types_running: std::sync::atomic::AtomicBool::new(false),
             types_hook: Mutex::new(None),
@@ -450,6 +458,10 @@ impl Federation {
 
     fn shared_for(&self, specifier: &str) -> Option<&Shared> {
         self.shared.iter().find(|s| s.key == specifier).or_else(|| self.shared.iter().filter(|s| s.key.ends_with('/') && specifier.starts_with(s.key.as_str())).max_by_key(|s| s.key.len()))
+    }
+
+    pub fn internal_paths(&self) -> Vec<PathBuf> {
+        self.internal.lock().expect("internal").clone()
     }
 
     /// The files the bundled copies of shared packages are built from.
@@ -629,6 +641,10 @@ impl Federation {
         let mut shared_lines: Vec<String> = Vec::new();
         let mut shared_used: Vec<String> = Vec::new();
         let reads = self.reads.lock().expect("reads").clone();
+        let needs = self.needs.lock().expect("needs").clone();
+        let has_plugins = self.plugins.load(std::sync::atomic::Ordering::SeqCst);
+        let mut skipped: Vec<String> = Vec::new();
+        let mut internal: Vec<PathBuf> = Vec::new();
         let mut shaken: Vec<(String, String)> = Vec::new();
         let project = std::fs::read_to_string(self.cwd.join("package.json")).ok().and_then(|t| Json::parse(&t).ok());
         let mut register = |item: &Shared, key: &str| {
@@ -667,7 +683,12 @@ impl Federation {
             let config = format!("{{ singleton: {}, requiredVersion: {required}, strictVersion: {}, eager: {}{filters} }}", item.singleton, item.strict_version, item.eager);
             let version_text = version.as_deref().map_or("\"0\"".to_string(), quote);
             // With treeShaking: a second copy that has only the exports the application reads, for others whose needs it covers.
+            let reads_others = needs.get(&format!("shared:{key}")).is_some_and(|n| !n.is_empty());
+            if item.tree_shaking.is_some() && (reads_others || has_plugins) && matches!(reads.get(key), Some((Some(_), true))) {
+                skipped.push(format!("{key}: {}", if reads_others { "it reads other shared packages, which a copy built apart would bundle again" } else { "plugins would see it built twice" }));
+            }
             let shaken = match (&item.tree_shaking, &fallback, reads.get(key)) {
+                _ if reads_others || has_plugins => String::new(),
                 (Some(mode), Some(path), Some((Some(used), true))) if !used.is_empty() => {
                     let list: Vec<&String> = used.iter().collect();
                     let names = list.iter().map(|n| quote(n)).collect::<Vec<_>>().join(", ");
@@ -733,7 +754,12 @@ impl Federation {
             let how = match r.kind.as_str() {
                 "code" => format!("type: \"code\", entry: \"\", load: () => ({})", r.entry),
                 "internal" => match resolve_path(&r.entry) {
-                    Ok((path, _)) => format!("type: \"code\", entry: \"\", load: () => import({})", quote(&path.to_string_lossy())),
+                    Ok((path, _)) => {
+                        // It is read like a bundled copy of a shared package: by the runtime, to give a container.
+                        self.fallbacks.lock().expect("fallbacks").insert(path.clone(), format!("internal:{}", r.name));
+                        internal.push(path.clone());
+                        format!("type: \"code\", entry: \"\", load: () => import({})", quote(&path.to_string_lossy()))
+                    }
                     Err(message) => {
                         problems.push(problem(format!("remote {}: {message}", r.name)));
                         continue;
@@ -754,7 +780,6 @@ impl Federation {
 
         // What `start.js` waits for: the packages and remotes the code imports statically.
         let mut preload = String::new();
-        let needs = self.needs.lock().expect("needs").clone();
         let loaded: BTreeSet<String> = shared_used.iter().map(|k| format!("shared:{k}")).filter(|k| used.contains(k)).collect();
         // A package is loaded after the ones it reads; two that read each other are loaded together.
         let reaches = |from: &str, to: &str| -> bool {
@@ -778,7 +803,17 @@ impl Federation {
             }
         }
         for entry in used.iter().filter(|u| u.starts_with("remote:")) {
-            preload.push_str(&format!("  [{}, () => mf.loadRemote({}).then(rt.moduleValue), []],\n", quote(entry), quote(&entry["remote:".len()..])));
+            let id = &entry["remote:".len()..];
+            // A container that is a module of the application reads shared packages when it runs.
+            let before: Vec<String> = self
+                .remote_for(id)
+                .and_then(|r| needs.get(&format!("internal:{}", r.name)))
+                .into_iter()
+                .flatten()
+                .filter(|d| loaded.contains(*d))
+                .map(|d| quote(d))
+                .collect();
+            preload.push_str(&format!("  [{}, () => mf.loadRemote({}).then(rt.moduleValue), [{}]],\n", quote(entry), quote(id), before.join(", ")));
         }
 
         let scope_list = self.share_scope.iter().map(|s| quote(s)).collect::<Vec<_>>().join(", ");
@@ -807,7 +842,9 @@ impl Federation {
             return Err(problems);
         }
         *self.files.write().expect("files") = Arc::new(files);
+        *self.internal.lock().expect("internal") = internal;
         *self.shaken.lock().expect("shaken") = shaken;
+        *self.shaken_skipped.lock().expect("shaken_skipped") = skipped;
         Ok(())
     }
 
@@ -831,6 +868,7 @@ impl Federation {
         }
         let mut roots: Vec<String> = absolute.iter().enumerate().map(|(i, p)| self.wrap_entry(i, p)).collect();
         roots.push(self.core_path().to_string_lossy().into_owned());
+        self.plugins.store(options.plugins.is_some(), std::sync::atomic::Ordering::SeqCst);
         let mut alone = options.clone();
         alone.federation = None;
         alone.cache = None;
@@ -1060,6 +1098,9 @@ impl Federation {
         if !self.exposes.is_empty() {
             let styles: Vec<(String, Vec<String>)> = self.expose_assets(output).into_iter().filter(|(_, _, _, css)| !css.is_empty()).map(|(e, _, _, css)| (e.key.clone(), css)).collect();
             output.files.push(OutputFile { name: self.filename.clone(), code: self.remote_entry(&core_file, hot, &styles), map: None, data: None });
+        }
+        for reason in self.shaken_skipped.lock().expect("shaken_skipped").iter() {
+            eprintln!("warning: no copy of {reason} was written with only the exports in use; it is shared whole");
         }
         output.files.extend(self.shaken_files());
         let types = self.types_files(repeated);

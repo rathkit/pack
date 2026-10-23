@@ -115,7 +115,10 @@ rathkit-pack bundle src/main.ts --outfile dist/app.mjs
     reloads the pages of hosts that use it.
   - `@module-federation/vite`'s `federation()` is read for its options by default. With `RATHKIT_REAL_FEDERATION_PLUGIN=1`
     the plugin itself is run by the plugin layer, and its remote loads in a host built here.
-  - Not supported: `jsonp` entries, and `treeShaking` for CommonJS packages (they are shared whole).
+  - A package with `treeShaking` is shared whole (with a warning) when it is CommonJS, reads other shared packages, or the
+    config has plugins. `promise`, `var` and `internal` addresses are code from the config, used as written; an `internal`
+    container is loaded before React is chosen, so it reads shared packages in `get`, not as it loads. Not supported:
+    `jsonp` entries. A regular expression in `include` / `exclude` `request` goes as its source, without flags.
 - Tree-shakes at statement level, honoring `"sideEffects": false`.
 - `--define KEY=VALUE` (also `--define:KEY=VALUE`) replaces a global name, a chain such as
   `process.env.NODE_ENV`, or `import.meta.env.X` with a constant, another name or an expression.

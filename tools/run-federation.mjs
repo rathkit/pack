@@ -5,7 +5,7 @@
 // `npm ci --prefix bench`. Without a browser it says so and passes.
 import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, writeFileSync, mkdtempSync, rmSync, cpSync, symlinkSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync, mkdtempSync, rmSync, cpSync, symlinkSync, mkdirSync } from 'node:fs';
 import { join, dirname, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir, homedir } from 'node:os';
@@ -326,6 +326,9 @@ scenario('types: a remote publishes declarations and a host checks its imports a
   const check_types = () => spawnSync('node', [typescript, '-p', hostDir], { encoding: 'utf8' });
   const good = check_types();
   check('code that uses the remote correctly passes the type check', good.status === 0, good.stdout);
+  // The same under node16 / nodenext resolution, which looks at the `exports` of the package that stands for the remote.
+  const nodenext = spawnSync('node', [typescript, '-p', hostDir, '--module', 'nodenext', '--moduleResolution', 'nodenext'], { encoding: 'utf8' });
+  check('and under nodenext resolution', nodenext.status === 0, nodenext.stdout);
   const source = join(hostDir, 'src', 'index.ts');
   writeFileSync(source, readFileSync(source, 'utf8').replace("size: version", "size: 'big'"));
   const bad = check_types();
@@ -408,6 +411,25 @@ scenario('a shared package written with only the exports the application reads (
   } finally {
     page.close();
   }
+});
+
+scenario('treeShaking of a package that reads another shared package: it is shared whole, and they share one React', async () => {
+  const dir = copy('host-shake-react', 'host-shake-react', false);
+  mkdirSync(join(dir, 'node_modules'));
+  symlinkSync(join(bench, 'node_modules', 'react'), join(dir, 'node_modules', 'react'), 'dir');
+  cpSync(join(dir, 'ui-lib'), join(dir, 'node_modules', 'ui-lib'), { recursive: true });
+  const host = await build('host-shake-react', { links: false });
+  check('no copy with only some exports is written, since it would bundle its own React', !readdirSync(host).some((f) => f.startsWith('shaken-')), readdirSync(host).join(','));
+  serve(4340, host);
+  const r = await visit('http://localhost:4340/');
+  check('the package uses the host\'s React', r.title === 'done' && /lib 19\.3\.1 same=true/.test(r.text ?? ''), JSON.stringify(r));
+});
+
+scenario('a remote that is a module of the application (internal), imported statically and with import()', async () => {
+  const host = await build('host-internal');
+  serve(4350, host);
+  const r = await visit('http://localhost:4350/');
+  check('it loads, with the application\'s React', r.title === 'done' && /internal thing 19\.3\.1 \| internal-label \| dyn:internal thing 19\.3\.1/.test(r.text ?? ''), JSON.stringify(r));
 });
 
 scenario('an application that is also a remote: code the entry and an exposed module share reads a shared package as it loads', async () => {

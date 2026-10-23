@@ -180,12 +180,14 @@ function linkModules(modules) {
     }
     fs.rmSync(folder, { recursive: true, force: true });
     fs.mkdirSync(folder, { recursive: true });
-    fs.writeFileSync(marker, JSON.stringify({ name, private: true, 'rathkit-types': true }, null, 2) + '\n');
+    // `exports` so that node16 / nodenext resolution, which needs it for `remote/Button`, finds the files too.
+    fs.writeFileSync(marker, JSON.stringify({ name, private: true, 'rathkit-types': true, type: 'module', exports: { './*': { types: './*.d.ts' } } }, null, 2) + '\n');
     for (const [expose, { file, hasDefault }] of Object.entries(entries)) {
       const target = path.join(folder, `${expose}.d.ts`);
       fs.mkdirSync(path.dirname(target), { recursive: true });
       const from = path.relative(path.dirname(target), file).split(path.sep).join('/');
-      const spec = JSON.stringify(from.startsWith('.') ? from : './' + from);
+      // With the `.js` that an ES module's import has under node16 / nodenext (it names the .d.ts all the same).
+      const spec = JSON.stringify((from.startsWith('.') ? from : './' + from) + '.js');
       fs.writeFileSync(target, `export * from ${spec};\n${hasDefault ? `export { default } from ${spec};\n` : ''}`);
     }
   }
@@ -214,6 +216,8 @@ async function consume({ remotes, typesFolder = '@mf-types', updateTsConfig = fa
         fs.mkdirSync(path.dirname(target), { recursive: true });
         fs.writeFileSync(target, data);
       }
+      // The declarations are ES modules, whatever the project around them is.
+      fs.writeFileSync(path.join(folder, 'package.json'), JSON.stringify({ private: true, type: 'module' }) + '\n');
       const apis = files.find(([f]) => f === 'apis.d.ts')?.[1].toString() ?? '';
       modules[remote.name] = {};
       for (const [, key, file] of apis.matchAll(/T extends '([^']+)' \? typeof import\('\.\/([^']+)'\)/g)) {

@@ -615,6 +615,9 @@ impl<'a> Bundler<'a> {
             }
             seen
         };
+        let mut fallbacks = fallbacks;
+        // A container that is a module of the application is loaded by the runtime too.
+        fallbacks.extend(federation.internal_paths());
         let fallback_ids: Vec<ModuleId> = graph.modules.iter().filter(|m| fallbacks.contains(&m.path)).map(|m| m.id).collect();
         // The runtime and the copies it loads to give a package: they cannot wait for themselves.
         let mut inner = reach(vec![core], false);
@@ -1263,10 +1266,9 @@ impl<'a> Bundler<'a> {
                 bits[index / 64] |= 1 << (index % 64);
                 let module = graph.module(id);
                 for (request, edge) in module.record.requests.iter().zip(&module.edges) {
-                    // `import()` of an ES module starts a root of its own. A module that is not included (a file of
-                    // re-exports) is walked through all the same: what it re-exports may be.
+                    // `import()` of an ES module starts a root of its own.
                     if let Edge::Module(target) = edge {
-                        if !self.starts_chunk(request.kind, *target) {
+                        if !self.starts_chunk(request.kind, *target) && self.included(*target) {
                             stack.push(*target);
                         }
                     }
