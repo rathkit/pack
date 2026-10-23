@@ -118,7 +118,9 @@ const createContext = (plugin, owner = 'build') => {
     emitFile: (file) => {
       if (file.type === 'chunk') {
         // Chunk names are decided now, so `getFileName` and `import.meta.ROLLUP_FILE_URL_` can use them at once.
-        const wanted = path.basename(file.fileName ?? `${file.name ?? path.basename(file.id, path.extname(file.id))}.js`);
+        // A name made from a virtual module's id (`\0virtual:x`) may hold characters a file name cannot, as in Rollup's default sanitizeFileName.
+        const sanitize = (name) => name.replace(/[\u0000-\u001f"#$%&*+,:;<=>?[\]^`{|}\u007f]/g, '_');
+        const wanted = sanitize(path.basename(file.fileName ?? `${file.name ?? path.basename(file.id, path.extname(file.id))}.js`));
         if (file.fileName && wanted !== file.fileName) log('warn', `[${plugin.name}] the chunk file name ${file.fileName} is written as ${wanted}: chunks are written flat`);
         let fileName = wanted;
         for (let n = 2; usedChunkNames.has(fileName); n++) fileName = wanted.replace(/(\.js)?$/, `-${n}$1`);
