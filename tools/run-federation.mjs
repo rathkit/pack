@@ -210,6 +210,23 @@ if (haveRspack) {
     check('and uses the host\'s React', /same=true/.test(r.text ?? '') && !/same=false/.test(r.text ?? ''), r.text);
   });
 
+  scenario('the real Vite federation plugin, run by the plugin layer, makes a remote that a host built here loads', async () => {
+    if (!existsSync(join(bench, 'node_modules', '@module-federation', 'vite'))) return;
+    const dir = copy('vite-remote-plugin');
+    const built = await new Promise((resolve) => {
+      const child = spawn(bin, ['bundle', 'src/main.js', '--outdir', 'dist', '--splitting', '--define', 'process.env.NODE_ENV="production"'], { cwd: dir, env: { ...process.env, RATHKIT_REAL_FEDERATION_PLUGIN: '1' } });
+      let output = '';
+      child.stdout.on('data', (d) => (output += d));
+      child.stderr.on('data', (d) => (output += d));
+      child.on('close', (status) => resolve({ status, output }));
+    });
+    check('it builds without waiting for modules that never come', built.status === 0 && !/moduleParseIdleTimeout|NUL byte/.test(built.output), built.output);
+    serve(4290, join(dir, 'dist'));
+    serve(4291, await build('host-vite'));
+    const r = await visit('http://localhost:4291/');
+    check('its container is loaded and its module runs', r.title === 'done' && /vite button 19\.3\.1/.test(r.text ?? '') && /vite-label/.test(r.text ?? ''), JSON.stringify(r));
+  });
+
   scenario('a host built by rathkit-pack loads a remote built by Vite with its federation plugin', async () => {
     const viteBin = join(bench, 'node_modules', 'vite', 'bin', 'vite.js');
     if (!existsSync(viteBin) || !existsSync(join(bench, 'node_modules', '@module-federation', 'vite'))) {
@@ -232,6 +249,27 @@ if (haveRspack) {
     check('the Vite remote\'s module runs, by static import and import()', /vite button 19\.3\.1/.test(r.text ?? '') && /vite-label/.test(r.text ?? '') && /dyn:vite button/.test(r.text ?? ''), r.text);
     check('with the host\'s React', /same=true/.test(r.text ?? '') && !/same=false/.test(r.text ?? ''), r.text);
     check('no errors', !r.logs.some((l) => /EXCEPTION/.test(l)), r.logs.join('\n'));
+  });
+
+  scenario('a host built by Vite with its federation plugin loads a remote built by rathkit-pack', async () => {
+    const viteBin = join(bench, 'node_modules', 'vite', 'bin', 'vite.js');
+    if (!existsSync(viteBin) || !existsSync(join(bench, 'node_modules', '@module-federation', 'vite'))) return;
+    const remote = await build('remote');
+    const dir = copy('vite-host');
+    const built = await new Promise((resolve) => {
+      const child = spawn('node', [viteBin, 'build'], { cwd: dir });
+      let output = '';
+      child.stdout.on('data', (d) => (output += d));
+      child.stderr.on('data', (d) => (output += d));
+      child.on('close', (status) => resolve({ status, output }));
+    });
+    if (built.status !== 0) throw new Error(`vite: ${built.output}`);
+    serve(4210, remote);
+    serve(4301, join(dir, 'dist'));
+    const r = await visit('http://localhost:4301/');
+    check('page finished', r.title === 'done', JSON.stringify(r));
+    check('our module runs in their host', /button 19\.3\.1/.test(r.text ?? '') && /remote-label/.test(r.text ?? ''), r.text);
+    check('with their React', /same=true/.test(r.text ?? '') && !/same=false/.test(r.text ?? ''), r.text);
   });
 
   scenario('a host built by rspack loads a remote built by rathkit-pack', async () => {

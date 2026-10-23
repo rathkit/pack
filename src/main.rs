@@ -1140,7 +1140,13 @@ fn run_build(job: &Job) -> Outcome {
     };
     if status == ExitCode::SUCCESS {
         if let Some(host) = plugin_host {
-            let dir = std::env::current_dir().ok().map(|c| c.to_string_lossy().into_owned());
+            // `writeBundle` says where the files are: the output folder, which plugins read the files back from.
+            let dir = match (outdir, outfile) {
+                (Some(dir), _) => Some(std::path::absolute(dir).unwrap_or_else(|_| dir.into())),
+                (None, Some(file)) => std::path::Path::new(file).parent().map(|p| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf())),
+                _ => std::env::current_dir().ok(),
+            };
+            let dir = dir.map(|d| d.to_string_lossy().into_owned());
             if let Err(message) = host.write_bundle(&written_names, format, dir.as_deref()) {
                 eprintln!("error: {message}");
             }

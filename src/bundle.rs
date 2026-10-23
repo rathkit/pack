@@ -1197,9 +1197,10 @@ impl<'a> Bundler<'a> {
                 bits[index / 64] |= 1 << (index % 64);
                 let module = graph.module(id);
                 for (request, edge) in module.record.requests.iter().zip(&module.edges) {
-                    // `import()` of an ES module starts a root of its own.
+                    // `import()` of an ES module starts a root of its own. A module that is not included (a file of
+                    // re-exports) is walked through all the same: what it re-exports may be.
                     if let Edge::Module(target) = edge {
-                        if !self.starts_chunk(request.kind, *target) && self.included(*target) {
+                        if !self.starts_chunk(request.kind, *target) {
                             stack.push(*target);
                         }
                     }
@@ -1245,7 +1246,11 @@ impl<'a> Bundler<'a> {
         let entry_count = graph.entries.len();
         let order_of_root: HashMap<ModuleId, usize> = roots.iter().enumerate().map(|(i, &r)| (r, i)).collect();
         for chunk in chunks.iter_mut() {
-            let stem = |id: ModuleId| graph.module(id).path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "chunk".to_string());
+            // A virtual module's id (`\0virtual:x`) is not a file name; characters a file name cannot hold are replaced.
+            let stem = |id: ModuleId| {
+                let name = graph.module(id).path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "chunk".to_string());
+                name.chars().map(|c| if c.is_control() || "\"#$%&*+,:;<=>?[]^`{|}\\/".contains(c) { '_' } else { c }).collect::<String>()
+            };
             let mut hash: u64 = 0xcbf29ce484222325;
             let hashed: Vec<ModuleId> = if chunk.modules.is_empty() { chunk.roots.clone() } else { chunk.modules.clone() };
             for id in &hashed {
@@ -1375,7 +1380,7 @@ impl<'a> Bundler<'a> {
                         sources.push(id);
                         for (request, edge) in graph.module(id).record.requests.iter().zip(&graph.module(id).edges) {
                             if let Edge::Module(t) = edge {
-                                if !self.starts_chunk(request.kind, *t) && self.included(*t) {
+                                if !self.starts_chunk(request.kind, *t) {
                                     stack.push(*t);
                                 }
                             }

@@ -421,6 +421,15 @@ impl PluginHost {
         }))
     }
 
+    /// `moduleParsed`, as soon as one module is read and its imports are known (not when the whole graph is). Plugins
+    /// that wait for every module to be parsed (the federation plugin does, before it writes its own) need it this way.
+    pub fn module_parsed(&self, id: &str, imported: &[String], dynamic: &[String], esm: bool, side_effects: bool) {
+        if !self.has("moduleParsed") {
+            return;
+        }
+        let _ = self.call("moduleParsed", &format!("{{\"id\":{},\"importedIds\":{},\"dynamicallyImportedIds\":{},\"esm\":{esm},\"sideEffects\":{side_effects}}}", quote(id), string_list(imported), string_list(dynamic)));
+    }
+
     pub fn load(&self, id: &str) -> Result<Option<Loaded>, String> {
         if !self.has("load") {
             return Ok(None);

@@ -54,6 +54,8 @@ let configOptions = {};
 const emitted = new Map(); // reference -> { fileName, source, owner }
 const emittedChunks = []; // { reference, id, importer, fileName, owner, resolved }
 const usedChunkNames = new Set();
+/** Modules whose `moduleParsed` has run in this build, as each was read. */
+const parsedEarly = new Set();
 const watchDeps = new Map(); // watched file -> ids of the modules that asked for it
 let watchMode = false;
 const moduleInfo = new Map(); // id -> info
@@ -255,7 +257,7 @@ const viteConfig = () => ({
   mode: cli.mode ?? 'production',
   command: 'build',
   isProduction: (cli.mode ?? 'production') === 'production',
-  base: '/',
+  base: wp.config?.base ?? '/',
   build: { sourcemap: !!cli.sourcemap, minify: !!cli.minify, target: 'esnext', outDir: cli.outdir ?? 'dist', assetsDir: 'assets', lib: false, rollupOptions: {}, ssr: false },
   define: configOptions.define ?? {},
   resolve: { alias: configOptions.alias ?? [], conditions: [], mainFields: [], extensions: ['.mjs', '.js', '.mts', '.ts', '.jsx', '.tsx', '.json'] },
@@ -1001,7 +1003,7 @@ const isWebpackPlugin = (raw) => {
 /** The options of a module federation plugin (webpack's, rspack's or Vite's), which the bundler carries out itself. */
 let federationOptions = null;
 const federationOf = (raw) => {
-  if (!raw || typeof raw !== 'object') return null;
+  if (!raw || typeof raw !== 'object' || process.env.RATHKIT_REAL_FEDERATION_PLUGIN) return null;
   if (raw.__federationOptions) return raw.__federationOptions;
   const options = raw._options;
   if (options && typeof options === 'object' && typeof options.name === 'string' && (raw.constructor?.name === 'ModuleFederationPlugin' || options.exposes || options.remotes || options.shared)) return options;
@@ -1193,7 +1195,19 @@ let lastBundle = {};
 const handlers = {
   init,
 
+  /** One module is read: `moduleParsed` runs now, with what it imports (the importers are known when the graph is). */
+  async moduleParsed({ id, importedIds, dynamicallyImportedIds, esm, sideEffects }) {
+    const resolution = (one) => ({ id: one, external: false, moduleSideEffects: true, meta: moduleInfo.get(one)?.meta ?? {}, syntheticNamedExports: false, attributes: {}, resolvedBy: 'rathkit' });
+    const t = transformCache.get(id);
+    const code = (t && (await t.promise)?.code) ?? (await loadCache.get(id))?.code ?? null;
+    moduleInfoFor(id, { id, code: typeof code === 'string' ? code : null, importedIds, dynamicallyImportedIds, importedIdResolutions: importedIds.map(resolution), dynamicallyImportedIdResolutions: dynamicallyImportedIds.map(resolution), moduleSideEffects: sideEffects, hasDefaultExport: esm ? null : null, isIncluded: true });
+    parsedEarly.add(id);
+    for (const plugin of hooksOf('moduleParsed')) await callHook(plugin, 'moduleParsed', [moduleInfo.get(id)]);
+    return null;
+  },
+
   async buildStart() {
+    parsedEarly.clear();
     // A new build forgets what the last one's own hooks emitted; what its modules emitted stays with their cached results.
     for (const [reference, file] of emitted) if (file.owner === 'build' || file.owner === 'generate') emitted.delete(reference);
     for (let i = emittedChunks.length - 1; i >= 0; i--) if (emittedChunks[i].owner === 'build') emittedChunks.splice(i, 1);
@@ -1254,7 +1268,7 @@ const handlers = {
     }
     for (const id of externals) moduleInfoFor(id, { id, isExternal: true, isEntry: false, importers: modules.filter((m) => m.importedIds.includes(id)).map((m) => m.id), dynamicImporters: modules.filter((m) => m.dynamicallyImportedIds.includes(id)).map((m) => m.id), hasDefaultExport: null });
     if (wp.active) await wpModules(modules);
-    for (const m of modules) for (const plugin of hooksOf('moduleParsed')) await callHook(plugin, 'moduleParsed', [moduleInfo.get(m.id)]);
+    for (const m of modules) if (!parsedEarly.has(m.id)) for (const plugin of hooksOf('moduleParsed')) await callHook(plugin, 'moduleParsed', [moduleInfo.get(m.id)]);
     return null;
   },
 

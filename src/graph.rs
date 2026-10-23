@@ -339,6 +339,26 @@ impl Context<'_> {
                 }
             };
             let processed = self.process(slot, &path);
+            // Plugins hear of a module as soon as it is read, with what it imports.
+            if let (Ok(done), Some(host)) = (&processed, &self.options.plugins) {
+                if host.has("moduleParsed") {
+                    let name = |t: &Target| match t {
+                        Target::Path(p) | Target::Asset(p) => Some(p.to_string_lossy().into_owned()),
+                        Target::External(spec) => Some(spec.clone()),
+                        Target::Unresolved => None,
+                    };
+                    let (mut imported, mut dynamic) = (Vec::new(), Vec::new());
+                    for (request, target) in done.module.record.requests.iter().zip(&done.targets) {
+                        if let Some(id) = name(target) {
+                            let list = if request.kind == RequestKind::Dynamic { &mut dynamic } else { &mut imported };
+                            if !list.contains(&id) {
+                                list.push(id);
+                            }
+                        }
+                    }
+                    host.module_parsed(&done.module.path.to_string_lossy(), &imported, &dynamic, done.module.kind == ModuleKind::Esm, done.module.side_effects);
+                }
+            }
             let mut shared = lock.lock().unwrap();
             match processed {
                 Ok(Processed { mut module, targets, diagnostics }) => {

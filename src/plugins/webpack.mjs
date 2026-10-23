@@ -1983,7 +1983,7 @@ const installWebpackShims = () => {
     '@module-federation/enhanced': { value: { ModuleFederationPlugin }, match: (s) => s === '@module-federation/enhanced' || /^@module-federation\/enhanced\/(webpack|rspack)$/.test(s) },
     '@module-federation/rspack': { value: { ModuleFederationPlugin }, match: (s) => s === '@module-federation/rspack' },
     // The Vite plugin builds its own virtual modules and runtime; here its options are read and the bundler does the work.
-    '@module-federation/vite': { value: { federation: (options) => ({ name: 'rathkit:module-federation', __federationOptions: options }) }, match: (s) => s === '@module-federation/vite', force: true },
+    '@module-federation/vite': { value: { federation: (options) => ({ name: 'rathkit:module-federation', __federationOptions: options }) }, match: (s) => s === '@module-federation/vite', force: !process.env.RATHKIT_REAL_FEDERATION_PLUGIN },
   };
   globalThis.__rathkitShims = Object.fromEntries(Object.entries(table).map(([k, v]) => [k, v.value]));
   const urls = {};
