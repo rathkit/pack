@@ -137,3 +137,15 @@ log(undef(undefined).join(), undef(1).join(), undef('s').join());
 let count = 0;
 while (true) { if (++count > 3) break; }
 log(count, ((count % 3) + 3) % 3, (count, count + 1), -(-count), (count ** 2) ** 2, 2 ** (count ** 2));
+
+// Arrows: one parameter without parentheses, several statements as a sequence.
+{
+  const log = [];
+  const bump = (o) => { o.n = (o.n ?? 0) + 1; log.push(o.n); return o; };
+  const wait = async (v) => { await null; log.push(v); return v * 2; };
+  const spread = (a, ...rest) => { log.push(a); log.push(rest.length); return rest; };
+  const nothing = (o) => { log.push('n'); return undefined; };
+  const object = (v) => { log.push(v); return { v }; };
+  console.log(bump({}), nothing(1), object(7), spread(1, 2, 3), log.join());
+  wait(21).then((r) => console.log('async', r, log.join()));
+}

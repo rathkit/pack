@@ -203,6 +203,11 @@ impl Ctx<'_> {
         if node.has(flags::PARENTHESIZED) {
             self.drop_parens(n);
         }
+        if let NodeKind::Function { params, .. } = node.kind {
+            if node.has(flags::ARROW) {
+                self.arrow_parameter(n, params);
+            }
+        }
         match node.kind {
             NodeKind::Bool(_) if self.parent[n.index()].is_some_and(|p| matches!(ast[p].kind, NodeKind::While { test, .. } if test == n)) => {}
             NodeKind::Bool(value) => {
@@ -895,6 +900,9 @@ impl Ctx<'_> {
     /// `x => { return y; }` is `x => y`.
     fn arrow_expression(&mut self, f: NodeId, body: NodeId) {
         let NodeKind::Block(list) = self.ast[body].kind else { return };
+        if self.ast.list(list).len() > 1 {
+            return self.arrow_sequence(f, body);
+        }
         let [s] = self.ast.list(list) else { return };
         let NodeKind::Return(Some(arg)) = self.ast[*s].kind else { return };
         if self.in_declaration_head(f) {
@@ -921,6 +929,60 @@ impl Ctx<'_> {
         if close >= 1 && self.is(close - 1, Punct::Semi) && close - 1 > ret {
             self.set(close - 1, Action::Skip);
         }
+    }
+
+    /// `=> { a(); b(); return c; }` is `=> (a(), b(), c)`.
+    fn arrow_sequence(&mut self, f: NodeId, body: NodeId) {
+        let ast = self.ast;
+        let NodeKind::Block(list) = ast[body].kind else { return };
+        let items = ast.list(list);
+        let Some((&last, before)) = items.split_last() else { return };
+        let NodeKind::Return(Some(arg)) = ast[last].kind else { return };
+        // `return undefined` loses its value to `return_nothing`, which would leave the sequence unfinished.
+        if self.is_nothing(arg) || self.in_declaration_head(f) {
+            return;
+        }
+        let mut commas = Vec::with_capacity(before.len());
+        for &s in before {
+            if !matches!(ast[s].kind, NodeKind::ExprStmt(_)) || ast[s].has(flags::DIRECTIVE) {
+                return;
+            }
+            // A line break that stood for the `;` has no token to become a comma.
+            match self.semi_of(s) {
+                Some(semi) if self.actions[semi] == Action::Keep => commas.push(semi),
+                _ => return,
+            }
+        }
+        let open = self.first_tok(ast[body].span.start);
+        let close = self.last_tok(ast[body].span.end);
+        let ret = self.first_tok(ast[last].span.start);
+        if !self.is(open, Punct::LBrace) || !self.is(close, Punct::RBrace) || !self.kw(ret, Kw::Return) {
+            return;
+        }
+        self.set_text(open, "(");
+        self.set_text(close, ")");
+        for semi in commas {
+            self.set_text(semi, ",");
+        }
+        self.set(ret, Action::Skip);
+        if close >= 1 && self.is(close - 1, Punct::Semi) && close - 1 > ret {
+            self.set(close - 1, Action::Skip);
+        }
+    }
+
+    /// `(e) => e` is `e => e`.
+    fn arrow_parameter(&mut self, _f: NodeId, params: crate::ast::List) {
+        let ast = self.ast;
+        let [param] = ast.list(params) else { return };
+        if !matches!(ast[*param].kind, NodeKind::BindingIdent(_)) {
+            return;
+        }
+        let name = self.first_tok(ast[*param].span.start);
+        if name == 0 || !self.is(name - 1, Punct::LParen) || !self.is(name + 1, Punct::RParen) || !self.is(name + 2, Punct::Arrow) {
+            return;
+        }
+        self.set(name - 1, Action::Skip);
+        self.set(name + 1, Action::Skip);
     }
 
     /// Whether `n` is inside the head of a `for` loop, where an `in` operator would be taken

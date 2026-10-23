@@ -905,6 +905,18 @@ fn is_undefined(parsed: &parser::Parsed, n: NodeId) -> bool {
     matches!(parsed.ast[n].kind, NodeKind::Ident(a) if parsed.ast.atom(a) == "undefined") && parsed.semantic.symbol_of(n).is_none()
 }
 
+/// The parts of a comma expression, however it is nested.
+fn flatten_sequence(ast: &Ast, e: NodeId, out: &mut Vec<NodeId>) {
+    match ast[e].kind {
+        NodeKind::Sequence(list) => {
+            for &item in ast.list(list) {
+                flatten_sequence(ast, item, out);
+            }
+        }
+        _ => out.push(e),
+    }
+}
+
 fn is_void_zero(ast: &Ast, n: NodeId) -> bool {
     matches!(ast[n].kind, NodeKind::Unary { op: crate::ast::UnaryOp::Void, arg } if matches!(ast[arg].kind, NodeKind::Num(v) if v.get() == 0.0))
 }
@@ -1121,7 +1133,7 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
             _ => {}
         }
         let mut ca = children(&a, &sx, syntax, true);
-        let cb = children(&b, &sy, syntax, false);
+        let mut cb = children(&b, &sy, syntax, false);
         if syntax {
             match (&nx.kind, &ny.kind) {
                 // `=> { return x; }` and `=> x`.
@@ -1133,6 +1145,26 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                                 NodeKind::Return(Some(arg)) => ca.push(Side::node(arg)),
                                 _ => return Err(format!("arrow at {} lost its block", nx.span.start)),
                             },
+                            // `{ a(); return b; }` and `(a(), b)`: the statements become the parts of a sequence.
+                            NodeKind::Block(list) => {
+                                let Some(joined) = cb.pop() else { return Err(format!("arrow at {} lost its body", nx.span.start)) };
+                                let mut from = Vec::new();
+                                for &s in a.ast.list(list) {
+                                    match a.ast[s].kind {
+                                        NodeKind::ExprStmt(e) if !a.ast[s].has(flags::DIRECTIVE) => flatten_sequence(&a.ast, e, &mut from),
+                                        NodeKind::Return(Some(e)) => flatten_sequence(&a.ast, e, &mut from),
+                                        _ => return Err(format!("arrow at {} lost its block", nx.span.start)),
+                                    }
+                                }
+                                let mut to = Vec::new();
+                                flatten_sequence(&b.ast, joined.id, &mut to);
+                                if from.len() != to.len() {
+                                    return Err(format!("arrow at {} has {} parts in its sequence, then {}", nx.span.start, from.len(), to.len()));
+                                }
+                                for (x, y) in from.into_iter().zip(to) {
+                                    stack.push((Side::node(x), Side::node(y)));
+                                }
+                            }
                             _ => return Err(format!("arrow at {} lost its block", nx.span.start)),
                         }
                     }
@@ -1322,6 +1354,18 @@ mod tests {
     fn arrows_with_one_return_take_an_expression() {
         assert_eq!(syntax("f = () => { return 1 }; g = () => { return { a: 1 } }; h = () => { return a, b }"), "f=()=>1;g=()=>({a:1});h=()=>(a,b)");
         assert_eq!(syntax("f = () => { return (a, b) }; g = () => { return undefined }"), "f=()=>(a,b);g=()=>void 0");
+    }
+
+    #[test]
+    fn arrows_with_several_statements_take_a_sequence() {
+        assert_eq!(syntax("f = (e) => { e.x = 1; e.y(2); return e }"), "f=e=>(e.x=1,e.y(2),e)");
+        assert_eq!(syntax("f = async (a) => { await a; g(a); return a + 1 }"), "f=async a=>(await a,g(a),a+1)");
+        // Not with a default, a pattern, a directive, a lost value, or a statement without its own `;`.
+        assert_eq!(syntax("f = (a = 1) => { a(); return a }"), "f=(a=1)=>(a(),a)");
+        assert_eq!(syntax("f = ([a]) => { a(); return a }"), "f=([a])=>(a(),a)");
+        assert_eq!(syntax("f = (a) => { 'use strict'; a(); return a }"), "f=a=>{'use strict';a();return a}");
+        assert_eq!(syntax("f = (a) => { a(); return undefined }"), "f=a=>{a();return}");
+        assert_eq!(syntax("f = (a) => { a()\n return { a } }"), "f=a=>{a();return{a}}");
     }
 
     #[test]

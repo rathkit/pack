@@ -1750,7 +1750,7 @@ impl<'a> Scanner<'_, 'a> {
                 NodeKind::TsEnum { name, .. } | NodeKind::TsNamespace { name, .. } => match self.semantic.symbol_of(name) {
                     Some(symbol) => {
                         let instantiated = !matches!(ast[decl].kind, NodeKind::TsNamespace { .. }) || self.namespace_has_values(decl);
-                        // An enum with the name to itself is written `var E = function (E) {...}({})`, which names it once.
+                        // An enum with the name to itself is written `var E = ((E) => {...})({})`, which names it once.
                         let alone = matches!(ast[decl].kind, NodeKind::TsEnum { .. }) && self.enum_stands_alone(decl);
                         let needs_var = instantiated && !alone && self.semantic.symbol(symbol).kind == SymbolKind::Var;
                         if needs_var {
@@ -3101,7 +3101,7 @@ impl Scanner<'_, '_> {
         !self.shared_names.as_ref().unwrap().contains(&symbol)
     }
 
-    /// `enum E { A = 1, B }` as `(function (E) { E[E["A"] = 1] = "A"; ... })(E || (E = {}));`
+    /// `enum E { A = 1, B }` as `((E) => { E[E["A"] = 1] = "A"; ... })(E || (E = {}));`
     fn ts_enum_edit(&mut self, node: NodeId) {
         let NodeKind::TsEnum { name, members } = self.ast[node].kind else { return };
         let alone = self.enum_stands_alone(node);
@@ -3118,9 +3118,9 @@ impl Scanner<'_, '_> {
             pieces.extend(target.iter().cloned());
             pieces.push(text(";\n"));
         }
-        pieces.push(text(if alone { "function (" } else { "(function (" }));
+        pieces.push(text("(("));
         pieces.extend(target.iter().cloned());
-        pieces.push(text(") {\n"));
+        pieces.push(text(") => {\n"));
         let mut values: HashMap<crate::ast::Atom, EnumValue> = HashMap::new();
         let mut auto: Option<f64> = Some(0.0);
         let mut previous: Option<String> = None;
@@ -3175,7 +3175,7 @@ impl Scanner<'_, '_> {
         if alone {
             pieces.push(text("  return "));
             pieces.extend(target.iter().cloned());
-            pieces.push(text(";\n}({});"));
+            pieces.push(text(";\n})({});"));
         } else {
             pieces.push(text("})("));
             pieces.extend(target.iter().cloned());
