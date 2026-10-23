@@ -72,6 +72,38 @@ rathkit-pack bundle src/main.ts --outfile dist/app.mjs
   reload; `server.ws.send` events reach `import.meta.hot.on`). `import.meta.hot` exists
   (`on`, `off`, `send`, `dispose`, `invalidate`, `data`; `accept` is accepted and unused). Replacing single
   modules in a running page is not possible: the output is one scope-hoisted program, so scripts reload.
+- Module federation: an application offers modules to others (`exposes`), takes modules from other applications
+  (`remotes`), and agrees with them on one copy of each package they have in common (`shared`). The options are
+  those of `ModuleFederationPlugin`; give them as `--federation FILE.json`, as `federation` in `rathkit.config.*`, or
+  by putting the plugin from `@module-federation/enhanced/rspack` / `webpack` (or `federation()` from
+  `@module-federation/vite`) in the config's `plugins`: the plugin is only read for its options, the bundler does the
+  work. It needs the esm format and `--outdir`; the output is split. The runtime that does this is built in
+  (`@module-federation/runtime` and `@module-federation/enhanced/runtime` import it, so there is one instance), and
+  it speaks the container protocol of webpack, rspack and the Vite plugin: a remote built by any of them can be loaded
+  by a host built here and the other way around (tested in a browser in both directions).
+  - `exposes` become chunks that the container (`remoteEntry.js`, or an ES module with `library: { type: "module" }`;
+    `var`, `window`, `self`, `global`, `this`, `assign`, `commonjs`, `umd`) loads on request, and `mf-manifest.json`
+    lists them with the shared packages and their files (`manifest: false` writes none, `manifest.fileName` renames it).
+  - `remotes` take `name@url`, `{ external, shareScope }` and manifest URLs (`.json`); `remoteType: "module"` loads
+    ES module entries. `import x from "remote/Button"`, `require` and `import()` all work, and named imports need no
+    list of exports. A static import of a remote waits for it to load before the importing code runs.
+  - `shared` takes `singleton`, `requiredVersion` (from your `package.json` when not given), `strictVersion`, `eager`,
+    `version`, `shareScope`, `import: false` (only consume), and a key ending in `/` for everything below a package
+    (`lodash-es/`). Every copy on offer is put in the share scope and one is chosen by `shareStrategy`
+    (`version-first`, or `loaded-first`), with npm's version range rules (checked against `semver`).
+  - `runtimePlugins` (`"./plugin.js"` or `["./plugin.js", params]`) run in the runtime with the hooks of the other
+    runtimes: `beforeRequest`, `afterResolve`, `onLoad`, `errorLoadRemote`, `beforeLoadShare`, `resolveShare`,
+    `loadEntry`, `createScript`, `fetch` and more.
+  - `dts`: a remote with TypeScript exposes publishes `@mf-types.zip` (and `@mf-types.d.ts`, the unpacked folder) beside
+    its manifest, written with the project's `typescript`; a host with a `tsconfig.json` reads the zip of each remote
+    that is up and adds one `paths` entry per exposed module to the `tsconfig.json` (left alone when it has comments,
+    with the line to add printed instead). `dts: false`, or `generateTypes` / `consumeTypes` set to `false`, turn
+    either half off.
+  - `serve` does the same in development: the build is in memory, `remoteEntry.js` and the manifest are served to pages
+    of other local dev servers (`--cors-origin ORIGIN` adds other origins), and a change rebuilds the remote and
+    reloads the pages of hosts that use it.
+  - Not supported: the `system` library type, `promise` and `script` forms of a remote's address, `include` / `exclude`
+    on shared packages, and tree-shaken shared packages.
 - Tree-shakes at statement level, honoring `"sideEffects": false`.
 - `--define KEY=VALUE` (also `--define:KEY=VALUE`) replaces a global name, a chain such as
   `process.env.NODE_ENV`, or `import.meta.env.X` with a constant, another name or an expression.
@@ -169,6 +201,9 @@ node tools/run-fixtures.mjs                   # bundle fixtures vs Node
 node tools/run-plugins.mjs                    # Rollup, Vite, esbuild, webpack and Parcel plugins through the host
 node tools/run-watch.mjs                      # --watch: rebuilds, plugin hooks, restart on config change, Ctrl-C
 node tools/run-serve.mjs                      # serve: pages, middlewares, html hooks, css swaps, reloads, errors
+node tools/run-federation.mjs                 # module federation in Chromium: our host and remote, rspack's, dev servers, types
+node tools/test-federation-runtime.mjs        # the federation runtime without a browser
+node tools/diff-semver.mjs                    # the runtime's version ranges vs npm's semver
 node tools/check-estree.mjs DIR...            # the ESTree of every .js file against acorn's (needs acorn; ACORN_DIR)
 node tools/run-loaders.mjs                    # loaders and style sheets (UPDATE_SNAPSHOTS=1 rewrites the CSS snapshots)
 node tools/run-defines.mjs                    # --define vs the values set in Node

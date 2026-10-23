@@ -206,6 +206,8 @@ pub struct Options {
     pub hot: bool,
     /// File names for entries, by position, where the name is not the entry file's own (`foo` or `foo.js`).
     pub entry_names: Vec<Option<String>>,
+    /// Module federation: `import()` of a remote or a shared package asks the runtime.
+    pub federation: Option<std::sync::Arc<crate::federation::Federation>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -222,7 +224,7 @@ pub enum SourceMapMode {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { splitting: false, format: Format::Esm, global_name: None, globals: Vec::new(), original_paths: false, minify: crate::minify::Options::default(), sourcemap: SourceMapMode::None, sources_content: true, map_base: None, file_name: None, hot: false, entry_names: Vec::new() }
+        Options { splitting: false, format: Format::Esm, global_name: None, globals: Vec::new(), original_paths: false, minify: crate::minify::Options::default(), sourcemap: SourceMapMode::None, sources_content: true, map_base: None, file_name: None, hot: false, entry_names: Vec::new(), federation: None }
     }
 }
 
@@ -327,6 +329,7 @@ struct Bundler<'a> {
     original_paths: bool,
     hot: bool,
     entry_names: Vec<Option<String>>,
+    federation: Option<std::sync::Arc<crate::federation::Federation>>,
     format: Format,
     global_name: Option<String>,
     globals: Vec<(String, String)>,
@@ -426,6 +429,7 @@ impl<'a> Bundler<'a> {
             original_paths: false,
             hot: false,
             entry_names: Vec::new(),
+            federation: None,
             format: Format::Esm,
             global_name: None,
             globals: Vec::new(),
@@ -447,6 +451,7 @@ impl<'a> Bundler<'a> {
         self.original_paths = options.original_paths;
         self.entry_names = options.entry_names.clone();
         self.hot = options.hot;
+        self.federation = options.federation.clone();
         self.format = options.format;
         self.splitting = options.splitting && options.format == Format::Esm;
         self.global_name = options.global_name.clone();
@@ -1528,7 +1533,9 @@ impl<'a> Bundler<'a> {
 
     /// The text that stands for `binding`, as seen from code in `from`.
     fn binding_pieces(&mut self, from: Option<ModuleId>, binding: &Binding) -> Vec<Piece> {
-        let flag = if self.node_mode(from) { ", 1)" } else { ")" };
+        // What a federated import reads follows the `__esModule` convention, as the other bundlers read it.
+        let node = self.node_mode(from);
+        let flag_of = |graph: &Graph, module: ModuleId| if node && !graph.module(module).path.starts_with(crate::federation::ROOT) { ", 1)" } else { ")" };
         match binding {
             Binding::Symbol { module, symbol } => {
                 let key = Key::Symbol(*module, *symbol);
@@ -1549,12 +1556,14 @@ impl<'a> Bundler<'a> {
                     self.helpers.to_ns = true;
                     let key = Key::Require(*module);
                     self.register(key.clone(), from);
+                    let flag = flag_of(self.graph, *module);
                     vec![Piece::Text("(__toNs(".into()), Piece::Name(key), Piece::Text(format!("(){flag})"))]
                 }
             }
             Binding::CommonJs { module, name } => {
                 let key = Key::Require(*module);
                 self.register(key.clone(), from);
+                let flag = flag_of(self.graph, *module);
                 match name {
                     ImportName::Named(n) => {
                         let access = if is_identifier_name(n) { format!("().{n})") } else { format!("()[{}])", json_string(n)) };
@@ -1948,6 +1957,21 @@ impl<'a> Scanner<'_, 'a> {
         }
     }
 
+    /// `import("app/Button")` of a remote, or `import("react")` of a shared package: the runtime is asked when it runs.
+    fn federated_import(&mut self, specifier: &str) -> Option<Vec<Piece>> {
+        let federation = self.bundler.federation.clone()?;
+        let export = match federation.dynamic_target(specifier)? {
+            crate::federation::DynamicKind::Remote => "loadRemoteNamespace",
+            crate::federation::DynamicKind::Shared => "loadSharedNamespace",
+        };
+        let graph = self.bundler.graph;
+        let core = graph.modules.iter().find(|m| m.path == federation.core_path())?;
+        let binding = resolve_export(graph, core.id, export)?;
+        let mut pieces = self.bundler.binding_pieces(Some(self.module.id), &binding);
+        pieces.push(Piece::Text(format!("({})", json_string(specifier))));
+        Some(pieces)
+    }
+
     /// The replacement for a `require("x")` or `import("x")` of a bundled module.
     fn load_pieces(&mut self, specifier: &str, kind: RequestKind) -> Option<Vec<Piece>> {
         let module = self.module;
@@ -2179,6 +2203,10 @@ impl<'a> Scanner<'_, 'a> {
             }
             NodeKind::ImportCall { source, options: None } => {
                 if let NodeKind::Str(spec) = ast[source].kind {
+                    if let Some(pieces) = self.federated_import(&ast.atom(spec).to_string()) {
+                        self.push(node, pieces);
+                        return;
+                    }
                     if let Some(pieces) = self.load_pieces(&ast.atom(spec).to_string(), RequestKind::Dynamic) {
                         self.push(node, pieces);
                         return;

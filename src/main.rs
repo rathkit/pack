@@ -536,6 +536,8 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     let mut host_name = String::from("localhost");
     let mut mode = String::new();
     let mut cli_defines: Vec<rathkit_pack::define::Define> = Vec::new();
+    let mut federation_file: Option<String> = None;
+    let mut cors_origins: Vec<String> = Vec::new();
     let mut bundle_options = rathkit_pack::bundle::Options::default();
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -555,6 +557,8 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
             "--tsconfig" => tsconfig_path = it.next().cloned(),
             "--no-tsconfig" => use_tsconfig = false,
             "--splitting" => bundle_options.splitting = true,
+            "--federation" => federation_file = it.next().cloned(),
+            "--cors-origin" => cors_origins.extend(it.next().cloned()),
             "--minify" => {
                 bundle_options.minify.whitespace = true;
                 bundle_options.minify.identifiers = true;
@@ -715,6 +719,39 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
         }
         options.plugins = Some(host.clone());
     }
+    // Module federation: options from a file, or from a plugin in the config.
+    let federation_json = match &federation_file {
+        Some(file) => match std::fs::read_to_string(file).map_err(|e| e.to_string()).and_then(|t| rathkit_pack::json::Json::parse(&t).map_err(|e| e.to_string())) {
+            Ok(json) => Some(json),
+            Err(message) => {
+                eprintln!("error: {file}: {message}");
+                return Done::Exit(ExitCode::FAILURE);
+            }
+        },
+        None => plugin_host.as_ref().and_then(|h| h.info.federation.clone()),
+    };
+    if let Some(json) = &federation_json {
+        match rathkit_pack::federation::Federation::from_json(json, &cwd) {
+            Ok(federation) => {
+                let federation = std::sync::Arc::new(federation);
+                if bundle_options.format != rathkit_pack::bundle::Format::Esm {
+                    eprintln!("error: module federation needs the esm format");
+                    return Done::Exit(ExitCode::FAILURE);
+                }
+                if outdir.is_none() && !serve {
+                    eprintln!("error: module federation writes several files; give --outdir");
+                    return Done::Exit(ExitCode::FAILURE);
+                }
+                bundle_options.splitting = true;
+                bundle_options.federation = Some(federation.clone());
+                options.federation = Some(federation);
+            }
+            Err(message) => {
+                eprintln!("error: module federation: {message}");
+                return Done::Exit(ExitCode::FAILURE);
+            }
+        }
+    }
     if watch {
         // Watching builds again and again: modules whose files did not change are kept between builds.
         options.cache = Some(std::sync::Arc::new(rathkit_pack::graph::ModuleCache::default()));
@@ -730,6 +767,12 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     } else {
         None
     };
+    if let (Some(state), Some(_)) = (&serve_state, &options.federation) {
+        // Pages of other dev servers load this one's files, and listen for its reloads.
+        let mut origins = vec!["local".to_string()];
+        origins.extend(cors_origins.iter().cloned());
+        state.allow_origins(origins);
+    }
     let job = std::sync::Arc::new(Job { cwd, entries, options, bundle_options, treeshake, outfile, outdir, host: plugin_host, config_file, watch, serve: serve_state, bind: (host_name, port), restart_files });
     if let Some(host) = &job.host {
         // Child compilers of webpack plugins build one entry as a script that sets a global.
@@ -840,8 +883,23 @@ fn run_build(job: &Job) -> Outcome {
     let mut entries = job.entries.clone();
     let mut entry_names: Vec<Option<String>> = vec![None; entries.len()];
     let mut seen_chunks: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Some(federation) = &options.federation {
+        federation.read_types();
+    }
     let graph = loop {
-        let graph = build(cwd, &entries, options);
+        let graph = match &options.federation {
+            Some(federation) => match federation.build_graph(cwd, &entries, options) {
+                Ok(graph) => graph,
+                Err(problems) => {
+                    for d in &problems {
+                        eprintln!("error: {}", d.message);
+                    }
+                    outcome.error = Some(problems.iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("\n"));
+                    return outcome;
+                }
+            },
+            None => build(cwd, &entries, options),
+        };
         let Some(host) = plugin_host else { break graph };
         match host.emitted_chunks() {
             Ok(list) => {
@@ -889,6 +947,10 @@ fn run_build(job: &Job) -> Outcome {
             return outcome;
         }
         bundle_options.splitting = true;
+    }
+    if options.federation.is_some() {
+        // The runtime's own entry follows the application's.
+        entry_names.push(None);
     }
     bundle_options.entry_names = entry_names;
     if timing {
@@ -960,7 +1022,12 @@ fn run_build(job: &Job) -> Outcome {
             None => {}
         }
     }
-    let result = rathkit_pack::bundle::bundle(&graph, &linked, &shaken, &bundle_options);
+    let mut result = rathkit_pack::bundle::bundle(&graph, &linked, &shaken, &bundle_options);
+    if let (Ok(output), Some(federation)) = (&mut result, &options.federation) {
+        if let Err(message) = federation.finish(output, bundle_options.hot) {
+            result = Err(vec![rathkit_pack::graph::Diagnostic { severity: Severity::Error, message, file: None, pos: None }]);
+        }
+    }
     if timing {
         eprintln!("  bundle (all chunks): {:.1} ms", bundle_at.elapsed().as_secs_f64() * 1000.0);
     }

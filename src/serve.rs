@@ -30,11 +30,14 @@ pub struct ServeState {
     /// Listening beyond this machine: only `public/` is served from disk, and host names must be addresses.
     exposed: Mutex<bool>,
     bound_host: Mutex<String>,
+    /// Origins other than this server that may read the build (module federation: a page of another
+    /// dev server loads this one's files). `local` stands for any page on this machine.
+    cors: Mutex<Vec<String>>,
 }
 
 impl ServeState {
     pub fn new(cwd: PathBuf, host: Option<Arc<PluginHost>>) -> Arc<ServeState> {
-        Arc::new(ServeState { cwd, host, files: Mutex::new(HashMap::new()), entries: Mutex::new(Vec::new()), clients: Mutex::new(Vec::new()), middlewares: Mutex::new(false), last_error: Mutex::new(None), exposed: Mutex::new(false), bound_host: Mutex::new(String::new()) })
+        Arc::new(ServeState { cwd, host, files: Mutex::new(HashMap::new()), entries: Mutex::new(Vec::new()), clients: Mutex::new(Vec::new()), middlewares: Mutex::new(false), last_error: Mutex::new(None), exposed: Mutex::new(false), bound_host: Mutex::new(String::new()), cors: Mutex::new(Vec::new()) })
     }
 
     /// The finished build: files by name, and which file holds which entry.
@@ -42,6 +45,20 @@ impl ServeState {
         *self.files.lock().unwrap() = files.into_iter().collect();
         *self.entries.lock().unwrap() = entries;
         *self.last_error.lock().unwrap() = None;
+    }
+
+    /// Lets pages from these origins read the built files and listen for reloads.
+    pub fn allow_origins(&self, origins: Vec<String>) {
+        *self.cors.lock().unwrap() = origins;
+    }
+
+    /// The origin to answer with, when the request comes from one that may read the build.
+    fn cors_origin(&self, request: &Request) -> Option<String> {
+        let origin = request.headers.iter().find(|(k, _)| k == "origin").map(|(_, v)| v.clone())?;
+        let allowed = self.cors.lock().unwrap();
+        let host = origin.split("://").nth(1)?.rsplit_once(':').map_or_else(|| origin.split("://").nth(1).unwrap_or(""), |(h, p)| if p.chars().all(|c| c.is_ascii_digit()) { h } else { origin.split("://").nth(1).unwrap_or("") });
+        let local = host == "localhost" || host.ends_with(".localhost") || host == "127.0.0.1" || host == "[::1]";
+        (allowed.iter().any(|o| o == "*" || *o == origin) || (local && allowed.iter().any(|o| o == "local"))).then_some(origin)
     }
 
     pub fn style_sheets(&self) -> Vec<String> {
@@ -227,6 +244,10 @@ fn check_origin(request: &Request, state: &ServeState) -> Result<(), &'static st
             return Err("Blocked: unexpected Host header");
         }
         if let Some(origin) = header("origin") {
+            // A page of another dev server may read what this one built.
+            if matches!(request.method.as_str(), "GET" | "HEAD" | "OPTIONS") && state.cors_origin(request).is_some() {
+                return Ok(());
+            }
             let origin_host = origin.split("://").nth(1).unwrap_or("");
             if origin != "null" && !origin_host.eq_ignore_ascii_case(host.trim()) {
                 return Err("Blocked: cross-origin request");
@@ -245,12 +266,27 @@ fn handle(mut stream: TcpStream, state: &Arc<ServeState>) -> std::io::Result<()>
         return respond(&mut stream, 403, &[], reason.as_bytes());
     }
     let (path, _query) = request.target.split_once('?').map_or((request.target.as_str(), ""), |(p, q)| (p, q));
+    let cors = state.cors_origin(&request);
+    let with_cors = |mut headers: Vec<(String, String)>| {
+        if let Some(origin) = &cors {
+            headers.push(("access-control-allow-origin".into(), origin.clone()));
+            headers.push(("vary".into(), "origin".into()));
+        }
+        headers
+    };
+    if request.method == "OPTIONS" && cors.is_some() {
+        return respond(&mut stream, 204, &with_cors(vec![("access-control-allow-methods".into(), "GET, HEAD, OPTIONS".into()), ("access-control-allow-headers".into(), "*".into()), ("access-control-max-age".into(), "600".into())]), b"");
+    }
     match path {
         "/__rathkit/client.js" => return respond(&mut stream, 200, &[("content-type".into(), "text/javascript; charset=utf-8".into()), ("cache-control".into(), "no-store".into())], CLIENT.as_bytes()),
         "/__rathkit/events" => {
             // A page that stops reading must not hold up every broadcast.
             stream.set_write_timeout(Some(std::time::Duration::from_secs(2)))?;
-            stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: keep-alive\r\n\r\n")?;
+            let allow = match &cors {
+                Some(origin) => format!("access-control-allow-origin: {origin}\r\nvary: origin\r\n"),
+                None => String::new(),
+            };
+            stream.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\n{allow}connection: keep-alive\r\n\r\n").as_bytes())?;
             let first = match state.last_error.lock().unwrap().clone() {
                 Some(message) => format!("data: {{\"type\":\"connected\"}}\n\ndata: {{\"type\":\"error\",\"message\":{}}}\n\n", crate::loader::quote(&message)),
                 None => "data: {\"type\":\"connected\"}\n\n".to_string(),
@@ -282,7 +318,7 @@ fn handle(mut stream: TcpStream, state: &Arc<ServeState>) -> std::io::Result<()>
     let name = path.trim_start_matches('/');
     // An output file.
     if let Some(bytes) = state.files.lock().unwrap().get(name).cloned() {
-        return respond(&mut stream, 200, &[("content-type".into(), content_type(name).into()), ("cache-control".into(), "no-store".into())], &bytes);
+        return respond(&mut stream, 200, &with_cors(vec![("content-type".into(), content_type(name).into()), ("cache-control".into(), "no-store".into())]), &bytes);
     }
     // A page: the project's own, or one made for the entries.
     let is_page = name.is_empty() || name.ends_with('/') || name.ends_with(".html");

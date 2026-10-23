@@ -1534,6 +1534,14 @@ class EntryPlugin {
 
 // ---- the webpack namespace --------------------------------------------------------------------
 
+/** `new ModuleFederationPlugin(options)`: the options are all that matters; module federation is done by the bundler itself. */
+class ModuleFederationPlugin {
+  constructor(options) {
+    this._options = options;
+  }
+  apply() {}
+}
+
 const webpackNamespace = {
   version: '5.99.0',
   WebpackError,
@@ -1565,7 +1573,7 @@ const webpackNamespace = {
   library: { EnableLibraryPlugin: class { apply() {} }, AbstractLibraryPlugin: class {} },
   javascript: { JavascriptModulesPlugin: { getCompilationHooks: (compilation) => (compilation._jsHooks ??= tolerant({ renderManifest: new SyncWaterfallHook(['result', 'options']), render: new SyncWaterfallHook(['source', 'renderContext']), renderMain: new SyncWaterfallHook(['source']), renderChunk: new SyncWaterfallHook(['source']), chunkHash: new SyncHook(['chunk', 'hash', 'context']), embedInRuntimeBailout: new SyncBailHook(['module']) })) }, EnableChunkLoadingPlugin: class { apply() {} } },
   dependencies: { ModuleDependency: class ModuleDependency { constructor(request) { this.request = request; } }, NullDependency: class NullDependency {}, ConstDependency: class ConstDependency {}, HarmonyImportDependency: class HarmonyImportDependency {} },
-  container: {},
+  container: { ModuleFederationPlugin },
   config: { getNormalizedWebpackOptions: (o) => o, applyWebpackOptionsDefaults() {} },
   cache: { MemoryCachePlugin: class { apply() {} } },
   validateSchema: () => {},
@@ -1972,6 +1980,10 @@ const installWebpackShims = () => {
     '@parcel/plugin': { value: parcelPluginShim, match: (s) => s === '@parcel/plugin' },
     '@parcel/utils': { value: parcelUtilsShim, match: (s) => s === '@parcel/utils' },
     '@parcel/diagnostic': { value: parcelDiagnosticShim, match: (s) => s === '@parcel/diagnostic' },
+    '@module-federation/enhanced': { value: { ModuleFederationPlugin }, match: (s) => s === '@module-federation/enhanced' || /^@module-federation\/enhanced\/(webpack|rspack)$/.test(s) },
+    '@module-federation/rspack': { value: { ModuleFederationPlugin }, match: (s) => s === '@module-federation/rspack' },
+    // The Vite plugin builds its own virtual modules and runtime; here its options are read and the bundler does the work.
+    '@module-federation/vite': { value: { federation: (options) => ({ name: 'rathkit:module-federation', __federationOptions: options }) }, match: (s) => s === '@module-federation/vite', force: true },
   };
   globalThis.__rathkitShims = Object.fromEntries(Object.entries(table).map(([k, v]) => [k, v.value]));
   const urls = {};
@@ -1990,6 +2002,8 @@ const installWebpackShims = () => {
   // Resolution is tried as usual; only when the project does not have the package does the stand-in answer.
   nodeModule.registerHooks({
     resolve(specifier, context, nextResolve) {
+      const forced = keyOf(specifier);
+      if (forced && table[forced].force) return context.conditions?.includes('require') ? { url: pathToFileURL(files[forced]).href, shortCircuit: true, format: 'commonjs' } : { url: urls[forced], shortCircuit: true, format: 'module' };
       try {
         return nextResolve(specifier, context);
       } catch (error) {

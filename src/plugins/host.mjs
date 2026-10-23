@@ -996,8 +996,23 @@ const isWebpackPlugin = (raw) => {
   return raw.name === undefined && !HOOKS.some((h) => handlerOf(raw[h]));
 };
 
+/** The options of a module federation plugin (webpack's, rspack's or Vite's), which the bundler carries out itself. */
+let federationOptions = null;
+const federationOf = (raw) => {
+  if (!raw || typeof raw !== 'object') return null;
+  if (raw.__federationOptions) return raw.__federationOptions;
+  const options = raw._options;
+  if (options && typeof options === 'object' && typeof options.name === 'string' && (raw.constructor?.name === 'ModuleFederationPlugin' || options.exposes || options.remotes || options.shared)) return options;
+  return null;
+};
+
 const normalizePlugin = async (raw) => {
   if (!raw || (typeof raw !== 'object' && typeof raw !== 'function')) return [];
+  const federation = federationOf(raw);
+  if (federation) {
+    federationOptions = federation;
+    return [];
+  }
   if (typeof raw === 'object' && typeof raw.setup === 'function' && !HOOKS.some((h) => raw[h])) return [await adaptEsbuild(raw)];
   if (isWebpackPlugin(raw)) {
     // The ones that ship with webpack are done here; the rest apply to the compiler of webpack.mjs.
@@ -1104,7 +1119,10 @@ async function init(params) {
   for (const name of HOOKS) hooks[name] = hooksOf(name).length > 0;
   hooks.transform = hooksOf('transform').length > 0;
   const input = config.input ?? config.build?.rollupOptions?.input ?? config.build?.lib?.entry;
+  federationOptions ??= config.federation ?? config.moduleFederation ?? null;
   return {
+    // Functions and promises cannot be carried out of the host; what is left is plain data.
+    federation: federationOptions ? JSON.parse(JSON.stringify(federationOptions, (key, value) => (typeof value === 'function' || value instanceof Promise ? undefined : value))) : null,
     plugins: plugins.map((p) => p.name ?? 'anonymous'),
     hooks,
     define: Object.entries(configOptions.define).map(([k, v]) => [k, typeof v === 'string' ? v : JSON.stringify(v)]),

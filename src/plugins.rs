@@ -32,6 +32,8 @@ pub struct HostInfo {
     pub define: Vec<(String, String)>,
     /// Entry points the config names (Rollup's `input`).
     pub input: Vec<String>,
+    /// The options of a module federation plugin in the config, as JSON.
+    pub federation: Option<Json>,
 }
 
 /// The command line settings plugins may look at.
@@ -277,6 +279,7 @@ impl PluginHost {
         let strings = |key: &str| -> Vec<String> { result.get(key).and_then(Json::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default() };
         host.info.plugins = strings("plugins");
         host.info.input = strings("input");
+        host.info.federation = result.get("federation").filter(|f| !matches!(f, Json::Null)).cloned();
         if let Some(Json::Object(hooks)) = result.get("hooks") {
             host.info.hooks = hooks.iter().filter(|(_, v)| v.as_bool() == Some(true)).map(|(k, _)| k.clone()).collect();
         }

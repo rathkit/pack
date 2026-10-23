@@ -16,6 +16,59 @@ pub enum Json {
     Object(Vec<(String, Json)>),
 }
 
+impl fmt::Display for Json {
+    /// Compact JSON.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Json::Null => f.write_str("null"),
+            Json::Bool(b) => write!(f, "{b}"),
+            Json::Number(n) if n.is_finite() && n.fract() == 0.0 && n.abs() < 1e15 => write!(f, "{}", *n as i64),
+            Json::Number(n) if n.is_finite() => write!(f, "{n}"),
+            Json::Number(_) => f.write_str("null"),
+            Json::String(s) => write_string(f, s),
+            Json::Array(items) => {
+                f.write_str("[")?;
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(",")?;
+                    }
+                    write!(f, "{item}")?;
+                }
+                f.write_str("]")
+            }
+            Json::Object(entries) => {
+                f.write_str("{")?;
+                for (i, (key, value)) in entries.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(",")?;
+                    }
+                    write_string(f, key)?;
+                    write!(f, ":{value}")?;
+                }
+                f.write_str("}")
+            }
+        }
+    }
+}
+
+fn write_string(f: &mut fmt::Formatter<'_>, text: &str) -> fmt::Result {
+    f.write_str("\"")?;
+    for ch in text.chars() {
+        match ch {
+            '"' => f.write_str("\\\"")?,
+            '\\' => f.write_str("\\\\")?,
+            '\n' => f.write_str("\\n")?,
+            '\r' => f.write_str("\\r")?,
+            '\t' => f.write_str("\\t")?,
+            '\u{2028}' => f.write_str("\\u2028")?,
+            '\u{2029}' => f.write_str("\\u2029")?,
+            c if (c as u32) < 0x20 => write!(f, "\\u{:04x}", c as u32)?,
+            c => write!(f, "{c}")?,
+        }
+    }
+    f.write_str("\"")
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JsonError {
     pub message: &'static str,

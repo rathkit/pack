@@ -1,0 +1,5 @@
+{
+  "name": "ohost",
+  "remotes": { "oapp": "oapp@http://localhost:4210/remoteEntry.js" },
+  "shared": { "react": { "singleton": true, "requiredVersion": "^19.0.0" } }
+}

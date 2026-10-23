@@ -4,6 +4,7 @@
   "type": "module",
   "description": "Other bundlers and the libraries the benchmark bundles; see README.md",
   "dependencies": {
+    "@module-federation/enhanced": "2.9.2",
     "@rspack/cli": "2.2.9",
     "@rspack/core": "2.2.9",
     "esbuild": "0.28.2",
@@ -12,8 +13,10 @@
     "react-dom": "19.3.1",
     "rolldown": "1.2.15",
     "rxjs": "7.8.2",
+    "semver": "7.7.2",
     "three": "0.186.1",
     "ts5": "npm:typescript@5.9.3",
+    "typescript": "5.9.3",
     "vite": "8.3.5"
   }
 }

@@ -191,17 +191,23 @@ pub struct GraphOptions {
     pub threads: usize,
     /// Modules of the previous build to reuse when their files have not changed.
     pub cache: Option<Arc<ModuleCache>>,
+    /// Module federation: remotes and shared packages are not bundled in the usual way.
+    pub federation: Option<Arc<crate::federation::Federation>>,
 }
 
 impl Default for GraphOptions {
     fn default() -> Self {
-        GraphOptions { plugins: None, resolve: ResolveOptions::default(), jsx: JsxOptions::default(), decorator_metadata: false, experimental_decorators: false, strict_null_checks: false, loaders: Vec::new(), asset_names: "[name]-[hash]".to_string(), public_path: "./".to_string(), defines: Default::default(), external: Vec::new(), node_builtins: true, threads: 0, cache: None }
+        GraphOptions { plugins: None, resolve: ResolveOptions::default(), jsx: JsxOptions::default(), decorator_metadata: false, experimental_decorators: false, strict_null_checks: false, loaders: Vec::new(), asset_names: "[name]-[hash]".to_string(), public_path: "./".to_string(), defines: Default::default(), external: Vec::new(), node_builtins: true, threads: 0, cache: None, federation: None }
     }
 }
 
 /// Builds the graph for `entries`, each a path relative to `cwd` or absolute.
 pub fn build(cwd: &Path, entries: &[String], options: &GraphOptions) -> Graph {
-    build_with_fs(Box::new(RealFs), cwd, entries, options)
+    match &options.federation {
+        // The modules the runtime needs exist only in memory, on top of the real files.
+        Some(federation) => build_with_fs(Box::new(crate::federation::Overlay { federation: federation.clone(), inner: Box::new(RealFs) }), cwd, entries, options),
+        None => build_with_fs(Box::new(RealFs), cwd, entries, options),
+    }
 }
 
 pub fn build_with_fs(fs: Box<dyn FileSystem>, cwd: &Path, entries: &[String], options: &GraphOptions) -> Graph {
@@ -637,6 +643,13 @@ impl Context<'_> {
 
     fn resolve_request_inner(&self, dir: &Path, file: &Path, request: &Request, relative_first: bool, diagnostics: &mut Vec<Diagnostic>) -> Target {
         let specifier = request.specifier.as_str();
+        if let Some(federation) = &self.options.federation {
+            match federation.intercept(specifier, request.kind) {
+                Some(crate::federation::Intercept::Module(path)) => return Target::Path(path),
+                Some(crate::federation::Intercept::Dynamic) => return Target::External(specifier.to_string()),
+                None => {}
+            }
+        }
         if self.is_external(specifier) {
             return Target::External(specifier.to_string());
         }

@@ -4,6 +4,7 @@ pub mod define;
 pub mod dump;
 pub mod enums;
 pub mod estree;
+pub mod federation;
 pub mod fxhash;
 pub mod lexer;
 pub mod minify;

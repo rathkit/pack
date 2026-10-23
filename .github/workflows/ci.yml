@@ -47,5 +47,11 @@ jobs:
       - run: node tools/run-watch.mjs
       - run: node tools/run-serve.mjs
       - run: node tools/run-jsx.mjs
+      - run: node tools/test-federation-runtime.mjs
+      - run: node tools/diff-semver.mjs
+      # Module federation in a real browser; the runner has Chrome.
+      - run: node tools/run-federation.mjs
+        env:
+          CHROME: google-chrome
       - run: python3 tools/fuzz-bundle.py --count 300
       - run: node tools/diff-real.mjs "$GITHUB_WORKSPACE/bench"

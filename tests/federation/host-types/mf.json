@@ -1,0 +1,1 @@
+{ "name": "h3", "remotes": { "r3": "r3@http://localhost:4260/remoteEntry.js" } }
