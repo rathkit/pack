@@ -1247,6 +1247,14 @@ impl<'a> Bundler<'a> {
         let mut reach: Vec<Vec<u64>> = vec![vec![0; words]; graph.modules.len()];
         for (index, &root) in roots.iter().enumerate() {
             let mut stack = vec![root];
+            // What the root exports may be declared in a module it reaches only through files of re-exports.
+            if graph.module(root).kind == ModuleKind::Esm {
+                for name in export_names(graph, root) {
+                    if let Some(binding) = resolve_export(graph, root, &name) {
+                        stack.extend(self.binding_module(&binding));
+                    }
+                }
+            }
             while let Some(id) = stack.pop() {
                 let bits = &mut reach[id.index()];
                 if bits[index / 64] >> (index % 64) & 1 == 1 {
@@ -1263,6 +1271,7 @@ impl<'a> Bundler<'a> {
                         }
                     }
                 }
+                stack.extend(self.bound_modules(id));
             }
         }
         let mut by_signature: std::collections::BTreeMap<Vec<u64>, usize> = std::collections::BTreeMap::new();
@@ -1347,6 +1356,21 @@ impl<'a> Bundler<'a> {
             chunk.file = name;
         }
         ChunkPlan { chunks, of_module, root_chunk }
+    }
+
+    /// The module a binding is declared in, if it is one of the bundle's (not an outside module).
+    fn binding_module(&self, binding: &Binding) -> Option<ModuleId> {
+        let module = match binding {
+            Binding::Symbol { module, .. } | Binding::DefaultValue { module, .. } | Binding::CommonJs { module, .. } | Binding::Namespace(module) => *module,
+            Binding::External { .. } => return None,
+        };
+        self.included(module).then_some(module)
+    }
+
+    /// The modules the imports of `id` are declared in. A file of re-exports that is left out of the output (it has nothing
+    /// of its own to run) is passed over, and what it passes on is reached through the bindings.
+    fn bound_modules(&self, id: ModuleId) -> Vec<ModuleId> {
+        self.linked.imports[id.index()].values().filter_map(|b| self.binding_module(b)).collect()
     }
 
     /// Whether loading `target` this way starts a chunk of its own: `import()` of an ES module. A
@@ -1436,9 +1460,10 @@ impl<'a> Bundler<'a> {
                             continue;
                         }
                         sources.push(id);
+                        stack.extend(self.bound_modules(id));
                         for (request, edge) in graph.module(id).record.requests.iter().zip(&graph.module(id).edges) {
                             if let Edge::Module(t) = edge {
-                                if !self.starts_chunk(request.kind, *t) {
+                                if !self.starts_chunk(request.kind, *t) && self.included(*t) {
                                     stack.push(*t);
                                 }
                             }

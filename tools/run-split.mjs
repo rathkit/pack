@@ -28,6 +28,25 @@ for (const [name, extra] of names.flatMap((n) => [[n, []], [n, ['--minify', '--k
   const files = readdirSync(out).filter((f) => f.endsWith('.js'));
   const wanted = existsSync(join(dir, 'chunks.txt')) ? Number(readFileSync(join(dir, 'chunks.txt'), 'utf8')) : null;
   if (wanted !== null && files.length !== wanted) { failed++; console.log(`FAIL ${name}${extra.join(' ')}: ${files.length} chunks, expected ${wanted}: ${files.join(' ')}`); continue; }
+  // Code that only a lazy module needs must not be in what an entry loads when it starts.
+  if (existsSync(join(dir, 'not-eager.txt'))) {
+    const markers = readFileSync(join(dir, 'not-eager.txt'), 'utf8').split('\n').filter(Boolean);
+    for (const entry of entries) {
+      const seen = new Set();
+      const stack = [entry];
+      while (stack.length) {
+        const file = stack.pop();
+        if (seen.has(file) || !existsSync(join(out, file))) continue;
+        seen.add(file);
+        const text = readFileSync(join(out, file), 'utf8');
+        for (const m of text.matchAll(/^import\b[^;]*?from\s*["']\.\/([^"']+)["']|^import\s*["']\.\/([^"']+)["']/gm)) stack.push(m[1] ?? m[2]);
+      }
+      for (const marker of markers) {
+        const eager = [...seen].filter((f) => readFileSync(join(out, f), 'utf8').includes(marker));
+        if (eager.length) { failed++; console.log(`FAIL ${name}${extra.join(' ')}/${entry}: ${marker} is loaded with the entry, in ${eager.join(', ')}`); }
+      }
+    }
+  }
   for (const entry of entries) {
     const expected = run(entry, dir);
     if (expected.code !== 0 || expected.out.trim() === '') { failed++; console.log(`FAIL ${name}${extra.join(' ')}/${entry}: the program itself does not run cleanly: ${expected.err}`); continue; }
