@@ -919,6 +919,8 @@ fn children(parsed: &parser::Parsed, side: &Side, syntax: bool, original: bool) 
             continue;
         }
         if let NodeKind::VarDecl { kind, decls } = ast[c].kind {
+            // A `const` nobody assigns to is written `let`.
+            let kind = if original && kind == crate::ast::VarKind::Const && crate::compress::const_is_let(ast, &parsed.semantic, c) { crate::ast::VarKind::Let } else { kind };
             let own: Vec<NodeId> = ast.list(decls).to_vec();
             if run_kind == Some(kind) {
                 out.last_mut().and_then(|s| s.declarators.as_mut()).expect("a run").extend(own);
@@ -1294,8 +1296,15 @@ mod tests {
 
     #[test]
     fn declarations_join() {
-        assert_eq!(syntax("var a = 1; var b = 2\nlet c; let d; const e = 3"), "var a=1,b=2;let c,d;const e=3");
+        assert_eq!(syntax("var a = 1; var b = 2\nlet c; let d; const e = 3"), "var a=1,b=2;let c,d,e=3");
         assert_eq!(syntax("var a = 1; f(); var b = 2"), "var a=1;f();var b=2");
+    }
+
+    #[test]
+    fn constants_nobody_assigns_are_written_let() {
+        assert_eq!(syntax("const a = 1; const b = 2; for (const k of z) k(); const { p, q = 5 } = r"), "let a=1,b=2;for(let k of z)k();let{p,q=5}=r");
+        // An assignment to a constant is an error that `let` would hide.
+        assert_eq!(syntax("const a = 1; a = 2"), "const a=1;a=2");
     }
 
     #[test]

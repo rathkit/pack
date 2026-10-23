@@ -52,6 +52,25 @@ pub(crate) struct Plan {
 }
 
 /// `barriers` are source offsets (in order) where declarations on either side are not merged.
+/// Whether a `const` declaration can be written `let`: nothing assigns to its names (an assignment to a
+/// constant is an error that `let` would swallow), and no `eval` can reach them. `let` is two letters shorter.
+pub(crate) fn const_is_let(ast: &Ast, sem: &Semantic, decl: NodeId) -> bool {
+    let NodeKind::VarDecl { kind: VarKind::Const, decls } = ast[decl].kind else { return false };
+    let mut stack: Vec<NodeId> = ast.list(decls).iter().filter_map(|&d| if let NodeKind::VarDeclarator { target, .. } = ast[d].kind { Some(target) } else { None }).collect();
+    while let Some(n) = stack.pop() {
+        if matches!(ast[n].kind, NodeKind::BindingIdent(_)) {
+            let Some(sym) = sem.symbol_of(n) else { return false };
+            let symbol = sem.symbol(sym);
+            if symbol.writes > 1 || symbol.flags & crate::semantic::symbol_flags::DYNAMIC != 0 || sem.scope(symbol.scope).flags & crate::semantic::scope_flags::HAS_EVAL != 0 {
+                return false;
+            }
+        } else {
+            ast.for_each_child(n, |c| stack.push(c));
+        }
+    }
+    true
+}
+
 pub(crate) fn plan(source: &str, ast: &Ast, sem: &Semantic, tokens: &[Token], barriers: &[u32]) -> Plan {
     let mut ctx = Ctx { source, ast, sem, tokens, barriers, parent: vec![None; ast.node_count() + 1], actions: vec![Action::Keep; tokens.len()], locked: vec![false; tokens.len()], dead: Vec::new(), kept_semi: Vec::new(), texts: Vec::new(), text_index: Default::default() };
     let mut order = Vec::new();
@@ -224,6 +243,13 @@ impl Ctx<'_> {
                 }
             }
             NodeKind::New { callee, args } if ast.list(args).is_empty() => self.new_without_parens(n, callee),
+            NodeKind::VarDecl { kind: VarKind::Const, .. } if const_is_let(ast, self.sem, n) => {
+                let i = self.first_tok(node.span.start);
+                // Not when the declaration was joined to the one before it: its keyword is gone.
+                if self.kw(i, Kw::Const) && self.actions[i] == Action::Keep {
+                    self.set_text(i, "let");
+                }
+            }
             NodeKind::If { test, cons, alt } => {
                 self.unbrace(cons);
                 if let Some(alt) = alt {
@@ -827,7 +853,14 @@ impl Ctx<'_> {
     /// `var a = 1; var b = 2;` is `var a = 1, b = 2;`.
     fn merge_declarations(&mut self, items: &[NodeId]) {
         for pair in items.windows(2) {
-            let (NodeKind::VarDecl { kind: k1, .. }, NodeKind::VarDecl { kind: k2, .. }) = (self.ast[pair[0]].kind, self.ast[pair[1]].kind) else { continue };
+            let (NodeKind::VarDecl { kind: mut k1, .. }, NodeKind::VarDecl { kind: mut k2, .. }) = (self.ast[pair[0]].kind, self.ast[pair[1]].kind) else { continue };
+            // A `const` that is written `let` joins its neighbors.
+            if k1 == VarKind::Const && const_is_let(self.ast, self.sem, pair[0]) {
+                k1 = VarKind::Let;
+            }
+            if k2 == VarKind::Const && const_is_let(self.ast, self.sem, pair[1]) {
+                k2 = VarKind::Let;
+            }
             if k1 != k2 {
                 continue;
             }
