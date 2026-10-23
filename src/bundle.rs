@@ -1191,9 +1191,9 @@ impl<'a> Bundler<'a> {
                 bits[index / 64] |= 1 << (index % 64);
                 let module = graph.module(id);
                 for (request, edge) in module.record.requests.iter().zip(&module.edges) {
-                    // `import()` starts a root of its own.
-                    if let (Edge::Module(target), false) = (edge, request.kind == RequestKind::Dynamic) {
-                        if self.included(*target) {
+                    // `import()` of an ES module starts a root of its own.
+                    if let Edge::Module(target) = edge {
+                        if !self.starts_chunk(request.kind, *target) && self.included(*target) {
                             stack.push(*target);
                         }
                     }
@@ -1280,6 +1280,12 @@ impl<'a> Bundler<'a> {
         ChunkPlan { chunks, of_module, root_chunk }
     }
 
+    /// Whether loading `target` this way starts a chunk of its own: `import()` of an ES module. A
+    /// CommonJS module `import()` loads is part of the chunk that asks for it.
+    fn starts_chunk(&self, kind: RequestKind, target: ModuleId) -> bool {
+        kind == RequestKind::Dynamic && self.graph.module(target).kind == ModuleKind::Esm
+    }
+
     fn in_chunk(&self, module: ModuleId, chunk: usize) -> bool {
         self.plan.of_module[module.index()] == Some(chunk)
     }
@@ -1362,8 +1368,8 @@ impl<'a> Bundler<'a> {
                         }
                         sources.push(id);
                         for (request, edge) in graph.module(id).record.requests.iter().zip(&graph.module(id).edges) {
-                            if let (Edge::Module(t), false) = (edge, request.kind == RequestKind::Dynamic) {
-                                if self.included(*t) {
+                            if let Edge::Module(t) = edge {
+                                if !self.starts_chunk(request.kind, *t) && self.included(*t) {
                                     stack.push(*t);
                                 }
                             }
@@ -1373,8 +1379,8 @@ impl<'a> Bundler<'a> {
             }
             for id in sources {
                 for (request, edge) in graph.module(id).record.requests.iter().zip(&graph.module(id).edges) {
-                    if let (Edge::Module(t), false) = (edge, request.kind == RequestKind::Dynamic) {
-                        if let Some(d) = self.plan.of_module[t.index()] {
+                    if let Edge::Module(t) = edge {
+                        if let (false, Some(d)) = (self.starts_chunk(request.kind, *t), self.plan.of_module[t.index()]) {
                             if d != c {
                                 deps.insert(d);
                             }
