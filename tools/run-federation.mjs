@@ -272,6 +272,17 @@ scenario('types: a remote publishes declarations and a host checks its imports a
   check('and runs', r.title === 'done' && /typed:3/.test(r.text ?? ''), JSON.stringify(r));
 });
 
+scenario('style sheets of an exposed module load with it, by the container and by the manifest', async () => {
+  const remote = await build('remote-css');
+  const host = await build('host-css');
+  serve(4270, remote);
+  serve(4271, host);
+  const manifest = JSON.parse(readFileSync(join(remote, 'mf-manifest.json'), 'utf8'));
+  check('the manifest lists the style sheet', manifest.exposes[0].assets.css.sync.length === 1 && manifest.exposes[0].assets.css.sync[0].endsWith('.css'), JSON.stringify(manifest.exposes));
+  const r = await visit('http://localhost:4271/');
+  check('the host gets the remote\'s styles through remoteEntry.js alone', r.title === 'done' && /rgb\(1, 2, 3\) 700/.test(r.text ?? ''), JSON.stringify(r));
+});
+
 scenario('development servers: a page of one loads the other, and a change in the remote reloads it', async () => {
   const remoteDir = copy('remote');
   const hostDir = copy('host');

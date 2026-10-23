@@ -735,7 +735,8 @@ impl Federation {
         let core = self.core_path().to_string_lossy().into_owned();
         let core_file = output.chunks.iter().find(|c| c.facade_module.as_deref() == Some(core.as_str())).map(|c| c.file.clone()).ok_or("the federation runtime was not built; the build needs the esm format with splitting")?;
         if !self.exposes.is_empty() {
-            output.files.push(OutputFile { name: self.filename.clone(), code: self.remote_entry(&core_file, hot), map: None, data: None });
+            let styles: Vec<(String, Vec<String>)> = self.expose_assets(output).into_iter().filter(|(_, _, _, css)| !css.is_empty()).map(|(e, _, _, css)| (e.key.clone(), css)).collect();
+            output.files.push(OutputFile { name: self.filename.clone(), code: self.remote_entry(&core_file, hot, &styles), map: None, data: None });
         }
         let (types, messages) = self.generate_types();
         for message in messages {
@@ -751,16 +752,26 @@ impl Federation {
     }
 
     /// The script that defines the container: it loads the runtime chunk when a host asks for something.
-    fn remote_entry(&self, core_file: &str, hot: bool) -> String {
+    fn remote_entry(&self, core_file: &str, hot: bool, styles: &[(String, Vec<String>)]) -> String {
         let file = quote(core_file);
         let base = match &self.public_path {
             Some(p) => quote(&if p.ends_with('/') { p.clone() } else { format!("{p}/") }),
             None => "(document.currentScript && document.currentScript.src ? document.currentScript.src.slice(0, document.currentScript.src.lastIndexOf('/') + 1) : '')".to_string(),
         };
+        // The style sheets of an exposed module load with it, so a host that knows nothing of them still gets them.
+        let table = styles.iter().map(|(key, files)| format!("{}: [{}]", quote(key), files.iter().map(|f| quote(f)).collect::<Vec<_>>().join(", "))).collect::<Vec<_>>().join(", ");
+        let sheets = if styles.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "  const styles = {{ {table} }};\n  const sheets = (module) => Promise.all((styles[module] || []).map((file) => new Promise((resolve) => {{\n    if (typeof document === 'undefined') return resolve();\n    const href = new URL(file, base || document.baseURI).href;\n    if ([...document.querySelectorAll('link[rel=\"stylesheet\"]')].some((l) => l.href === href)) return resolve();\n    const link = document.createElement('link');\n    link.rel = 'stylesheet';\n    link.href = href;\n    link.onload = link.onerror = () => resolve();\n    document.head.appendChild(link);\n  }})));\n"
+            )
+        };
+        let get = if styles.is_empty() { "core().then((c) => c.container.get(module))".to_string() } else { "Promise.all([sheets(module), core().then((c) => c.container.get(module))]).then((both) => both[1])".to_string() };
         if self.library_type == "module" {
+            let start = if self.public_path.is_some() { base.clone() } else { "(import.meta.url.slice(0, import.meta.url.lastIndexOf('/') + 1))".to_string() };
             return format!(
-                "const base = {};\nconst core = () => import(/* @vite-ignore */ new URL({file}, base || import.meta.url).href);\nexport const get = (module) => core().then((c) => c.container.get(module));\nexport const init = (scope, initScope, options) => core().then((c) => c.container.init(scope, initScope, options));\n",
-                if self.public_path.is_some() { base.clone() } else { "''".to_string() },
+                "const base = {start};\n{sheets}const core = () => import(/* @vite-ignore */ new URL({file}, base).href);\nexport const get = (module) => {get};\nexport const init = (scope, initScope, options) => core().then((c) => c.container.init(scope, initScope, options));\n",
             );
         }
         // A development server tells the pages that use this application to reload when it builds again.
@@ -769,7 +780,7 @@ impl Federation {
         } else {
             ""
         };
-        let container = format!("(() => {{\n  const base = {base};\n{reload}  const core = () => import(/* @vite-ignore */ base + {file});\n  return {{\n    get: (module) => core().then((c) => c.container.get(module)),\n    init: (scope, initScope, options) => core().then((c) => c.container.init(scope, initScope, options)),\n  }};\n}})()");
+        let container = format!("(() => {{\n  const base = {base};\n{reload}{sheets}  const core = () => import(/* @vite-ignore */ base + {file});\n  return {{\n    get: (module) => {get},\n    init: (scope, initScope, options) => core().then((c) => c.container.init(scope, initScope, options)),\n  }};\n}})()");
         let name = &self.library_name;
         match self.library_type.as_str() {
             "window" | "self" | "global" | "globalThis" => format!("{}[{}] = {container};\n", if self.library_type == "global" { "globalThis" } else { &self.library_type }, quote(name)),
@@ -781,16 +792,15 @@ impl Federation {
         }
     }
 
-    fn manifest_json(&self, output: &Output, has_types: bool) -> String {
+    /// The files each exposed module needs: its chunk and the chunks it imports when it loads, the ones it may load later,
+    /// and the style sheets of all of them.
+    fn expose_assets<'a>(&'a self, output: &Output) -> Vec<(&'a Expose, Vec<String>, Vec<String>, Vec<String>)> {
         let by_facade: HashMap<&str, &ChunkInfo> = output.chunks.iter().filter_map(|c| c.facade_module.as_deref().map(|m| (m, c))).collect();
         let by_file: HashMap<&str, &ChunkInfo> = output.chunks.iter().map(|c| (c.file.as_str(), c)).collect();
         let css_of = |chunk: &ChunkInfo| -> Vec<String> {
             let stem = chunk.file.strip_suffix(".js").unwrap_or(&chunk.file);
             output.files.iter().filter(|f| f.name == format!("{stem}.css")).map(|f| f.name.clone()).collect()
         };
-        let list = |items: &[String]| format!("[{}]", items.iter().map(|i| quote(i)).collect::<Vec<_>>().join(", "));
-        let assets = |js_sync: &[String], js_async: &[String], css_sync: &[String]| format!("{{ \"js\": {{ \"async\": {}, \"sync\": {} }}, \"css\": {{ \"async\": [], \"sync\": {} }} }}", list(js_async), list(js_sync), list(css_sync));
-        // The files a chunk needs besides itself: the chunks it imports when it loads, and the ones it may load later.
         let closure = |chunk: &ChunkInfo| -> (Vec<String>, Vec<String>) {
             let mut sync = vec![chunk.file.clone()];
             let mut seen: BTreeSet<String> = sync.iter().cloned().collect();
@@ -814,11 +824,11 @@ impl Federation {
             later.retain(|f| !seen.contains(f));
             (sync, later)
         };
-        let mut exposes = Vec::new();
+        let mut found = Vec::new();
         for expose in &self.exposes {
             let target = self.resolve_for_manifest(&expose.import);
-            let found = target.as_deref().and_then(|t| by_facade.get(t));
-            let (js_sync, js_async, css) = match found {
+            let chunk = target.as_deref().and_then(|t| by_facade.get(t));
+            let (js_sync, js_async, css) = match chunk {
                 Some(chunk) => {
                     let (sync, later) = closure(chunk);
                     let css: Vec<String> = sync.iter().filter_map(|f| by_file.get(f.as_str())).flat_map(|c| css_of(c)).collect();
@@ -826,6 +836,17 @@ impl Federation {
                 }
                 None => (Vec::new(), Vec::new(), Vec::new()),
             };
+            found.push((expose, js_sync, js_async, css));
+        }
+        found
+    }
+
+    fn manifest_json(&self, output: &Output, has_types: bool) -> String {
+        let by_facade: HashMap<&str, &ChunkInfo> = output.chunks.iter().filter_map(|c| c.facade_module.as_deref().map(|m| (m, c))).collect();
+        let list = |items: &[String]| format!("[{}]", items.iter().map(|i| quote(i)).collect::<Vec<_>>().join(", "));
+        let assets = |js_sync: &[String], js_async: &[String], css_sync: &[String]| format!("{{ \"js\": {{ \"async\": {}, \"sync\": {} }}, \"css\": {{ \"async\": [], \"sync\": {} }} }}", list(js_async), list(js_sync), list(css_sync));
+        let mut exposes = Vec::new();
+        for (expose, js_sync, js_async, css) in self.expose_assets(output) {
             let name = expose.key.trim_start_matches("./");
             exposes.push(format!("    {{ \"id\": {}, \"name\": {}, \"path\": {}, \"assets\": {} }}", quote(&format!("{}:{name}", self.name)), quote(name), quote(&expose.key), assets(&js_sync, &js_async, &css)));
         }

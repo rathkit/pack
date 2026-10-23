@@ -1,0 +1,1 @@
+import('cssapp/Card').then((m) => { const el = m.default(); document.body.appendChild(el); const c = getComputedStyle(el); document.getElementById('out').textContent = c.color + ' ' + c.fontWeight; document.title = 'done'; });

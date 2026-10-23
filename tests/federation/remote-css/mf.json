@@ -1,0 +1,1 @@
+{"name":"cssapp","exposes":{"./Card":"./src/Card.js"}}
