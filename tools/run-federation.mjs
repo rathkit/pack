@@ -60,18 +60,18 @@ const serve = (port, dir) => {
 
 // Builds a project of tests/federation with rathkit-pack into dist/ of a copy, so the sources stay clean.
 const copies = new Map();
-const copy = (name, as = name) => {
+const copy = (name, as = name, links = true) => {
   if (!copies.has(as)) {
     const dir = join(tmp, as);
     cpSync(join(tests, name), dir, { recursive: true });
-    // The packages the projects import are the ones in the bench folder.
-    symlinkSync(join(bench, 'node_modules'), join(dir, 'node_modules'), 'dir');
+    // The packages the projects import are the ones in the bench folder (a project that has no use for them is left alone: the build writes to its node_modules).
+    if (links) symlinkSync(join(bench, 'node_modules'), join(dir, 'node_modules'), 'dir');
     copies.set(as, dir);
   }
   return copies.get(as);
 };
-const build = async (name, { entry = 'src/index.js', args = [], patch, as = name } = {}) => {
-  const dir = copy(name, as);
+const build = async (name, { entry = 'src/index.js', args = [], patch, as = name, links = true } = {}) => {
+  const dir = copy(name, as, links);
   if (patch) patch(dir);
   // The options are in `mf.json`, or in the config file as a plugin.
   const options = existsSync(join(dir, 'mf.json')) ? ['--federation', 'mf.json'] : [];
@@ -318,10 +318,11 @@ scenario('types: a remote publishes declarations and a host checks its imports a
   check('the manifest points to the zip', manifest.metaData.types.zip === '@mf-types.zip' && manifest.metaData.types.api === '@mf-types.d.ts', JSON.stringify(manifest.metaData.types));
   check('the declarations describe the module', /export default function makeButton\(props: ButtonProps\): string/.test(readFileSync(join(remote, '@mf-types', 'compiled-types', 'Button.d.ts'), 'utf8')));
   serve(4260, remote);
-  const hostDir = copy('host-types');
-  const host = await build('host-types', { entry: 'src/index.ts' });
+  const hostDir = copy('host-types', 'host-types', false);
+  const configBefore = readFileSync(join(hostDir, 'tsconfig.json'), 'utf8');
+  const host = await build('host-types', { entry: 'src/index.ts', links: false });
   check('the host reads them', existsSync(join(hostDir, '@mf-types', 'r3', 'compiled-types', 'Button.d.ts')));
-  check('and maps the module to them in tsconfig.json', JSON.parse(readFileSync(join(hostDir, 'tsconfig.json'), 'utf8')).compilerOptions.paths?.['r3/Button']?.[0] === './@mf-types/r3/compiled-types/Button');
+  check('the editor finds the module without a setting of the project changing', existsSync(join(hostDir, 'node_modules', 'r3', 'Button.d.ts')) && readFileSync(join(hostDir, 'tsconfig.json'), 'utf8') === configBefore);
   const check_types = () => spawnSync('node', [typescript, '-p', hostDir], { encoding: 'utf8' });
   const good = check_types();
   check('code that uses the remote correctly passes the type check', good.status === 0, good.stdout);
@@ -329,6 +330,10 @@ scenario('types: a remote publishes declarations and a host checks its imports a
   writeFileSync(source, readFileSync(source, 'utf8').replace("size: version", "size: 'big'"));
   const bad = check_types();
   check('code that uses it wrongly fails it', bad.status !== 0 && /Type 'string' is not assignable to type 'number'/.test(bad.stdout), bad.stdout);
+  // Mapping in tsconfig.json is there when asked for.
+  const mapped = copy('host-types', 'host-types-paths', false);
+  await build('host-types', { entry: 'src/index.ts', as: 'host-types-paths', links: false, patch: withOption('mf.json', (j) => (j.dts = { consumeTypes: { updateTsConfig: true } })) });
+  check('and asked for, tsconfig.json maps it too', JSON.parse(readFileSync(join(mapped, 'tsconfig.json'), 'utf8')).compilerOptions.paths?.['r3/Button']?.[0] === './@mf-types/r3/compiled-types/Button');
   serve(4261, host);
   const r = await visit('http://localhost:4261/');
   check('and runs', r.title === 'done' && /typed:3/.test(r.text ?? ''), JSON.stringify(r));
@@ -373,6 +378,45 @@ if (haveRspack) {
     });
   });
 }
+
+scenario('the other forms of a remote\'s address (script, promise) and a container that is a SystemJS module', async () => {
+  const remote = await build('remote');
+  const system = await build('remote-system');
+  const host = await build('host-forms');
+  check('the container is registered with System', /System\.register\(/.test(readFileSync(join(system, 'remoteEntry.js'), 'utf8')));
+  serve(4210, remote);
+  serve(4310, system);
+  serve(4311, host);
+  const r = await visit('http://localhost:4311/');
+  check('page finished', r.title === 'done', JSON.stringify(r));
+  check('all three load their module', /script button 19\.3\.1/.test(r.text ?? '') && /promise button 19\.3\.1/.test(r.text ?? '') && /system button 19\.3\.1/.test(r.text ?? ''), r.text);
+  check('no errors', !r.logs.some((l) => /EXCEPTION/.test(l)), r.logs.join('\n'));
+});
+
+scenario('a shared package written with only the exports the application reads (treeShaking)', async () => {
+  const host = await build('host-shake', { args: ['--minify'] });
+  const sizes = readdirSync(host).filter((f) => f.endsWith('.js')).map((f) => [f, readFileSync(join(host, f)).length]).sort((a, b) => b[1] - a[1]);
+  const small = sizes.find(([f]) => f === 'shaken-lodash-es.js');
+  check('there is a small copy beside the full one', small && small[1] * 5 < sizes[0][1], JSON.stringify(sizes));
+  serve(4320, host);
+  const page = await openPage('http://localhost:4320/');
+  try {
+    const r = await page.settled(8000);
+    check('it runs', r.title === 'done' && /mapped 2,4,6/.test(r.text ?? ''), JSON.stringify(r));
+    const loaded = (await page.eval("performance.getEntriesByType('resource').map((e) => e.name.split('/').pop()).join(',')")).split(',');
+    check('the small copy is fetched and the full one is not', loaded.includes('shaken-lodash-es.js') && !loaded.includes(sizes[0][0]), loaded.join(','));
+  } finally {
+    page.close();
+  }
+});
+
+scenario('an application that is also a remote: code the entry and an exposed module share reads a shared package as it loads', async () => {
+  const app = await build('app-both');
+  serve(4330, app);
+  const r = await visit('http://localhost:4330/');
+  check('it runs', r.title === 'done' && /version 19\.3\.1 ctx object react 19\.3\.1/.test(r.text ?? ''), JSON.stringify(r));
+  check('no errors', !r.logs.some((l) => /EXCEPTION/.test(l)), r.logs.join('\n'));
+});
 
 scenario('development servers: a page of one loads the other, and a change in the remote reloads it', async () => {
   const remoteDir = copy('remote');

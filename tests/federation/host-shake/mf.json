@@ -1,0 +1,1 @@
+{ "name": "hshake", "shared": { "lodash-es": { "singleton": true, "treeShaking": true } } }

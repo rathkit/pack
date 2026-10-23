@@ -226,6 +226,64 @@ test('values read the way import and require read them', async () => {
   assert.equal(rt.moduleNamespace({ a: 1 }).default.a, 1);
 });
 
+test('include and exclude leave a copy out of sharing: this application uses its own', async () => {
+  const offered = container({ shared: { lib: { version: '3.0.0', lib: { from: 'remote' } } } });
+  const own = (extra) => ({ version: '2.0.0', scope: 'default', shareConfig: { singleton: true, requiredVersion: '^2.0.0', ...extra }, get: () => Promise.resolve(() => ({ from: 'host' })) });
+  const run = async (extra) => {
+    const quiet = console.warn;
+    console.warn = () => {};
+    try {
+      return await runOnce(extra);
+    } finally {
+      console.warn = quiet;
+    }
+  };
+  const runOnce = async (extra) => {
+    const h = host({ remotes: [{ name: 'app', entry: 'x' }], shared: { lib: own(extra) } }, { app: offered });
+    await h.initializeSharing('default');
+    return { h, lib: (await h.loadShare('lib'))() };
+  };
+  assert.equal((await run({})).lib.from, 'remote', 'shared as usual: the newest');
+  assert.equal((await run({ include: { version: '^3.0.0' } })).lib.from, 'host', 'its 2.0.0 is not included');
+  assert.equal((await run({ include: { version: '^2.0.0' } })).lib.from, 'remote', 'its 2.0.0 is included');
+  assert.equal((await run({ exclude: { version: '^2.0.0' } })).lib.from, 'host', 'its 2.0.0 is excluded');
+  assert.equal((await run({ exclude: { version: '^3.0.0' } })).lib.from, 'remote', 'it is not');
+  assert.equal((await run({ exclude: { request: '^lib$' } })).lib.from, 'host', 'by request');
+  const { h } = await run({ exclude: { version: '^2.0.0' } });
+  assert.ok(!h.shareScopeMap.default.lib?.['2.0.0'], 'and it is not offered to others');
+});
+
+test('a copy with only some exports is used when it has all that the application reads', async () => {
+  const mk = (usedExports, wanted) => {
+    const calls = [];
+    const h = host({
+      shared: {
+        lib: {
+          version: '1.0.0', scope: 'default', shareConfig: { singleton: true },
+          get: () => (calls.push('full'), Promise.resolve(() => ({ a: 1, b: 2, c: 3 }))),
+          treeShaking: { mode: 'runtime-infer', usedExports, get: () => (calls.push('shaken'), Promise.resolve(() => ({ a: 1, b: 2 }))) },
+        },
+      },
+    });
+    // What this application reads is on its own entry too.
+    h.options.shared.lib[0].treeShaking.usedExports = wanted ?? usedExports;
+    return { h, calls };
+  };
+  const a = mk(['a', 'b']);
+  assert.deepEqual(Object.keys((await a.h.loadShare('lib'))()), ['a', 'b']);
+  assert.deepEqual(a.calls, ['shaken'], 'only the small copy is fetched');
+  // A provider whose copy lacks something this application reads is not used for it: its full copy is.
+  const b = mk(['a', 'b']);
+  b.h.options.shared.lib[0].treeShaking.usedExports = ['a', 'b'];
+  const reader = host({ shared: { lib: { version: '1.0.0', scope: 'default', shareConfig: { singleton: true }, get: () => Promise.resolve(() => 'reader own'), treeShaking: { usedExports: ['a', 'z'], get: () => Promise.resolve(() => 'reader small') } } } });
+  const theirs = b.h.options.shared.lib[0];
+  theirs.version = '2.0.0';
+  reader.shareScopeMap.default = { lib: { '2.0.0': theirs } };
+  b.h.options.shared.lib[0].treeShaking.usedExports = ['a', 'b'];
+  assert.equal(typeof (await reader.loadShare('lib'))(), 'object', 'the provider\'s full copy, since z is not in the small one');
+  assert.deepEqual(b.calls, ['full']);
+});
+
 test('the official runtime package names are this runtime', async () => {
   assert.equal(typeof rt.init, 'function');
   for (const name of ['loadRemote', 'loadShare', 'loadShareSync', 'preloadRemote', 'registerRemotes', 'registerPlugins', 'registerShared', 'getInstance', 'createInstance']) assert.equal(typeof rt[name], 'function', name);

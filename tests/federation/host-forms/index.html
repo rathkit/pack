@@ -1,0 +1,25 @@
+<!doctype html><meta charset="utf-8"><title>start</title><div id="out"></div>
+<script>
+  // Just enough of SystemJS to load a module that registers itself with System.register.
+  (() => {
+    let registered;
+    globalThis.System = {
+      register(deps, declare) { registered = declare; },
+      import(url) {
+        return new Promise((resolve, reject) => {
+          const script = document.createElement('script');
+          script.src = url;
+          script.onload = () => {
+            const exported = {};
+            const module = registered((name, value) => { if (typeof name === 'object') Object.assign(exported, name); else exported[name] = value; }, { meta: { url } });
+            module.execute();
+            resolve(exported);
+          };
+          script.onerror = reject;
+          document.head.appendChild(script);
+        });
+      },
+    };
+  })();
+</script>
+<script type="module" src="/index.js"></script>

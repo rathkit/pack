@@ -1,0 +1,6 @@
+{
+  "name": "sapp",
+  "library": { "type": "system" },
+  "exposes": { "./Button": "./src/Button.js" },
+  "shared": { "react": { "singleton": true, "requiredVersion": "^19.0.0" } }
+}

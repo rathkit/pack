@@ -1027,6 +1027,9 @@ fn run_build(job: &Job) -> Outcome {
             None => {}
         }
     }
+    if let Some(federation) = &options.federation {
+        federation.remember(&bundle_options);
+    }
     let mut result = rathkit_pack::bundle::bundle(&graph, &linked, &shaken, &bundle_options);
     if let (Ok(output), Some(federation)) = (&mut result, &options.federation) {
         if let Err(message) = federation.finish(output, bundle_options.hot, job.watch) {

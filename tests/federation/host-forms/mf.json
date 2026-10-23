@@ -1,0 +1,17 @@
+{
+  "name": "hforms",
+  "remotes": {
+    "oapp": "script http://localhost:4210/remoteEntry.js",
+    "viaPromise": "promise new Promise((resolve, reject) => { const s = document.createElement('script'); s.src = 'http://localhost:4210/remoteEntry.js'; s.onload = () => resolve(window.oapp); s.onerror = reject; document.head.appendChild(s); })",
+    "sapp": {
+      "external": "sapp@http://localhost:4310/remoteEntry.js",
+      "type": "system"
+    }
+  },
+  "shared": {
+    "react": {
+      "singleton": true,
+      "requiredVersion": "^19.0.0"
+    }
+  }
+}

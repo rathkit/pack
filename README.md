@@ -86,26 +86,36 @@ rathkit-pack bundle src/main.ts --outfile dist/app.mjs
   - `exposes` become chunks that the container (`remoteEntry.js`, or an ES module with `library: { type: "module" }`;
     `var`, `window`, `self`, `global`, `this`, `assign`, `commonjs`, `umd`) loads on request, and `mf-manifest.json`
     lists them with the shared packages and their files (`manifest: false` writes none, `manifest.fileName` renames it).
-  - `remotes` take `name@url`, `{ external, shareScope }` and manifest URLs (`.json`); `remoteType: "module"` loads
-    ES module entries. `import x from "remote/Button"`, `require` and `import()` all work, and named imports need no
-    list of exports. A static import of a remote waits for it to load before the importing code runs.
+  - `remotes` take `name@url`, `script url`, `{ external, shareScope, type }`, manifest URLs (`.json`), and code:
+    `promise <expression>` / `var <expression>` give the container (or a promise of it) and `internal <module>` is a module of
+    your application. `remoteType` (or `type` on one remote) says how an entry is loaded: a script that defines a global (the
+    default), an ES `module`, `commonjs`, or a SystemJS module (`system`). `import x from "remote/Button"`, `require` and
+    `import()` all work, and named imports need no list of exports. A static import of a remote waits for it to load before the
+    importing code runs, and so does any chunk with application code in it.
   - `shared` takes `singleton`, `requiredVersion` (from your `package.json` when not given), `strictVersion`, `eager`,
     `version`, `shareScope`, `import: false` (only consume), and a key ending in `/` for everything below a package
-    (`lodash-es/`). Every copy on offer is put in the share scope and one is chosen by `shareStrategy`
-    (`version-first`, or `loaded-first`), with npm's version range rules (checked against `semver`).
+    (`lodash-es/`). `include` / `exclude` (`{ version, request, fallbackVersion }`) leave a copy out of sharing, so this
+    application uses its own. `treeShaking` also writes the package with only the exports the application reads, in a file of
+    its own (an ES module package), which is used when it has all that is read and the full copy is not fetched. Every copy on
+    offer is put in the share scope and one is chosen by `shareStrategy` (`version-first`, or `loaded-first`), with npm's
+    version range rules (checked against `semver`). A shared package that reads another (React DOM reads React) is loaded
+    after it.
   - `runtimePlugins` (`"./plugin.js"` or `["./plugin.js", params]`) run in the runtime with the hooks of the other
     runtimes: `beforeRequest`, `afterResolve`, `onLoad`, `errorLoadRemote`, `beforeLoadShare`, `resolveShare`,
     `loadEntry`, `createScript`, `fetch` and more.
   - `dts`: a remote with TypeScript exposes publishes `@mf-types.zip` (and `@mf-types.d.ts`, the unpacked folder) beside
     its manifest, written with the project's `typescript`; a host with a `tsconfig.json` reads the zip of each remote
-    that is up and adds one `paths` entry per exposed module to the `tsconfig.json` (left alone when it has comments,
-    with the line to add printed instead). `dts: false`, or `generateTypes` / `consumeTypes` set to `false`, turn
-    either half off.
+    that is up into `@mf-types/` and makes `remote/expose` found by the editor through a folder of the remote's name in
+    `node_modules` (not where an installed package has that name). Nothing in the project's settings changes;
+    `dts: { consumeTypes: { updateTsConfig: true } }` also adds a `paths` entry per module to `tsconfig.json`. `dts: false`,
+    or `generateTypes` / `consumeTypes` set to `false`, turn either half off. While watching, types are written and read
+    beside the build.
   - `serve` does the same in development: the build is in memory, `remoteEntry.js` and the manifest are served to pages
     of other local dev servers (`--cors-origin ORIGIN` adds other origins), and a change rebuilds the remote and
     reloads the pages of hosts that use it.
-  - Not supported: the `system` library type, `promise` and `script` forms of a remote's address, `include` / `exclude`
-    on shared packages, and tree-shaken shared packages.
+  - `@module-federation/vite`'s `federation()` is read for its options by default. With `RATHKIT_REAL_FEDERATION_PLUGIN=1`
+    the plugin itself is run by the plugin layer, and its remote loads in a host built here.
+  - Not supported: `jsonp` entries, and `treeShaking` for CommonJS packages (they are shared whole).
 - Tree-shakes at statement level, honoring `"sideEffects": false`.
 - `--define KEY=VALUE` (also `--define:KEY=VALUE`) replaces a global name, a chain such as
   `process.env.NODE_ENV`, or `import.meta.env.X` with a constant, another name or an expression.

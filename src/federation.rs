@@ -44,7 +44,8 @@ pub struct Expose {
 pub struct Remote {
     pub name: String,
     pub entry: String,
-    /// How the entry is loaded: `global` (a script that defines a variable), `module`, `commonjs`.
+    /// How the entry is loaded: `global` (a script that defines a variable), `module`, `commonjs`, `system`; or `code`, an
+    /// expression that gives the container, and `internal`, a module of this application (then `entry` is that).
     pub kind: String,
     pub global_name: String,
     pub share_scope: Vec<String>,
@@ -63,6 +64,12 @@ pub struct Shared {
     pub strict_version: bool,
     pub eager: bool,
     pub share_scope: Vec<String>,
+    /// `include` and `exclude`: which copies may be shared, as JSON the runtime reads.
+    pub include: Option<String>,
+    pub exclude: Option<String>,
+    /// `treeShaking`: the copy bundled here is also written with only the exports this application reads, for others
+    /// whose needs it covers. The mode is carried to the runtime.
+    pub tree_shaking: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -83,6 +90,8 @@ pub struct Dts {
     pub compiled_types_folder: String,
     /// Where the types of remotes are put, relative to the project.
     pub consume_folder: String,
+    /// Also map the remotes' modules in `tsconfig.json` (`paths`); off, the editor finds them through `node_modules`.
+    pub update_ts_config: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -119,6 +128,13 @@ pub struct Federation {
     needs: Mutex<std::collections::BTreeMap<String, BTreeSet<String>>>,
     /// The file each bundled copy of a shared package is built from.
     fallbacks: Mutex<HashMap<PathBuf, String>>,
+    /// For each shared package, the exports the application reads (`None`: all of them, or not known), and whether its
+    /// bundled copy is an ES module, which is what a tree-shaken copy needs. Found from the module graph.
+    reads: Mutex<std::collections::BTreeMap<String, (Option<BTreeSet<String>>, bool)>>,
+    /// The copies written with only some exports are built apart from the rest, from these settings.
+    graph_options: Mutex<Option<crate::graph::GraphOptions>>,
+    bundle_options: Mutex<Option<crate::bundle::Options>>,
+    shaken: Mutex<Vec<(String, String)>>,
     /// The declarations written for the exposed modules by the last run, and whether another run is going.
     types_cache: Mutex<Option<Vec<OutputFile>>>,
     types_running: std::sync::atomic::AtomicBool,
@@ -243,13 +259,33 @@ impl Federation {
                     (external, string_list(other.get("shareScope"), &share_scope[0]))
                 }
             };
-            for prefix in ["promise ", "internal ", "script ", "var "] {
-                if external.starts_with(prefix) {
-                    return Err(format!("the remote {key}: the `{}` form of an address is not supported; use `name@https://host/remoteEntry.js`", prefix.trim()));
-                }
+            // `promise <expression>` and `var <expression>` give the container (or a promise of it) as code; `internal <module>`
+            // is a module of this application; `script <address>` is a script that defines the global named like the remote.
+            let word = external.split_once(' ').map(|(w, rest)| (w, rest.trim()));
+            if let Some((w @ ("promise" | "var" | "internal"), rest)) = word {
+                remotes.push(Remote { name: key.to_string(), entry: rest.to_string(), kind: if w == "internal" { "internal" } else { "code" }.to_string(), global_name: key.to_string(), share_scope: scope });
+                return Ok(());
             }
+            let external = match word {
+                Some(("script", rest)) => format!("{key}@{rest}"),
+                _ => external,
+            };
             let (global, entry) = split_external(&external);
-            let kind = if entry.ends_with(".mjs") || remote_type == "module" { "module" } else if remote_type == "commonjs" || remote_type == "commonjs2" { "commonjs" } else { "global" };
+            // A remote can say how its own entry is loaded; otherwise `remoteType` does for all of them.
+            let own = match value {
+                Json::Object(_) => value.get("type").and_then(Json::as_str),
+                _ => None,
+            };
+            let remote_type = own.unwrap_or(remote_type);
+            let kind = if remote_type == "system" || remote_type == "systemjs" {
+                "system"
+            } else if entry.ends_with(".mjs") || remote_type == "module" {
+                "module"
+            } else if remote_type == "commonjs" || remote_type == "commonjs2" {
+                "commonjs"
+            } else {
+                "global"
+            };
             remotes.push(Remote { name: key.to_string(), entry, kind: kind.to_string(), global_name: global.unwrap_or_else(|| key.to_string()), share_scope: scope });
             Ok(())
         };
@@ -307,6 +343,13 @@ impl Federation {
                 strict_version: flag("strictVersion"),
                 eager: flag("eager"),
                 share_scope: string_list(value.get("shareScope"), &share_scope[0]),
+                tree_shaking: match value.get("treeShaking") {
+                    Some(Json::Bool(true)) => Some("runtime-infer".to_string()),
+                    Some(t @ Json::Object(_)) => Some(t.get("mode").and_then(Json::as_str).unwrap_or("runtime-infer").to_string()),
+                    _ => None,
+                },
+                include: value.get("include").filter(|v| matches!(v, Json::Object(_))).map(Json::to_string),
+                exclude: value.get("exclude").filter(|v| matches!(v, Json::Object(_))).map(Json::to_string),
             });
         };
         match options.get("shared") {
@@ -362,6 +405,7 @@ impl Federation {
             types_folder: text("typesFolder", section("generateTypes")).unwrap_or_else(|| "@mf-types".to_string()),
             compiled_types_folder: text("compiledTypesFolder", section("generateTypes")).unwrap_or_else(|| "compiled-types".to_string()),
             consume_folder: text("typesFolder", section("consumeTypes")).unwrap_or_else(|| "@mf-types".to_string()),
+            update_ts_config: section("consumeTypes").and_then(|c| c.get("updateTsConfig")).and_then(Json::as_bool).unwrap_or(false),
         };
         Ok(Federation {
             name,
@@ -384,6 +428,10 @@ impl Federation {
             types_read: std::sync::atomic::AtomicBool::new(false),
             needs: Mutex::new(std::collections::BTreeMap::new()),
             fallbacks: Mutex::new(HashMap::new()),
+            reads: Mutex::new(std::collections::BTreeMap::new()),
+            graph_options: Mutex::new(None),
+            bundle_options: Mutex::new(None),
+            shaken: Mutex::new(Vec::new()),
             types_cache: Mutex::new(None),
             types_running: std::sync::atomic::AtomicBool::new(false),
             types_hook: Mutex::new(None),
@@ -402,6 +450,11 @@ impl Federation {
 
     fn shared_for(&self, specifier: &str) -> Option<&Shared> {
         self.shared.iter().find(|s| s.key == specifier).or_else(|| self.shared.iter().filter(|s| s.key.ends_with('/') && specifier.starts_with(s.key.as_str())).max_by_key(|s| s.key.len()))
+    }
+
+    /// The files the bundled copies of shared packages are built from.
+    pub fn fallback_paths(&self) -> Vec<PathBuf> {
+        self.fallbacks.lock().expect("fallbacks").keys().cloned().collect()
     }
 
     /// Finds which shared packages each bundled copy reads, from the graph. True when that is new.
@@ -438,9 +491,64 @@ impl Federation {
             }
             found.insert(key.clone(), reads);
         }
+        // The names the application imports from each shared package, wherever it is imported.
+        let mut names: std::collections::BTreeMap<String, Option<BTreeSet<String>>> = std::collections::BTreeMap::new();
+        let mut note = |key: &str, name: Option<&str>| {
+            let entry = names.entry(key.to_string()).or_insert_with(|| Some(BTreeSet::new()));
+            match (entry.as_mut(), name) {
+                (Some(set), Some(name)) => {
+                    set.insert(name.to_string());
+                }
+                _ => *entry = None,
+            }
+        };
+        for module in &graph.modules {
+            let stub = |request: usize| match module.edges.get(request) {
+                Some(Edge::Module(t)) => graph.module(*t).path.to_string_lossy().strip_prefix(&prefix).and_then(|r| r.strip_suffix(".js")).map(String::from),
+                _ => None,
+            };
+            let mut seen_requests = BTreeSet::new();
+            for import in &module.record.imports {
+                if let Some(key) = stub(import.request) {
+                    seen_requests.insert(import.request);
+                    match &import.name {
+                        crate::module::ImportName::Named(n) => note(&key, Some(n)),
+                        crate::module::ImportName::Default => note(&key, Some("default")),
+                        crate::module::ImportName::Namespace => note(&key, None),
+                    }
+                }
+            }
+            for export in &module.record.exports {
+                if let crate::module::ExportSource::Indirect { request, name } = &export.source {
+                    if let Some(key) = stub(*request) {
+                        seen_requests.insert(*request);
+                        match name {
+                            crate::module::ImportName::Named(n) => note(&key, Some(n)),
+                            crate::module::ImportName::Default => note(&key, Some("default")),
+                            crate::module::ImportName::Namespace => note(&key, None),
+                        }
+                    }
+                }
+            }
+            // Anything else that reaches a stub (`export *`, `require`, `import()`, a bare `import "x"`) may read any name.
+            for request in 0..module.edges.len() {
+                if !seen_requests.contains(&request) {
+                    if let Some(key) = stub(request) {
+                        if module.record.requests[request].kind != RequestKind::Static || module.record.star_exports.contains(&request) {
+                            note(&key, None);
+                        }
+                    }
+                }
+            }
+        }
+        let esm_of: HashMap<&str, bool> = fallbacks.iter().filter_map(|(path, key)| by_path.get(path.as_path()).map(|id| (key.as_str(), graph.module(*id).kind == crate::graph::ModuleKind::Esm))).collect();
+        let reads: std::collections::BTreeMap<String, (Option<BTreeSet<String>>, bool)> =
+            names.into_iter().map(|(key, used)| { let esm = esm_of.get(format!("shared:{key}").as_str()).copied().unwrap_or(false); (key, (used, esm)) }).collect();
         let mut needs = self.needs.lock().expect("needs");
-        let changed = *needs != found;
+        let mut known = self.reads.lock().expect("reads");
+        let changed = *needs != found || *known != reads;
         *needs = found;
+        *known = reads;
         changed
     }
 
@@ -520,6 +628,8 @@ impl Federation {
         // The shared packages: everything configured (a prefix only for what is imported below it).
         let mut shared_lines: Vec<String> = Vec::new();
         let mut shared_used: Vec<String> = Vec::new();
+        let reads = self.reads.lock().expect("reads").clone();
+        let mut shaken: Vec<(String, String)> = Vec::new();
         let project = std::fs::read_to_string(self.cwd.join("package.json")).ok().and_then(|t| Json::parse(&t).ok());
         let mut register = |item: &Shared, key: &str| {
             let (fallback, installed) = match &item.import {
@@ -553,8 +663,31 @@ impl Federation {
                 }
             };
             let scope = item.share_scope.iter().map(|s| quote(s)).collect::<Vec<_>>().join(", ");
-            let config = format!("{{ singleton: {}, requiredVersion: {required}, strictVersion: {}, eager: {} }}", item.singleton, item.strict_version, item.eager);
+            let filters = format!("{}{}", item.include.as_ref().map_or(String::new(), |j| format!(", include: {j}")), item.exclude.as_ref().map_or(String::new(), |j| format!(", exclude: {j}")));
+            let config = format!("{{ singleton: {}, requiredVersion: {required}, strictVersion: {}, eager: {}{filters} }}", item.singleton, item.strict_version, item.eager);
             let version_text = version.as_deref().map_or("\"0\"".to_string(), quote);
+            // With treeShaking: a second copy that has only the exports the application reads, for others whose needs it covers.
+            let shaken = match (&item.tree_shaking, &fallback, reads.get(key)) {
+                (Some(mode), Some(path), Some((Some(used), true))) if !used.is_empty() => {
+                    let list: Vec<&String> = used.iter().collect();
+                    let names = list.iter().map(|n| quote(n)).collect::<Vec<_>>().join(", ");
+                    let mut source = String::new();
+                    for name in &list {
+                        if name.as_str() == "default" {
+                            source.push_str(&format!("export {{ default }} from {};\n", quote(&path.to_string_lossy())));
+                        } else if name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$') {
+                            source.push_str(&format!("export {{ {name} }} from {};\n", quote(&path.to_string_lossy())));
+                        } else {
+                            source.push_str(&format!("export {{ {} as {} }} from {};\n", quote(name), quote(name), quote(&path.to_string_lossy())));
+                        }
+                    }
+                    files.insert(PathBuf::from(format!("{ROOT}/shaken/{key}.js")), source);
+                    let file = format!("shaken-{}.js", key.replace(['/', '@'], "_"));
+                    shaken.push((key.to_string(), file.clone()));
+                    format!(", treeShaking: {{ mode: {}, usedExports: [{names}], get: () => import(new URL({}, import.meta.url).href).then((ns) => () => rt.fallbackValue(ns)) }}", quote(mode), quote(&file))
+                }
+                _ => String::new(),
+            };
             let fetch = match &fallback {
                 // Bundled in this chunk, with nothing to fetch, but run when first read: a package that reads another shared
                 // package has to wait for it, and an import would run it as soon as this chunk loads.
@@ -562,7 +695,7 @@ impl Federation {
                 Some(path) => format!("get: () => import({}).then((ns) => () => rt.fallbackValue(ns))", quote(&path.to_string_lossy())),
                 None => "consumeOnly: true, get: () => Promise.reject(new Error(\"the shared package is not bundled here and no other application provides it\"))".to_string(),
             };
-            shared_lines.push(format!("    {}: {{ version: {version_text}, scope: [{scope}], shareConfig: {config}, {fetch} }},\n", quote(key)));
+            shared_lines.push(format!("    {}: {{ version: {version_text}, scope: [{scope}], shareConfig: {config}, {fetch}{shaken} }},\n", quote(key)));
             shared_used.push(key.to_string());
         };
         for item in &self.shared {
@@ -594,11 +727,22 @@ impl Federation {
             }
         }
 
-        let remotes = self
-            .remotes
-            .iter()
-            .map(|r| format!("    {{ name: {}, entry: {}, type: {}, entryGlobalName: {}, shareScope: {} }},\n", quote(&r.name), quote(&r.entry), quote(&r.kind), quote(&r.global_name), if r.share_scope.len() == 1 { quote(&r.share_scope[0]) } else { format!("[{}]", r.share_scope.iter().map(|s| quote(s)).collect::<Vec<_>>().join(", ")) }))
-            .collect::<String>();
+        let mut remotes = String::new();
+        for r in &self.remotes {
+            let scope = if r.share_scope.len() == 1 { quote(&r.share_scope[0]) } else { format!("[{}]", r.share_scope.iter().map(|s| quote(s)).collect::<Vec<_>>().join(", ")) };
+            let how = match r.kind.as_str() {
+                "code" => format!("type: \"code\", entry: \"\", load: () => ({})", r.entry),
+                "internal" => match resolve_path(&r.entry) {
+                    Ok((path, _)) => format!("type: \"code\", entry: \"\", load: () => import({})", quote(&path.to_string_lossy())),
+                    Err(message) => {
+                        problems.push(problem(format!("remote {}: {message}", r.name)));
+                        continue;
+                    }
+                },
+                kind => format!("entry: {}, type: {}, entryGlobalName: {}", quote(&r.entry), quote(kind), quote(&r.global_name)),
+            };
+            remotes.push_str(&format!("    {{ name: {}, {how}, shareScope: {scope} }},\n", quote(&r.name)));
+        }
 
         let mut expose_lines = String::new();
         for expose in &self.exposes {
@@ -663,6 +807,7 @@ impl Federation {
             return Err(problems);
         }
         *self.files.write().expect("files") = Arc::new(files);
+        *self.shaken.lock().expect("shaken") = shaken;
         Ok(())
     }
 
@@ -686,6 +831,10 @@ impl Federation {
         }
         let mut roots: Vec<String> = absolute.iter().enumerate().map(|(i, p)| self.wrap_entry(i, p)).collect();
         roots.push(self.core_path().to_string_lossy().into_owned());
+        let mut alone = options.clone();
+        alone.federation = None;
+        alone.cache = None;
+        *self.graph_options.lock().expect("graph_options") = Some(alone);
         let cache = options.cache.clone().unwrap_or_default();
         let mut used = BTreeSet::new();
         let mut round_options = options.clone();
@@ -811,8 +960,8 @@ impl Federation {
     }
 
     fn read_types_now(&self) {
-        let remotes = self.remotes.iter().map(|r| format!("{{\"name\":{},\"entry\":{}}}", quote(&r.name), quote(&r.entry))).collect::<Vec<_>>().join(",");
-        let input = format!("{{\"command\":\"consume\",\"cwd\":{},\"remotes\":[{remotes}],\"typesFolder\":{}}}", quote(&self.cwd.to_string_lossy()), quote(&self.dts.consume_folder));
+        let remotes = self.remotes.iter().filter(|r| !matches!(r.kind.as_str(), "code" | "internal")).map(|r| format!("{{\"name\":{},\"entry\":{}}}", quote(&r.name), quote(&r.entry))).collect::<Vec<_>>().join(",");
+        let input = format!("{{\"command\":\"consume\",\"cwd\":{},\"remotes\":[{remotes}],\"typesFolder\":{},\"updateTsConfig\":{}}}", quote(&self.cwd.to_string_lossy()), quote(&self.dts.consume_folder), self.dts.update_ts_config);
         match run_node(DTS, &input, &self.cwd) {
             Ok(answer) => {
                 if let Some(Json::Array(notes)) = answer.get("messages") {
@@ -821,7 +970,7 @@ impl Federation {
                     }
                 }
                 let got = answer.get("fetched").and_then(Json::as_array).map_or(0, |a| a.len());
-                if got == self.remotes.len() {
+                if got == self.remotes.iter().filter(|r| !matches!(r.kind.as_str(), "code" | "internal")).count() {
                     self.types_read.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
             }
@@ -870,6 +1019,40 @@ impl Federation {
         }
     }
 
+    /// The bundle settings of the build, for the copies that are built apart.
+    pub fn remember(&self, options: &crate::bundle::Options) {
+        *self.bundle_options.lock().expect("bundle_options") = Some(options.clone());
+    }
+
+    /// The copies of shared packages with only the exports the application reads: each a bundle of its own, so it carries
+    /// nothing the others in the build use (code shared between chunks would pull in the whole package).
+    fn shaken_files(self: &Arc<Self>) -> Vec<OutputFile> {
+        let list = self.shaken.lock().expect("shaken").clone();
+        let (Some(graph_options), Some(mut bundle_options)) = (self.graph_options.lock().expect("graph_options").clone(), self.bundle_options.lock().expect("bundle_options").clone()) else { return Vec::new() };
+        bundle_options.splitting = false;
+        bundle_options.federation = None;
+        bundle_options.sourcemap = crate::bundle::SourceMapMode::None;
+        bundle_options.entry_names = Vec::new();
+        bundle_options.file_name = None;
+        let mut files = Vec::new();
+        for (key, file) in list {
+            let entry = format!("{ROOT}/shaken/{key}.js");
+            let fs = Box::new(Overlay { federation: self.clone(), inner: Box::new(crate::resolve::RealFs) });
+            let graph = crate::graph::build_with_fs(fs, &self.cwd, &[entry], &graph_options);
+            if graph.has_errors() {
+                eprintln!("warning: the copy of {key} with only the exports in use was not built: {}", graph.diagnostics.iter().find(|d| d.severity == Severity::Error).map_or(String::new(), |d| d.message.clone()));
+                continue;
+            }
+            let linked = crate::link::link(&graph);
+            let shaken = crate::shake::shake(&graph, &linked);
+            match crate::bundle::bundle(&graph, &linked, &shaken, &bundle_options) {
+                Ok(output) => files.push(OutputFile { name: file, code: output.code, map: None, data: None }),
+                Err(problems) => eprintln!("warning: the copy of {key} with only the exports in use was not built: {}", problems.first().map_or("", |d| d.message.as_str())),
+            }
+        }
+        files
+    }
+
     /// The files others read: the entry that names the container, and the manifest.
     pub fn finish(self: &Arc<Self>, output: &mut Output, hot: bool, repeated: bool) -> Result<(), String> {
         let core = self.core_path().to_string_lossy().into_owned();
@@ -878,6 +1061,7 @@ impl Federation {
             let styles: Vec<(String, Vec<String>)> = self.expose_assets(output).into_iter().filter(|(_, _, _, css)| !css.is_empty()).map(|(e, _, _, css)| (e.key.clone(), css)).collect();
             output.files.push(OutputFile { name: self.filename.clone(), code: self.remote_entry(&core_file, hot, &styles), map: None, data: None });
         }
+        output.files.extend(self.shaken_files());
         let types = self.types_files(repeated);
         let has_types = types.iter().any(|f| f.name == format!("{}.zip", self.dts.types_folder));
         output.files.extend(types);
@@ -893,6 +1077,8 @@ impl Federation {
         let file = quote(core_file);
         let base = match &self.public_path {
             Some(p) => quote(&if p.ends_with('/') { p.clone() } else { format!("{p}/") }),
+            // SystemJS runs the module later, when there is no current script; it says where the module is.
+            None if self.library_type == "system" => "context.meta.url.slice(0, context.meta.url.lastIndexOf('/') + 1)".to_string(),
             None => "(document.currentScript && document.currentScript.src ? document.currentScript.src.slice(0, document.currentScript.src.lastIndexOf('/') + 1) : '')".to_string(),
         };
         // The style sheets of an exposed module load with it, so a host that knows nothing of them still gets them.
@@ -924,6 +1110,7 @@ impl Federation {
             "this" => format!("this[{}] = {container};\n", quote(name)),
             "assign" | "assign-properties" => format!("{name} = {container};\n"),
             "commonjs" | "commonjs2" => format!("module.exports = {container};\n"),
+            "system" => format!("System.register([], (exports, context) => ({{ execute: () => {{ exports({container}); }} }}));\n"),
             "umd" => format!("(function (root, factory) {{ if (typeof exports === 'object' && typeof module === 'object') module.exports = factory(); else root[{}] = factory(); }})(typeof self !== 'undefined' ? self : this, () => {container});\n", quote(name)),
             _ => format!("var {name};\n{name} = {container};\n"),
         }
@@ -1022,6 +1209,7 @@ impl Federation {
             kind = quote(match self.library_type.as_str() {
                 "module" => "module",
                 "commonjs" | "commonjs2" => "commonjs",
+                "system" => "system",
                 _ => "global",
             }),
             global = quote(&self.library_name),

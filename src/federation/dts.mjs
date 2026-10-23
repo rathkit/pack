@@ -1,8 +1,8 @@
 // Types for module federation, written and read the way the other bundlers do it:
 //
 //   a remote publishes @mf-types.zip (compiled-types/*.d.ts of what it exposes, and apis.d.ts) and @mf-types.d.ts;
-//   a host downloads the zip of every remote that has one into @mf-types/<remote>/ and maps `remote/expose` to
-//   those files in the `paths` of its tsconfig.json.
+//   a host downloads the zip of every remote that has one into @mf-types/<remote>/ and makes `remote/expose` find
+//   those files (a folder in node_modules, or the `paths` of tsconfig.json when asked).
 //
 // It runs in Node with the project's own `typescript` package, which is needed to write types, not to read them.
 // The request is JSON on stdin; the answer is JSON on stdout.
@@ -144,6 +144,8 @@ async function get(url, timeout = 5000) {
   return response;
 }
 
+const hasDefault = (text) => /export\s+default\b|export\s*\{[^}]*\bas\s+default\b[^}]*\}|export\s*\{\s*default\b/.test(text);
+
 // `import "remote/expose"` is found through `paths` in tsconfig.json, one exact entry for each exposed module.
 function mapPaths(paths) {
   const file = path.join(cwd, 'tsconfig.json');
@@ -165,9 +167,34 @@ function mapPaths(paths) {
   fs.writeFileSync(file, JSON.stringify(config, null, indent) + '\n');
 }
 
-async function consume({ remotes, typesFolder = '@mf-types' }) {
+// The declarations of a remote, as the editor finds them for `import "remote/expose"`: a folder of the remote's name in
+// node_modules, with a file for each exposed module that passes on the real declarations, which stay in @mf-types. No
+// setting of the project has to change. (It is not done where the folder is a package someone installed.)
+function linkModules(modules) {
+  for (const [name, entries] of Object.entries(modules)) {
+    const folder = path.join(cwd, 'node_modules', name);
+    const marker = path.join(folder, 'package.json');
+    if (fs.existsSync(folder) && !(fs.existsSync(marker) && JSON.parse(fs.readFileSync(marker, 'utf8'))['rathkit-types'])) {
+      note(`the remote ${name} shares its name with an installed package, so its types were put in @mf-types only; map them in tsconfig.json "paths" or rename the remote`);
+      continue;
+    }
+    fs.rmSync(folder, { recursive: true, force: true });
+    fs.mkdirSync(folder, { recursive: true });
+    fs.writeFileSync(marker, JSON.stringify({ name, private: true, 'rathkit-types': true }, null, 2) + '\n');
+    for (const [expose, { file, hasDefault }] of Object.entries(entries)) {
+      const target = path.join(folder, `${expose}.d.ts`);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      const from = path.relative(path.dirname(target), file).split(path.sep).join('/');
+      const spec = JSON.stringify(from.startsWith('.') ? from : './' + from);
+      fs.writeFileSync(target, `export * from ${spec};\n${hasDefault ? `export { default } from ${spec};\n` : ''}`);
+    }
+  }
+}
+
+async function consume({ remotes, typesFolder = '@mf-types', updateTsConfig = false }) {
   const root = path.resolve(cwd, typesFolder);
   const paths = {};
+  const modules = {};
   const fetched = [];
   const relative = (target) => './' + path.relative(cwd, target).split(path.sep).join('/');
   for (const remote of remotes) {
@@ -188,13 +215,20 @@ async function consume({ remotes, typesFolder = '@mf-types' }) {
         fs.writeFileSync(target, data);
       }
       const apis = files.find(([f]) => f === 'apis.d.ts')?.[1].toString() ?? '';
-      for (const [, key, file] of apis.matchAll(/T extends '([^']+)' \? typeof import\('\.\/([^']+)'\)/g)) paths[key] = [relative(path.join(folder, file))];
+      modules[remote.name] = {};
+      for (const [, key, file] of apis.matchAll(/T extends '([^']+)' \? typeof import\('\.\/([^']+)'\)/g)) {
+        const real = path.join(folder, file);
+        paths[key] = [relative(real)];
+        const text = files.find(([f]) => f === `${file}.d.ts`)?.[1].toString() ?? '';
+        modules[remote.name][key.slice(remote.name.length + 1)] = { file: real, hasDefault: hasDefault(text) };
+      }
       fetched.push(remote.name);
     } catch (error) {
       note(`types of the remote ${remote.name} were not read: ${error.message}`);
     }
   }
-  mapPaths(paths);
+  linkModules(modules);
+  if (updateTsConfig) mapPaths(paths);
   return { fetched };
 }
 

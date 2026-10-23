@@ -331,6 +331,9 @@ struct Bundler<'a> {
     hot: bool,
     entry_names: Vec<Option<String>>,
     federation: Option<std::sync::Arc<crate::federation::Federation>>,
+    /// Module federation: chunks whose code reads shared packages and remotes wait for the runtime to have loaded them
+    /// before they run, and what they call to do it.
+    ready_calls: HashMap<usize, Vec<Piece>>,
     format: Format,
     global_name: Option<String>,
     globals: Vec<(String, String)>,
@@ -431,6 +434,7 @@ impl<'a> Bundler<'a> {
             hot: false,
             entry_names: Vec::new(),
             federation: None,
+            ready_calls: HashMap::new(),
             format: Format::Esm,
             global_name: None,
             globals: Vec::new(),
@@ -528,6 +532,7 @@ impl<'a> Bundler<'a> {
         }
         let order = self.execution_order(&roots, &forced);
         self.plan = if self.splitting { self.split_plan(&roots) } else { self.single_plan() };
+        self.federation_waits();
         let names = self.allocate_names();
         let links = self.chunk_links(&root_exports, &order);
         let chunk_infos = self.chunk_infos(&roots, &root_exports, &links);
@@ -580,6 +585,59 @@ impl<'a> Bundler<'a> {
         files.extend(self.style_and_asset_files(&settings, options)?);
         let code = files.first().map(|f| f.code.clone()).unwrap_or_default();
         Ok(Output { code, files, chunks: chunk_infos })
+    }
+
+    /// With module federation, what a chunk of the application reads from a shared package or a remote is there only once the
+    /// runtime has loaded it. Entry points wait for that before their own code, but a chunk of code they share, or that a
+    /// module of the application the entry does not import shares with an exposed one, may run first. So every chunk with
+    /// application code in it waits too (unless it is the runtime itself, or loaded by the runtime to get a package).
+    fn federation_waits(&mut self) {
+        let Some(federation) = self.federation.clone() else { return };
+        let graph = self.graph;
+        let Some(core) = graph.modules.iter().find(|m| m.path == federation.core_path()).map(|m| m.id) else { return };
+        let Some(binding) = resolve_export(graph, core, "ready") else { return };
+        let fallbacks: Vec<std::path::PathBuf> = federation.fallback_paths();
+        let reach = |starts: Vec<ModuleId>, dynamic: bool| -> HashSet<ModuleId> {
+            let mut seen = HashSet::new();
+            let mut stack = starts;
+            while let Some(id) = stack.pop() {
+                if !seen.insert(id) {
+                    continue;
+                }
+                let module = graph.module(id);
+                for (request, edge) in module.record.requests.iter().zip(&module.edges) {
+                    if let Edge::Module(t) = edge {
+                        if dynamic || request.kind != RequestKind::Dynamic {
+                            stack.push(*t);
+                        }
+                    }
+                }
+            }
+            seen
+        };
+        let fallback_ids: Vec<ModuleId> = graph.modules.iter().filter(|m| fallbacks.contains(&m.path)).map(|m| m.id).collect();
+        // The runtime and the copies it loads to give a package: they cannot wait for themselves.
+        let mut inner = reach(vec![core], false);
+        inner.extend(reach(fallback_ids.clone(), false));
+        // The application: the entry points and what is exposed, with everything they reach.
+        let mut roots: Vec<ModuleId> = graph.entries.clone();
+        for (request, edge) in graph.module(core).record.requests.iter().zip(&graph.module(core).edges) {
+            if let (Edge::Module(t), RequestKind::Dynamic) = (edge, request.kind) {
+                if !fallback_ids.contains(t) {
+                    roots.push(*t);
+                }
+            }
+        }
+        let app = reach(roots, true);
+        for c in 0..self.plan.chunks.len() {
+            let modules = &self.plan.chunks[c].modules;
+            if modules.contains(&core) || !modules.iter().any(|m| app.contains(m) && !inner.contains(m)) {
+                continue;
+            }
+            let Some(&first) = modules.first() else { continue };
+            let pieces = self.binding_pieces(Some(first), &binding);
+            self.ready_calls.insert(c, pieces);
+        }
     }
 
     /// What each chunk holds and how it connects to the others.
@@ -3034,6 +3092,10 @@ impl Bundler<'_> {
             }
             out.push_str(&functions);
             let _ = write!(out, "var {} = __esm(() => {{\n{body}}});\n", names[&Key::Init(module.id)]);
+            cuts.push(out.len());
+        }
+        if let Some(pieces) = self.ready_calls.get(&chunk) {
+            let _ = writeln!(out, "await {}();", self.text_of(pieces, names));
             cuts.push(out.len());
         }
         for item in order {

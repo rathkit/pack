@@ -249,6 +249,8 @@ async function loadEntry(host, info) {
   const emitted = await host.remoteHandler.hooks.lifecycle.loadEntry.emit({ loaderHook: host.loaderHook, remoteInfo: info, remoteEntryExports: undefined });
   if (emitted && typeof emitted === 'object' && (emitted.init || emitted.get)) return emitted;
   let { entry, type, entryGlobalName } = info;
+  // An address written as code gives the container, or a promise of it.
+  if (typeof info.load === 'function') return info.load();
   if (/\.json(?:$|[?#])/.test(entry)) {
     const manifest = await readManifest(host, entry);
     const found = manifestInfo(manifest, entry);
@@ -263,6 +265,10 @@ async function loadEntry(host, info) {
     if (type === 'module' || type === 'esm') {
       const exports = await importEntry(entry);
       return exports.get || exports.init ? exports : exports.default;
+    }
+    if (type === 'system' || type === 'systemjs') {
+      if (!root.System || typeof root.System.import !== 'function') fail('RUNTIME-001', `${entry} is a SystemJS module and SystemJS is not on the page.`);
+      return await root.System.import(entry);
     }
     if (type === 'commonjs' || type === 'cjs') {
       const { createRequire } = await import(/* @vite-ignore */ 'node:module');
@@ -466,6 +472,19 @@ class RemoteHandler {
 
 // ---- shared packages -----------------------------------------------------------------------
 
+// `include` and `exclude` say which copies of a package may be shared: by the version of the copy bundled here, and by
+// the request. A copy that is left out is used by this application alone.
+function leftOut({ version = '0', include, exclude }, name) {
+  const matches = (rule) => {
+    if (!rule) return true;
+    if (rule.version !== undefined && !satisfy(rule.fallbackVersion || version, rule.version)) return false;
+    if (rule.request !== undefined && !new RegExp(rule.request).test(name)) return false;
+    return true;
+  };
+  if (include && !matches(include)) return true;
+  return Boolean(exclude && Object.keys(exclude).length && matches(exclude));
+}
+
 function formatShare(args, from, name, strategy) {
   let get;
   if ('get' in args) get = args.get;
@@ -484,6 +503,8 @@ function formatShare(args, from, name, strategy) {
     version,
     scope: Array.isArray(args.scope) ? args.scope : [args.scope || DEFAULT_SCOPE],
     strategy: args.strategy || strategy || 'version-first',
+    treeShaking: args.treeShaking ? { ...args.treeShaking, useIn: [] } : undefined,
+    local: leftOut({ version: args.version, include: (args.shareConfig || {}).include ?? args.include, exclude: (args.shareConfig || {}).exclude ?? args.exclude }, name),
   };
 }
 
@@ -569,7 +590,7 @@ class SharedHandler {
           this.hooks.lifecycle.beforeRegisterShare.emit({ origin: this.host, pkgName: name, shared });
           const registered = this.host.shareScopeMap[sc] && this.host.shareScopeMap[sc][name];
           const before = registered && registered[shared.version];
-          if (!registered && !shared.consumeOnly) this.set(name, sc, shared, { loaded: shared.loaded || Boolean(shared.lib), from: user.name });
+          if (!registered && !shared.consumeOnly && !shared.local) this.set(name, sc, shared, { loaded: shared.loaded || Boolean(shared.lib), from: user.name });
           this.afterRegister(name, { scope: sc, shared, previousShared: before, registeredShared: this.host.shareScopeMap[sc] && this.host.shareScopeMap[sc][name] && this.host.shareScopeMap[sc][name][shared.version], trigger: 'runtime' });
         }
       }
@@ -610,7 +631,7 @@ class SharedHandler {
       if (replace) versions[version] = shared;
       this.afterRegister(pkg, { scope: scopeName, shared, previousShared: existing, registeredShared: versions[version], trigger: from || 'runtime' });
     };
-    for (const [pkg, list] of Object.entries(host.options.shared)) for (const shared of list) if (shared.scope.includes(scopeName) && !shared.consumeOnly) register(pkg, shared);
+    for (const [pkg, list] of Object.entries(host.options.shared)) for (const shared of list) if (shared.scope.includes(scopeName) && !shared.consumeOnly && !shared.local) register(pkg, shared);
     if (host.options.shareStrategy === 'version-first' || strategy === 'version-first') {
       for (const remote of host.options.remotes) {
         if (toArray(remote.shareScope || DEFAULT_SCOPE).includes(scopeName)) promises.push(this.initRemote(remote.name, initScope));
@@ -647,8 +668,16 @@ class SharedHandler {
       const before = await this.hooks.lifecycle.beforeLoadShare.emit({ pkgName: name, shareInfo: info, shared: host.options.shared, origin: host, loadContext: extra.context });
       info = before.shareInfo;
       if (!info) fail('RUNTIME-009', `"${name}" is not shared by "${host.options.name}".`);
+      if (info.local) {
+        // Left out of sharing by include / exclude: this application's own copy, found without asking the scope.
+        info.loading ||= Promise.resolve(info.get()).then((factory) => (info.lib = factory));
+        return info.loading;
+      }
       const found = findRegisteredShare(host.shareScopeMap, name, info, this.hooks.lifecycle.resolveShare);
-      const target = found && found.shared;
+      // A copy that has only some of the exports is used when it has all that this application reads.
+      const wanted = info.treeShaking && info.treeShaking.usedExports;
+      const variantOf = (entry) => (wanted && entry.treeShaking && typeof entry.treeShaking.get === 'function' && wanted.every((n) => (entry.treeShaking.usedExports || []).includes(n)) ? entry.treeShaking : entry);
+      const target = found && found.shared && variantOf(found.shared);
       const use = (shared) => {
         const users = (shared.useIn ||= []);
         if (!users.includes(host.options.name)) users.push(host.options.name);
@@ -680,14 +709,15 @@ class SharedHandler {
       if (extra.customShareInfo) return false;
       if (info.consumeOnly) fail('RUNTIME-012', `The shared "${name}" is not bundled in "${host.options.name}" and no other application provides it.`);
       // Nothing registered one: use the host's own copy.
+      const own = variantOf(info);
       const loading = (async () => {
-        const factory = await info.get();
-        info.lib = factory;
-        info.loaded = true;
-        use(info);
+        const factory = await own.get();
+        own.lib = factory;
+        own.loaded = true;
+        use(own);
         return factory;
       })();
-      info.loading = loading;
+      own.loading = loading;
       for (const sc of info.scope) this.set(name, sc, info, { loaded: false, from: host.options.name });
       const factory = await loading;
       this.hooks.lifecycle.afterLoadShare.emit({ pkgName: name, shareInfo: info, selectedShared: info, origin: host });
