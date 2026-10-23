@@ -634,7 +634,8 @@ class SharedHandler {
     for (const [pkg, list] of Object.entries(host.options.shared)) for (const shared of list) if (shared.scope.includes(scopeName) && !shared.consumeOnly && !shared.local) register(pkg, shared);
     if (host.options.shareStrategy === 'version-first' || strategy === 'version-first') {
       for (const remote of host.options.remotes) {
-        if (toArray(remote.shareScope || DEFAULT_SCOPE).includes(scopeName)) promises.push(this.initRemote(remote.name, initScope));
+        // A container that is a module of this application shares nothing of its own, so it is not started to find out what.
+        if (!remote.internal && toArray(remote.shareScope || DEFAULT_SCOPE).includes(scopeName)) promises.push(this.initRemote(remote.name, initScope));
       }
     }
     return promises;

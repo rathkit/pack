@@ -1372,7 +1372,9 @@ impl<'a> Bundler<'a> {
     /// The modules the imports of `id` are declared in. A file of re-exports that is left out of the output (it has nothing
     /// of its own to run) is passed over, and what it passes on is reached through the bindings.
     fn bound_modules(&self, id: ModuleId) -> Vec<ModuleId> {
-        self.linked.imports[id.index()].values().filter_map(|b| self.binding_module(b)).collect()
+        // Only imports that are used: one the shaker found no use for does not make the module it names part of the entry.
+        let shaken = &self.shaken.modules[id.index()];
+        self.linked.imports[id.index()].iter().filter(|(symbol, _)| !shaken.demand_known || shaken.demanded.contains(symbol)).filter_map(|(_, b)| self.binding_module(b)).collect()
     }
 
     /// Whether loading `target` this way starts a chunk of its own: `import()` of an ES module. A

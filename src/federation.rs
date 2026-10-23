@@ -758,7 +758,7 @@ impl Federation {
                         // It is read like a bundled copy of a shared package: by the runtime, to give a container.
                         self.fallbacks.lock().expect("fallbacks").insert(path.clone(), format!("internal:{}", r.name));
                         internal.push(path.clone());
-                        format!("type: \"code\", entry: \"\", load: () => import({})", quote(&path.to_string_lossy()))
+                        format!("type: \"code\", entry: \"\", internal: true, load: () => import({})", quote(&path.to_string_lossy()))
                     }
                     Err(message) => {
                         problems.push(problem(format!("remote {}: {message}", r.name)));
