@@ -82,10 +82,12 @@ function token(lines, line, col) {
 }
 
 // What --minify-syntax writes in place of other tokens: `!0` for `true`, `void 0` for `undefined`,
-// another spelling of a number, a bare name for a quoted one, `.` for `[`, `(` for `{`.
+// another spelling of a number, an enum member's value, a bare name for a quoted one, `.` for `[`, `(` for `{`.
 function isSyntaxRewrite(g, s) {
   if (["true", "false", "undefined"].includes(s.text)) return ["!", "void", "("].includes(g.text);
   if (g.kind === "num" && s.kind === "num") return true;
+  // An enum member written as its value: `Color.Red` becomes `0`, `"S"` or `(-3)`.
+  if (s.kind === "id" && (g.kind === "num" || ['"', "(", "-"].includes(g.text))) return true;
   // `.5` for `0.5`, and an operator for the punctuation it replaces (`)` becomes `?`, `}` becomes `:` or `;`).
   if (s.kind === "num" && g.text === ".") return true;
   if (g.kind === "punct" && s.kind === "punct") return true;

@@ -91,7 +91,9 @@ rathkit-pack bundle src/main.ts --outfile dist/app.mjs
   `import x = require()` and `export =` become JavaScript. Decorators work in both kinds:
   standard (TC39) decorators and `accessor` members by default, and TypeScript's legacy
   decorators with `emitDecoratorMetadata` when `experimentalDecorators` is on, so NestJS-style
-  dependency injection runs.
+  dependency injection runs. A member of an enum whose value is a constant (`Color.Red`,
+  `Color["Red"]`, also through imports and re-exports) is written as that value, and an enum
+  nothing else reads is dropped. As TypeScript requires, members are taken to be read-only.
 - `--minify` removes whitespace and comments, gives local bindings short names, scope by
   scope and most-used first, and writes the program shorter (`--minify-whitespace`,
   `--minify-identifiers` and `--minify-syntax` do one each; the last always writes compactly).

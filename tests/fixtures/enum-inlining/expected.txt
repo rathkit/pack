@@ -1,0 +1,15 @@
+0 5 6 -3 16 21 9
+S L2 SL2 S
+1 10
+3 7 8
+2 4 5
+6 5
+1 2 4 4
+5.0 -3 1
+9 3 number true
+6 L2
+undefined Green X
+14 Short,Long,L2,Both,SL2
+shadowed
+6/S/16/-3/5 { red: 0, derived: 8, nested: [ 'S', [ 21 ] ] } 0-4
+8 Derived,Palette,default,lazyValue

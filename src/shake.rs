@@ -19,6 +19,7 @@
 use std::collections::HashMap;
 
 use crate::ast::NodeId;
+use crate::enums::EnumTable;
 use crate::graph::{Edge, Graph, ModuleId, ModuleKind};
 use crate::link::{Binding, Linked, export_names, resolve_export};
 use crate::module::RequestKind;
@@ -64,6 +65,8 @@ pub struct ModuleShake {
 #[derive(Debug)]
 pub struct Shaken {
     pub modules: Vec<ModuleShake>,
+    /// The enum members the bundle replaces by their values; the parts do not use the enums for them.
+    pub enums: EnumTable,
 }
 
 impl Shaken {
@@ -81,17 +84,18 @@ impl Shaken {
 /// Keeps everything: every module and every statement. For comparing a bundle with and
 /// without shaking.
 pub fn keep_everything(graph: &Graph) -> Shaken {
-    let mut modules: Vec<ModuleShake> = graph.modules.iter().map(|m| build_parts(graph, m.id)).collect();
+    let mut modules: Vec<ModuleShake> = graph.modules.iter().map(|m| build_parts(graph, m.id, None)).collect();
     for module in &mut modules {
         module.included = true;
         module.live = vec![true; module.parts.len()];
     }
-    Shaken { modules }
+    Shaken { modules, enums: EnumTable::empty() }
 }
 
 /// Decides what to keep, starting from the graph's entry points.
 pub fn shake(graph: &Graph, linked: &Linked) -> Shaken {
-    let mut modules: Vec<ModuleShake> = graph.modules.iter().map(|m| build_parts(graph, m.id)).collect();
+    let enums = EnumTable::build(graph);
+    let mut modules: Vec<ModuleShake> = graph.modules.iter().map(|m| build_parts(graph, m.id, Some((&enums, linked)))).collect();
     let mut by_symbol: Vec<HashMap<SymbolId, Vec<usize>>> = Vec::with_capacity(modules.len());
     for module in &modules {
         let mut map: HashMap<SymbolId, Vec<usize>> = HashMap::new();
@@ -111,7 +115,7 @@ pub fn shake(graph: &Graph, linked: &Linked) -> Shaken {
     for module in &mut modules {
         module.demand_known = true;
     }
-    Shaken { modules }
+    Shaken { modules, enums }
 }
 
 enum Work {
@@ -295,7 +299,7 @@ impl Shaker<'_> {
 }
 
 /// Splits an ES module's top level into parts. Other kinds of module have none.
-fn build_parts(graph: &Graph, id: ModuleId) -> ModuleShake {
+fn build_parts(graph: &Graph, id: ModuleId, enums: Option<(&EnumTable, &Linked)>) -> ModuleShake {
     let module = graph.module(id);
     let (ModuleKind::Esm, Some(parsed)) = (module.kind, module.parsed.as_ref()) else { return ModuleShake::default() };
     use crate::ast::NodeKind;
@@ -341,7 +345,17 @@ fn build_parts(graph: &Graph, id: ModuleId) -> ModuleShake {
         // Collect every module-level name the statement refers to, however deeply nested.
         let mut uses = Vec::new();
         stack.push(stmt);
+        let mut written = std::collections::HashSet::new();
         while let Some(node) = stack.pop() {
+            match ast[node].kind {
+                NodeKind::Assign { target, .. } => {
+                    written.insert(target);
+                }
+                NodeKind::Update { arg, .. } | NodeKind::Unary { op: crate::ast::UnaryOp::Delete, arg } => {
+                    written.insert(arg);
+                }
+                _ => {}
+            }
             match ast[node].kind {
                 NodeKind::Ident(_) => {
                     if let Some(symbol) = semantic.symbol_of(node) {
@@ -351,10 +365,24 @@ fn build_parts(graph: &Graph, id: ModuleId) -> ModuleShake {
                     }
                     continue;
                 }
-                NodeKind::Member { object, prop } if !ast[node].has(crate::ast::flags::COMPUTED) => {
-                    if let (NodeKind::Ident(_), NodeKind::PropName(name)) = (ast[object].kind, ast[prop].kind) {
+                NodeKind::Member { object, prop } => {
+                    let name = match ast[prop].kind {
+                        NodeKind::PropName(name) if !ast[node].has(crate::ast::flags::COMPUTED) => Some(name),
+                        NodeKind::Str(name) if ast[node].has(crate::ast::flags::COMPUTED) => Some(name),
+                        _ => None,
+                    };
+                    if let (NodeKind::Ident(_), Some(name)) = (ast[object].kind, name) {
                         if let Some(symbol) = semantic.symbol_of(object) {
                             if semantic.symbol(symbol).scope == root {
+                                if let Some((table, linked)) = enums {
+                                    if !written.contains(&node) && table.member(linked, id, symbol, ast.atom(name)).is_some() {
+                                        continue;
+                                    }
+                                }
+                                if ast[node].has(crate::ast::flags::COMPUTED) {
+                                    uses.push(Use::Symbol(symbol));
+                                    continue;
+                                }
                                 uses.push(Use::Member(symbol, ast.atom(name).to_string()));
                                 continue;
                             }

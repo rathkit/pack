@@ -2,6 +2,7 @@ pub mod ast;
 pub mod css;
 pub mod define;
 pub mod dump;
+pub mod enums;
 pub mod estree;
 pub mod fxhash;
 pub mod lexer;

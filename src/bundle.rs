@@ -28,6 +28,7 @@ use crate::graph::{Diagnostic, Edge, Graph, Module, ModuleId, ModuleKind};
 use crate::link::{Binding, Linked, export_names, resolve_export};
 use crate::module::{ImportName, RequestKind};
 use crate::semantic::{ScopeKind, Semantic, SymbolId, SymbolKind};
+use crate::enums::{EnumValue, number_text};
 use crate::shake::Shaken;
 
 /// A thing that needs a name in the output.
@@ -1882,6 +1883,30 @@ impl<'a> Scanner<'_, 'a> {
         self.edits.push(Edit { start, end, pieces, shorthand, transparent: false });
     }
 
+    /// The text of an enum member's value, for `Enum.Member` and `Enum["Member"]`.
+    fn inlined_enum_member(&self, node: NodeId, object: NodeId, prop: NodeId) -> Option<String> {
+        let ast = self.ast;
+        let name = match ast[prop].kind {
+            NodeKind::PropName(a) if !ast[node].has(flags::COMPUTED) => a,
+            NodeKind::Str(a) if ast[node].has(flags::COMPUTED) => a,
+            _ => return None,
+        };
+        let symbol = self.semantic.symbol_of(object)?;
+        if self.semantic.symbol(symbol).scope != self.semantic.root_scope() {
+            return None;
+        }
+        let value = self.bundler.shaken.enums.member(self.bundler.linked, self.module.id, symbol, ast.atom(name))?;
+        Some(match value {
+            EnumValue::Str(text) => json_string(&text),
+            EnumValue::Num(n) => {
+                let text = number_text(n);
+                // `-1.x` and `1.x` read differently from `(-1).x` and `(1).x`.
+                let member_access = self.module.source[ast[node].span.end as usize..].trim_start().starts_with('.');
+                if text.starts_with('-') || n.is_nan() || n.is_infinite() || member_access { format!("({text})") } else { text }
+            }
+        })
+    }
+
     /// A bare member name inside an enum body means `Enum.Member`.
     fn enum_member_reference(&mut self, node: NodeId, sym_id: SymbolId) -> Option<Vec<Piece>> {
         let sym = self.semantic.symbol(sym_id);
@@ -1964,16 +1989,16 @@ impl<'a> Scanner<'_, 'a> {
         if matches!(ast[node].kind, NodeKind::Class { .. }) && !self.bundler.graph.experimental_decorators && !self.skip.contains(&node) && self.needs_standard_lowering(node) {
             self.lower_nested_class(node);
         }
-        if !self.bundler.graph.defines.is_empty() {
-            match ast[node].kind {
-                NodeKind::Assign { target, .. } => {
-                    self.written.insert(target);
-                }
-                NodeKind::Update { arg, .. } | NodeKind::Unary { op: crate::ast::UnaryOp::Delete, arg } => {
-                    self.written.insert(arg);
-                }
-                _ => {}
+        match ast[node].kind {
+            NodeKind::Assign { target, .. } => {
+                self.written.insert(target);
             }
+            NodeKind::Update { arg, .. } | NodeKind::Unary { op: crate::ast::UnaryOp::Delete, arg } => {
+                self.written.insert(arg);
+            }
+            _ => {}
+        }
+        if !self.bundler.graph.defines.is_empty() {
             if matches!(ast[node].kind, NodeKind::Ident(_) | NodeKind::Member { .. } | NodeKind::ImportMeta) && !self.written.contains(&node) {
                 if let Some(define) = self.bundler.graph.defines.lookup(ast, self.semantic, node) {
                     let text = define.replacement();
@@ -2080,6 +2105,12 @@ impl<'a> Scanner<'_, 'a> {
                         return;
                     }
                 }
+            }
+            // `Enum.Member` with a value known at build time.
+            NodeKind::Member { object, prop } if matches!(ast[object].kind, NodeKind::Ident(_)) && !self.written.contains(&node) && self.inlined_enum_member(node, object, prop).is_some() => {
+                let text = self.inlined_enum_member(node, object, prop).unwrap();
+                self.push(node, vec![Piece::Text(text)]);
+                return;
             }
             NodeKind::Member { object, prop } if !wrapped && !ast[node].has(flags::COMPUTED) => {
                 if let (NodeKind::Ident(_), NodeKind::PropName(name)) = (ast[object].kind, ast[prop].kind) {
@@ -3027,106 +3058,9 @@ impl Bundler<'_> {
 
 // ---- TypeScript that becomes JavaScript ---------------------------------------------------------
 
-/// A value an enum member is known to have.
-#[derive(Clone, Debug, PartialEq)]
-enum EnumValue {
-    Num(f64),
-    Str(String),
-}
-
-fn number_text(n: f64) -> String {
-    if n.is_nan() {
-        "NaN".to_string()
-    } else if n.is_infinite() {
-        if n > 0.0 { "Infinity" } else { "-Infinity" }.to_string()
-    } else if n == 0.0 && n.is_sign_negative() {
-        "-0".to_string()
-    } else if n.fract() == 0.0 && n.abs() < 1e15 {
-        format!("{}", n as i64)
-    } else {
-        format!("{n}")
-    }
-}
-
-fn to_int32(n: f64) -> i32 {
-    if !n.is_finite() {
-        return 0;
-    }
-    (n.trunc() % 4294967296.0) as i64 as u32 as i32
-}
-
 impl Scanner<'_, '_> {
-    /// The value of a constant enum initializer, if it is one. Members named in it must have
-    /// known values of their own.
     fn eval_enum(&self, id: NodeId, enum_node: NodeId, values: &HashMap<crate::ast::Atom, EnumValue>) -> Option<EnumValue> {
-        use crate::ast::{BinOp, UnaryOp};
-        let ast = self.ast;
-        match ast[id].kind {
-            NodeKind::Num(n) => Some(EnumValue::Num(n.get())),
-            NodeKind::Str(a) => Some(EnumValue::Str(ast.atom(a).to_string())),
-            NodeKind::Template { quasis, exprs } if ast.list(exprs).is_empty() => match ast[*ast.list(quasis).first()?].kind {
-                NodeKind::TemplateElement { cooked: Some(a), .. } => Some(EnumValue::Str(ast.atom(a).to_string())),
-                _ => None,
-            },
-            NodeKind::Unary { op, arg } => {
-                let EnumValue::Num(n) = self.eval_enum(arg, enum_node, values)? else { return None };
-                match op {
-                    UnaryOp::Neg => Some(EnumValue::Num(-n)),
-                    UnaryOp::Pos => Some(EnumValue::Num(n)),
-                    UnaryOp::BitNot => Some(EnumValue::Num(!to_int32(n) as f64)),
-                    _ => None,
-                }
-            }
-            NodeKind::Binary { op, left, right } => {
-                let (l, r) = (self.eval_enum(left, enum_node, values)?, self.eval_enum(right, enum_node, values)?);
-                match (l, r) {
-                    (EnumValue::Num(a), EnumValue::Num(b)) => {
-                        let (ia, ib) = (to_int32(a), to_int32(b));
-                        Some(EnumValue::Num(match op {
-                            BinOp::Add => a + b,
-                            BinOp::Sub => a - b,
-                            BinOp::Mul => a * b,
-                            BinOp::Div => a / b,
-                            BinOp::Rem => a % b,
-                            BinOp::Exp => a.powf(b),
-                            BinOp::Shl => (ia << (ib & 31)) as f64,
-                            BinOp::Shr => (ia >> (ib & 31)) as f64,
-                            BinOp::UShr => ((ia as u32) >> (ib & 31)) as f64,
-                            BinOp::BitAnd => (ia & ib) as f64,
-                            BinOp::BitOr => (ia | ib) as f64,
-                            BinOp::BitXor => (ia ^ ib) as f64,
-                            _ => return None,
-                        }))
-                    }
-                    (EnumValue::Str(a), EnumValue::Str(b)) if op == BinOp::Add => Some(EnumValue::Str(a + &b)),
-                    (EnumValue::Str(a), EnumValue::Num(b)) if op == BinOp::Add => Some(EnumValue::Str(a + &number_text(b))),
-                    (EnumValue::Num(a), EnumValue::Str(b)) if op == BinOp::Add => Some(EnumValue::Str(number_text(a) + &b)),
-                    _ => None,
-                }
-            }
-            // A member of this enum, by its bare name.
-            NodeKind::Ident(_) => {
-                let sym = self.semantic.symbol(self.semantic.symbol_of(id)?);
-                if self.semantic.scope(sym.scope).node == Some(enum_node) {
-                    values.get(&sym.name).cloned()
-                } else {
-                    None
-                }
-            }
-            // `Enum.Member` and `Enum["Member"]` inside its own body.
-            NodeKind::Member { object, prop } => {
-                let NodeKind::TsEnum { name, .. } = ast[enum_node].kind else { return None };
-                if self.semantic.symbol_of(object)? != self.semantic.symbol_of(name)? {
-                    return None;
-                }
-                let member = match ast[prop].kind {
-                    NodeKind::PropName(a) | NodeKind::Str(a) => a,
-                    _ => return None,
-                };
-                values.get(&member).cloned()
-            }
-            _ => None,
-        }
+        crate::enums::eval(self.ast, self.semantic, id, enum_node, values)
     }
 
     /// `enum E { A = 1, B }` as `(function (E) { E[E["A"] = 1] = "A"; ... })(E || (E = {}));`
