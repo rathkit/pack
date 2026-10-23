@@ -229,6 +229,7 @@ impl Default for Options {
 }
 
 /// A file of output.
+#[derive(Clone)]
 pub struct OutputFile {
     pub name: String,
     pub code: String,
@@ -1494,6 +1495,9 @@ impl<'a> Bundler<'a> {
                             match module.kind {
                                 ModuleKind::Esm if self.wrapped.contains(&id) => order.push(Item::RunLazy(id)),
                                 ModuleKind::Esm => order.push(Item::Run(id)),
+                                // What a federated import returns is read where it is used, not when the module is first imported:
+                                // it is not there before the runtime has loaded it.
+                                ModuleKind::CommonJs if module.path.starts_with(crate::federation::ROOT) => {}
                                 ModuleKind::CommonJs => order.push(Item::RunCommonJs(id)),
                                 ModuleKind::Json => {}
                             }

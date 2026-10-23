@@ -79,8 +79,10 @@ rathkit-pack bundle src/main.ts --outfile dist/app.mjs
   `@module-federation/vite`) in the config's `plugins`: the plugin is only read for its options, the bundler does the
   work. It needs the esm format and `--outdir`; the output is split. The runtime that does this is built in
   (`@module-federation/runtime` and `@module-federation/enhanced/runtime` import it, so there is one instance), and
-  it speaks the container protocol of webpack, rspack and the Vite plugin: a remote built by any of them can be loaded
-  by a host built here and the other way around (tested in a browser in both directions).
+  it speaks the container protocol of webpack, rspack and the Vite plugin. Checked in a browser: a host built here loads a
+  remote built by rspack, and a host built by rspack loads a remote built here; a host built here also loads a remote
+  built by Vite with `@module-federation/vite`. (`federation()` from that package is not run: its options are read and
+  the bundler does the work, so options it has beyond those of `ModuleFederationPlugin` are ignored.)
   - `exposes` become chunks that the container (`remoteEntry.js`, or an ES module with `library: { type: "module" }`;
     `var`, `window`, `self`, `global`, `this`, `assign`, `commonjs`, `umd`) loads on request, and `mf-manifest.json`
     lists them with the shared packages and their files (`manifest: false` writes none, `manifest.fileName` renames it).

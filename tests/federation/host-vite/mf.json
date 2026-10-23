@@ -1,0 +1,6 @@
+{
+  "name": "vhost",
+  "remotes": { "vapp": "vapp@http://localhost:4290/remoteEntry.js" },
+  "remoteType": "module",
+  "shared": { "react": { "singleton": true, "requiredVersion": "^19.0.0" } }
+}

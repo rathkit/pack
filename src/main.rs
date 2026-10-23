@@ -767,6 +767,11 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     } else {
         None
     };
+    if let (Some(state), Some(federation)) = (&serve_state, &options.federation) {
+        // Declarations written after a rebuild are served as soon as they are there.
+        let state = state.clone();
+        federation.on_types(std::sync::Arc::new(move |files| state.add_files(files.iter().map(|f| (f.name.clone(), f.data.clone().unwrap_or_else(|| f.code.clone().into_bytes()))).collect())));
+    }
     if let (Some(state), Some(_)) = (&serve_state, &options.federation) {
         // Pages of other dev servers load this one's files, and listen for its reloads.
         let mut origins = vec!["local".to_string()];
@@ -884,7 +889,7 @@ fn run_build(job: &Job) -> Outcome {
     let mut entry_names: Vec<Option<String>> = vec![None; entries.len()];
     let mut seen_chunks: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Some(federation) = &options.federation {
-        federation.read_types();
+        federation.read_types(job.watch);
     }
     let graph = loop {
         let graph = match &options.federation {
@@ -1024,7 +1029,7 @@ fn run_build(job: &Job) -> Outcome {
     }
     let mut result = rathkit_pack::bundle::bundle(&graph, &linked, &shaken, &bundle_options);
     if let (Ok(output), Some(federation)) = (&mut result, &options.federation) {
-        if let Err(message) = federation.finish(output, bundle_options.hot) {
+        if let Err(message) = federation.finish(output, bundle_options.hot, job.watch) {
             result = Err(vec![rathkit_pack::graph::Diagnostic { severity: Severity::Error, message, file: None, pos: None }]);
         }
     }

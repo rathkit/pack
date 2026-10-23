@@ -114,6 +114,19 @@ pub struct Federation {
     used: Mutex<BTreeSet<String>>,
     /// The types of the remotes were read once; the remotes may be down the first time, and a build can ask again.
     types_read: std::sync::atomic::AtomicBool,
+    /// Which shared packages the bundled copy of each shared package reads (`shared:react-dom` reads `shared:react`):
+    /// found from the module graph, so that the packages are loaded in an order that has each in place when it is read.
+    needs: Mutex<std::collections::BTreeMap<String, BTreeSet<String>>>,
+    /// The file each bundled copy of a shared package is built from.
+    fallbacks: Mutex<HashMap<PathBuf, String>>,
+    /// The declarations written for the exposed modules by the last run, and whether another run is going.
+    types_cache: Mutex<Option<Vec<OutputFile>>>,
+    types_running: std::sync::atomic::AtomicBool,
+    /// Told when a later run has new declarations (the development server serves them without a rebuild).
+    types_hook: Mutex<Option<Arc<dyn Fn(&[OutputFile]) + Send + Sync>>>,
+    /// A run that reads the declarations of the remotes is going, and when the last one started.
+    reading: std::sync::atomic::AtomicBool,
+    last_read: Mutex<Option<std::time::Instant>>,
 }
 
 impl std::fmt::Debug for Federation {
@@ -369,6 +382,13 @@ impl Federation {
             files: RwLock::new(Arc::new(HashMap::new())),
             used: Mutex::new(BTreeSet::new()),
             types_read: std::sync::atomic::AtomicBool::new(false),
+            needs: Mutex::new(std::collections::BTreeMap::new()),
+            fallbacks: Mutex::new(HashMap::new()),
+            types_cache: Mutex::new(None),
+            types_running: std::sync::atomic::AtomicBool::new(false),
+            types_hook: Mutex::new(None),
+            reading: std::sync::atomic::AtomicBool::new(false),
+            last_read: Mutex::new(None),
         })
     }
 
@@ -382,6 +402,46 @@ impl Federation {
 
     fn shared_for(&self, specifier: &str) -> Option<&Shared> {
         self.shared.iter().find(|s| s.key == specifier).or_else(|| self.shared.iter().filter(|s| s.key.ends_with('/') && specifier.starts_with(s.key.as_str())).max_by_key(|s| s.key.len()))
+    }
+
+    /// Finds which shared packages each bundled copy reads, from the graph. True when that is new.
+    pub fn learn(&self, graph: &crate::graph::Graph) -> bool {
+        use crate::graph::Edge;
+        let fallbacks = self.fallbacks.lock().expect("fallbacks").clone();
+        let by_path: HashMap<&Path, crate::graph::ModuleId> = graph.modules.iter().map(|m| (m.path.as_path(), m.id)).collect();
+        let prefix = format!("{ROOT}/shared/");
+        let mut found: std::collections::BTreeMap<String, BTreeSet<String>> = std::collections::BTreeMap::new();
+        for (path, key) in &fallbacks {
+            let Some(&start) = by_path.get(path.as_path()) else { continue };
+            let mut seen = BTreeSet::new();
+            let mut stack = vec![start];
+            let mut reads = BTreeSet::new();
+            while let Some(id) = stack.pop() {
+                if !seen.insert(id) {
+                    continue;
+                }
+                let module = graph.module(id);
+                for (request, edge) in module.record.requests.iter().zip(&module.edges) {
+                    if request.kind == RequestKind::Dynamic {
+                        continue;
+                    }
+                    if let Edge::Module(target) = edge {
+                        let target_path = graph.module(*target).path.to_string_lossy().into_owned();
+                        match target_path.strip_prefix(&prefix).and_then(|rest| rest.strip_suffix(".js")) {
+                            Some(read) => {
+                                reads.insert(format!("shared:{read}"));
+                            }
+                            None => stack.push(*target),
+                        }
+                    }
+                }
+            }
+            found.insert(key.clone(), reads);
+        }
+        let mut needs = self.needs.lock().expect("needs");
+        let changed = *needs != found;
+        *needs = found;
+        changed
     }
 
     /// What an import of a remote or a shared package is replaced by.
@@ -435,7 +495,8 @@ impl Federation {
         if what != "shared" && what != "remote" {
             return None;
         }
-        Some(format!("module.exports = require({}).values[{}];\n", quote(&format!("{ROOT}/values.js")), quote(&format!("{what}:{key}"))))
+        let id = format!("{what}:{key}");
+        Some(format!("var value = require({}).values[{}];\nif (value === undefined) throw new Error({});\nmodule.exports = value;\n", quote(&format!("{ROOT}/values.js")), quote(&id), quote(&format!("module federation: \"{key}\" was read before it was loaded"))))
     }
 
     /// The files an application needs besides its own, for the packages and remotes it uses.
@@ -458,10 +519,9 @@ impl Federation {
 
         // The shared packages: everything configured (a prefix only for what is imported below it).
         let mut shared_lines: Vec<String> = Vec::new();
-        let mut eager_imports: Vec<String> = Vec::new();
         let mut shared_used: Vec<String> = Vec::new();
         let project = std::fs::read_to_string(self.cwd.join("package.json")).ok().and_then(|t| Json::parse(&t).ok());
-        let mut register = |item: &Shared, key: &str, eager_index: &mut usize| {
+        let mut register = |item: &Shared, key: &str| {
             let (fallback, installed) = match &item.import {
                 Some(import) => {
                     let target = if item.key.ends_with('/') { format!("{}{}", import, &key[item.key.len()..]) } else { import.clone() };
@@ -475,6 +535,9 @@ impl Federation {
                 }
                 None => (None, None),
             };
+            if let Some(path) = &fallback {
+                self.fallbacks.lock().expect("fallbacks").insert(path.clone(), format!("shared:{key}"));
+            }
             let version = item.version.clone().or(installed);
             let required = match &item.required_version {
                 Some(RequiredVersion::Any) => "false".to_string(),
@@ -493,24 +556,20 @@ impl Federation {
             let config = format!("{{ singleton: {}, requiredVersion: {required}, strictVersion: {}, eager: {} }}", item.singleton, item.strict_version, item.eager);
             let version_text = version.as_deref().map_or("\"0\"".to_string(), quote);
             let fetch = match &fallback {
-                Some(path) if item.eager => {
-                    let name = format!("__eager{eager_index}");
-                    *eager_index += 1;
-                    eager_imports.push(format!("import * as {name} from {};\n", quote(&path.to_string_lossy())));
-                    format!("lib: () => rt.fallbackValue({name})")
-                }
+                // Bundled in this chunk, with nothing to fetch, but run when first read: a package that reads another shared
+                // package has to wait for it, and an import would run it as soon as this chunk loads.
+                Some(path) if item.eager => format!("lib: () => rt.fallbackValue(require({}))", quote(&path.to_string_lossy())),
                 Some(path) => format!("get: () => import({}).then((ns) => () => rt.fallbackValue(ns))", quote(&path.to_string_lossy())),
                 None => "consumeOnly: true, get: () => Promise.reject(new Error(\"the shared package is not bundled here and no other application provides it\"))".to_string(),
             };
             shared_lines.push(format!("    {}: {{ version: {version_text}, scope: [{scope}], shareConfig: {config}, {fetch} }},\n", quote(key)));
             shared_used.push(key.to_string());
         };
-        let mut eager_index = 0usize;
         for item in &self.shared {
             if item.key.ends_with('/') {
                 continue;
             }
-            register(item, &item.key, &mut eager_index);
+            register(item, &item.key);
         }
         let used_shared: Vec<&str> = used.iter().filter_map(|u| u.strip_prefix("shared:")).collect();
         for key in &used_shared {
@@ -518,7 +577,7 @@ impl Federation {
                 continue;
             }
             if let Some(item) = self.shared_for(key) {
-                register(item, key, &mut eager_index);
+                register(item, key);
             }
         }
 
@@ -551,22 +610,39 @@ impl Federation {
 
         // What `start.js` waits for: the packages and remotes the code imports statically.
         let mut preload = String::new();
+        let needs = self.needs.lock().expect("needs").clone();
+        let loaded: BTreeSet<String> = shared_used.iter().map(|k| format!("shared:{k}")).filter(|k| used.contains(k)).collect();
+        // A package is loaded after the ones it reads; two that read each other are loaded together.
+        let reaches = |from: &str, to: &str| -> bool {
+            let mut seen = BTreeSet::new();
+            let mut stack = vec![from.to_string()];
+            while let Some(k) = stack.pop() {
+                if k == to {
+                    return true;
+                }
+                if seen.insert(k.clone()) {
+                    stack.extend(needs.get(&k).into_iter().flatten().cloned());
+                }
+            }
+            false
+        };
         for key in &shared_used {
-            if used.contains(&format!("shared:{key}")) {
-                preload.push_str(&format!("  [{}, () => mf.loadShare({}).then((f) => rt.fallbackValue(f()))],\n", quote(&format!("shared:{key}")), quote(key)));
+            let id = format!("shared:{key}");
+            if used.contains(&id) {
+                let before: Vec<String> = needs.get(&id).into_iter().flatten().filter(|d| loaded.contains(*d) && **d != id && !reaches(d, &id)).map(|d| quote(d)).collect();
+                preload.push_str(&format!("  [{}, () => mf.loadShare({}).then((f) => rt.fallbackValue(f())), [{}]],\n", quote(&id), quote(key), before.join(", ")));
             }
         }
         for entry in used.iter().filter(|u| u.starts_with("remote:")) {
-            preload.push_str(&format!("  [{}, () => mf.loadRemote({}).then(rt.moduleValue)],\n", quote(entry), quote(&entry["remote:".len()..])));
+            preload.push_str(&format!("  [{}, () => mf.loadRemote({}).then(rt.moduleValue), []],\n", quote(entry), quote(&entry["remote:".len()..])));
         }
 
         let scope_list = self.share_scope.iter().map(|s| quote(s)).collect::<Vec<_>>().join(", ");
         let version_line = self.version.as_deref().map_or(String::new(), |v| format!("  version: {},\n", quote(v)));
         let core = format!(
-            "import * as rt from {runtime};\nimport {{ values }} from {values};\n{plugin_imports}{eager}\nexport const mf = rt.init({{\n  name: {name},\n{version_line}  shareStrategy: {strategy},\n  remotes: [\n{remotes}  ],\n  shared: {{\n{shared}  }},\n  plugins: [{plugins}],\n}});\n\nconst preload = [\n{preload}];\nlet loading;\nexport function ready() {{\n  return (loading ||= Promise.all(preload.map(([key, load]) => load().then((value) => {{ values[key] = value; }}))).then(() => {{}}));\n}}\n\nconst exposes = {{\n{exposes}}};\nexport const container = rt.containerFor(mf, {{ exposes, ready, shareScope: [{scope_list}] }});\nexport const loadRemoteNamespace = (id) => mf.loadRemote(id).then(rt.moduleNamespace);\nexport const loadSharedNamespace = (key) => mf.loadShare(key).then((f) => rt.moduleNamespace(rt.fallbackValue(f())));\n",
+            "import * as rt from {runtime};\nimport {{ values }} from {values};\n{plugin_imports}\nexport const mf = rt.init({{\n  name: {name},\n{version_line}  shareStrategy: {strategy},\n  remotes: [\n{remotes}  ],\n  shared: {{\n{shared}  }},\n  plugins: [{plugins}],\n}});\n\nconst preload = [\n{preload}];\nconst byKey = new Map(preload.map((entry) => [entry[0], entry]));\nconst started = new Map();\nconst start = (key) => {{\n  if (!started.has(key)) {{\n    const [, load, before] = byKey.get(key);\n    started.set(key, Promise.all(before.map(start)).then(load).then((value) => {{ values[key] = value; }}));\n  }}\n  return started.get(key);\n}};\nlet loading;\nexport function ready() {{\n  return (loading ||= Promise.all(preload.map(([key]) => start(key))).then(() => {{}}));\n}}\n\nconst exposes = {{\n{exposes}}};\nexport const container = rt.containerFor(mf, {{ exposes, ready, shareScope: [{scope_list}] }});\nexport const loadRemoteNamespace = (id) => mf.loadRemote(id).then(rt.moduleNamespace);\nexport const loadSharedNamespace = (key) => mf.loadShare(key).then((f) => rt.moduleNamespace(rt.fallbackValue(f())));\n",
             runtime = quote(&format!("{ROOT}/runtime.js")),
             values = quote(&format!("{ROOT}/values.js")),
-            eager = eager_imports.concat(),
             name = quote(&self.name),
             strategy = quote(&self.share_strategy),
             remotes = remotes,
@@ -618,7 +694,8 @@ impl Federation {
             self.generate(&options.resolve, &absolute, &used)?;
             let graph = crate::graph::build(cwd, &roots, &round_options);
             let now = self.used();
-            if now == used || round == 5 || graph.has_errors() {
+            let needs_changed = self.learn(&graph);
+            if (now == used && !needs_changed) || round == 5 || graph.has_errors() {
                 return Ok(graph);
             }
             used = now;
@@ -651,21 +728,28 @@ impl Federation {
         if !typed || exposes.is_empty() {
             return (Vec::new(), messages);
         }
+        // The declarations are written to a folder of ours, new and private, and read from there.
+        let out_dir = match private_dir("rathkit-types") {
+            Ok(dir) => dir,
+            Err(message) => {
+                messages.push(format!("types were not written: {message}"));
+                return (Vec::new(), messages);
+            }
+        };
         let list = exposes.iter().map(|(k, p)| format!("{{\"key\":{},\"file\":{}}}", quote(k), quote(&p.to_string_lossy()))).collect::<Vec<_>>().join(",");
         let input = format!(
             "{{\"command\":\"generate\",\"cwd\":{},\"name\":{},\"exposes\":[{list}],\"outDir\":{},\"tsConfigPath\":{},\"typesFolder\":{},\"compiledTypesFolder\":{}}}",
             quote(&self.cwd.to_string_lossy()),
             quote(&self.name),
-            quote(&std::env::temp_dir().join(format!("rathkit-types-out-{}", std::process::id())).to_string_lossy()),
+            quote(&out_dir.to_string_lossy()),
             self.dts.ts_config.as_deref().map_or("null".to_string(), quote),
             quote(&self.dts.types_folder),
             quote(&self.dts.compiled_types_folder),
         );
-        let out_dir = std::env::temp_dir().join(format!("rathkit-types-out-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&out_dir);
         let answer = match run_node(DTS, &input, &self.cwd) {
             Ok(answer) => answer,
             Err(message) => {
+                let _ = std::fs::remove_dir_all(&out_dir);
                 messages.push(format!("types were not written: {message}"));
                 return (Vec::new(), messages);
             }
@@ -674,6 +758,7 @@ impl Federation {
             messages.extend(notes.iter().filter_map(|n| n.as_str().map(String::from)));
         }
         if let Some(error) = answer.get("error").and_then(Json::as_str) {
+            let _ = std::fs::remove_dir_all(&out_dir);
             messages.push(format!("types were not written: {}", error.lines().next().unwrap_or("")));
             return (Vec::new(), messages);
         }
@@ -703,15 +788,29 @@ impl Federation {
     }
 
     /// Downloads the declarations of the remotes this application imports from, into the project. Remotes that are not
-    /// up, or publish none, are skipped; this is for the editor, and a build does not depend on it.
-    pub fn read_types(&self) {
-        if !self.dts.consume || self.remotes.is_empty() || self.types_read.load(std::sync::atomic::Ordering::SeqCst) {
+    /// up, or publish none, are skipped; this is for the editor, and a build does not depend on it. While watching, it
+    /// happens beside the build and is tried again, at most every ten seconds, until every remote has answered.
+    pub fn read_types(self: &Arc<Self>, background: bool) {
+        use std::sync::atomic::Ordering::SeqCst;
+        if !self.dts.consume || self.remotes.is_empty() || self.types_read.load(SeqCst) || !self.cwd.join("tsconfig.json").is_file() {
             return;
         }
-        let typed = self.cwd.join("tsconfig.json").is_file();
-        if !typed {
-            return;
+        if background {
+            if self.last_read.lock().expect("last_read").is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(10)) || self.reading.swap(true, SeqCst) {
+                return;
+            }
+            *self.last_read.lock().expect("last_read") = Some(std::time::Instant::now());
+            let this = self.clone();
+            std::thread::spawn(move || {
+                this.read_types_now();
+                this.reading.store(false, SeqCst);
+            });
+        } else {
+            self.read_types_now();
         }
+    }
+
+    fn read_types_now(&self) {
         let remotes = self.remotes.iter().map(|r| format!("{{\"name\":{},\"entry\":{}}}", quote(&r.name), quote(&r.entry))).collect::<Vec<_>>().join(",");
         let input = format!("{{\"command\":\"consume\",\"cwd\":{},\"remotes\":[{remotes}],\"typesFolder\":{}}}", quote(&self.cwd.to_string_lossy()), quote(&self.dts.consume_folder));
         match run_node(DTS, &input, &self.cwd) {
@@ -730,18 +829,56 @@ impl Federation {
         }
     }
 
+    /// Calls `hook` with declarations written after the build that asked for them.
+    pub fn on_types(&self, hook: Arc<dyn Fn(&[OutputFile]) + Send + Sync>) {
+        *self.types_hook.lock().expect("types_hook") = Some(hook);
+    }
+
+    /// The declarations of the exposed modules. The first run is part of the build (the manifest says whether there
+    /// are any); when building again and again, the earlier ones are used and new ones are written beside the build.
+    fn types_files(self: &Arc<Self>, repeated: bool) -> Vec<OutputFile> {
+        use std::sync::atomic::Ordering::SeqCst;
+        let cached = self.types_cache.lock().expect("types_cache").clone();
+        match cached {
+            Some(files) if repeated => {
+                if !self.types_running.swap(true, SeqCst) {
+                    let this = self.clone();
+                    std::thread::spawn(move || {
+                        let (files, messages) = this.generate_types();
+                        for message in messages {
+                            eprintln!("warning: {message}");
+                        }
+                        if !files.is_empty() {
+                            *this.types_cache.lock().expect("types_cache") = Some(files.clone());
+                            if let Some(hook) = this.types_hook.lock().expect("types_hook").clone() {
+                                hook(&files);
+                            }
+                        }
+                        this.types_running.store(false, SeqCst);
+                    });
+                }
+                files
+            }
+            _ => {
+                let (files, messages) = self.generate_types();
+                for message in messages {
+                    eprintln!("warning: {message}");
+                }
+                *self.types_cache.lock().expect("types_cache") = Some(files.clone());
+                files
+            }
+        }
+    }
+
     /// The files others read: the entry that names the container, and the manifest.
-    pub fn finish(&self, output: &mut Output, hot: bool) -> Result<(), String> {
+    pub fn finish(self: &Arc<Self>, output: &mut Output, hot: bool, repeated: bool) -> Result<(), String> {
         let core = self.core_path().to_string_lossy().into_owned();
         let core_file = output.chunks.iter().find(|c| c.facade_module.as_deref() == Some(core.as_str())).map(|c| c.file.clone()).ok_or("the federation runtime was not built; the build needs the esm format with splitting")?;
         if !self.exposes.is_empty() {
             let styles: Vec<(String, Vec<String>)> = self.expose_assets(output).into_iter().filter(|(_, _, _, css)| !css.is_empty()).map(|(e, _, _, css)| (e.key.clone(), css)).collect();
             output.files.push(OutputFile { name: self.filename.clone(), code: self.remote_entry(&core_file, hot, &styles), map: None, data: None });
         }
-        let (types, messages) = self.generate_types();
-        for message in messages {
-            eprintln!("warning: {message}");
-        }
+        let types = self.types_files(repeated);
         let has_types = types.iter().any(|f| f.name == format!("{}.zip", self.dts.types_folder));
         output.files.extend(types);
         if let Some(name) = &self.manifest {
@@ -994,4 +1131,22 @@ fn run_node(script: &str, input: &str, cwd: &Path) -> Result<Json, String> {
     let _ = std::fs::remove_file(&file);
     let _ = std::fs::remove_dir(&dir);
     result
+}
+
+/// A new folder in the temporary one that only this user can use, so that what is written there is not another user's to
+/// swap or to point somewhere with a link.
+fn private_dir(prefix: &str) -> Result<PathBuf, String> {
+    for attempt in 0..8u32 {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
+        let dir = std::env::temp_dir().join(format!("{prefix}-{}-{nanos}-{attempt}", std::process::id()));
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        match builder.create(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("cannot make {}: {e}", dir.display())),
+        }
+    }
+    Err("cannot make a private folder".to_string())
 }

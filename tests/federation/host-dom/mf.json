@@ -1,0 +1,5 @@
+{
+  "name": "domhost",
+  "remotes": { "domapp": "domapp@http://localhost:4280/remoteEntry.js" },
+  "shared": { "react": { "singleton": true, "requiredVersion": "^19.0.0" }, "react-dom": { "singleton": true, "requiredVersion": "^19.0.0" }, "react-dom/": { "singleton": true } }
+}

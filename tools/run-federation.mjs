@@ -60,18 +60,18 @@ const serve = (port, dir) => {
 
 // Builds a project of tests/federation with rathkit-pack into dist/ of a copy, so the sources stay clean.
 const copies = new Map();
-const copy = (name) => {
-  if (!copies.has(name)) {
-    const dir = join(tmp, name);
+const copy = (name, as = name) => {
+  if (!copies.has(as)) {
+    const dir = join(tmp, as);
     cpSync(join(tests, name), dir, { recursive: true });
     // The packages the projects import are the ones in the bench folder.
     symlinkSync(join(bench, 'node_modules'), join(dir, 'node_modules'), 'dir');
-    copies.set(name, dir);
+    copies.set(as, dir);
   }
-  return copies.get(name);
+  return copies.get(as);
 };
-const build = async (name, { entry = 'src/index.js', args = [], patch } = {}) => {
-  const dir = copy(name);
+const build = async (name, { entry = 'src/index.js', args = [], patch, as = name } = {}) => {
+  const dir = copy(name, as);
   if (patch) patch(dir);
   // The options are in `mf.json`, or in the config file as a plugin.
   const options = existsSync(join(dir, 'mf.json')) ? ['--federation', 'mf.json'] : [];
@@ -210,6 +210,30 @@ if (haveRspack) {
     check('and uses the host\'s React', /same=true/.test(r.text ?? '') && !/same=false/.test(r.text ?? ''), r.text);
   });
 
+  scenario('a host built by rathkit-pack loads a remote built by Vite with its federation plugin', async () => {
+    const viteBin = join(bench, 'node_modules', 'vite', 'bin', 'vite.js');
+    if (!existsSync(viteBin) || !existsSync(join(bench, 'node_modules', '@module-federation', 'vite'))) {
+      console.log('federation: vite or @module-federation/vite is not installed (npm ci --prefix bench); skipped');
+      return;
+    }
+    const dir = copy('vite-remote');
+    const built = await new Promise((resolve) => {
+      const child = spawn('node', [viteBin, 'build'], { cwd: dir });
+      let output = '';
+      child.stdout.on('data', (d) => (output += d));
+      child.stderr.on('data', (d) => (output += d));
+      child.on('close', (status) => resolve({ status, output }));
+    });
+    if (built.status !== 0) throw new Error(`vite: ${built.output}`);
+    serve(4290, join(dir, 'dist'));
+    serve(4291, await build('host-vite'));
+    const r = await visit('http://localhost:4291/');
+    check('page finished', r.title === 'done', JSON.stringify(r));
+    check('the Vite remote\'s module runs, by static import and import()', /vite button 19\.3\.1/.test(r.text ?? '') && /vite-label/.test(r.text ?? '') && /dyn:vite button/.test(r.text ?? ''), r.text);
+    check('with the host\'s React', /same=true/.test(r.text ?? '') && !/same=false/.test(r.text ?? ''), r.text);
+    check('no errors', !r.logs.some((l) => /EXCEPTION/.test(l)), r.logs.join('\n'));
+  });
+
   scenario('a host built by rspack loads a remote built by rathkit-pack', async () => {
     const remote = await build('remote');
     const host = await buildRspack('rspack-host');
@@ -282,6 +306,35 @@ scenario('style sheets of an exposed module load with it, by the container and b
   const r = await visit('http://localhost:4271/');
   check('the host gets the remote\'s styles through remoteEntry.js alone', r.title === 'done' && /rgb\(1, 2, 3\) 700/.test(r.text ?? ''), JSON.stringify(r));
 });
+
+// React DOM reads React: one shared package that needs another.
+const dom = async (name, hostPort, buildHost, patch) => {
+  // A copy of its own when the options are changed, so the next scenario starts from the originals.
+  const remote = await build('remote-dom', { args: ['--minify'], patch, as: patch ? `remote-dom-${name}` : 'remote-dom' });
+  const host = await buildHost();
+  serve(4280, remote);
+  serve(hostPort, host);
+  const r = await visit(`http://localhost:${hostPort}/`);
+  check(`${name}: React DOM renders the remote's component`, r.title === 'done' && /rendered 42 react 19\.3\.1/.test(r.text ?? ''), JSON.stringify(r));
+  check(`${name}: no errors`, !r.logs.some((l) => /EXCEPTION|Invalid hook/.test(l)), r.logs.join('\n'));
+};
+const eager = (dir) => withOption('mf.json', (j) => { for (const k of Object.keys(j.shared)) j.shared[k].eager = true; })(dir);
+scenario('shared packages that read each other (react-dom reads react), lazy and eager', async () => {
+  await dom('lazy', 4282, () => build('host-dom', { args: ['--minify'] }));
+});
+scenario('shared packages that read each other, both eager', async () => {
+  await dom('eager', 4283, () => build('host-dom', { args: ['--minify'], patch: eager, as: 'host-dom-eager' }), eager);
+});
+if (haveRspack) {
+  scenario('a host built by rspack renders a component of a remote that shares react and react-dom', async () => {
+    await dom('rspack host', 4281, async () => {
+      const host = await buildRspack('rspack-host-dom');
+      cpSync(join(copy('host-dom'), 'index.html'), join(host, 'index.html'));
+      writeFileSync(join(host, 'index.html'), readFileSync(join(host, 'index.html'), 'utf8').replace('<script type="module" src="/index.js"></script>', '<script src="/main.js"></script>'));
+      return host;
+    });
+  });
+}
 
 scenario('development servers: a page of one loads the other, and a change in the remote reloads it', async () => {
   const remoteDir = copy('remote');

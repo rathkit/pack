@@ -47,6 +47,11 @@ impl ServeState {
         *self.last_error.lock().unwrap() = None;
     }
 
+    /// Adds files to the published build (they are replaced when the next build is published).
+    pub fn add_files(&self, files: Vec<(String, Vec<u8>)>) {
+        self.files.lock().unwrap().extend(files);
+    }
+
     /// Lets pages from these origins read the built files and listen for reloads.
     pub fn allow_origins(&self, origins: Vec<String>) {
         *self.cors.lock().unwrap() = origins;
