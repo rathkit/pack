@@ -271,7 +271,9 @@ const viteConfig = () => ({
 });
 
 const moduleInfoFor = (id, extra = {}) => {
-  const info = { id, code: null, ast: null, isEntry: false, isExternal: false, isIncluded: true, importers: [], dynamicImporters: [], importedIds: [], dynamicallyImportedIds: [], importedIdResolutions: [], dynamicallyImportedIdResolutions: [], meta: {}, moduleSideEffects: true, syntheticNamedExports: false, attributes: {}, exports: [], exportedBindings: null, hasDefaultExport: null, ...(moduleInfo.get(id) ?? {}), ...extra };
+  // The same object as before, changed: a plugin that kept it sees what is learned later, as with Rollup's.
+  const info = moduleInfo.get(id) ?? { id, code: null, ast: null, isEntry: false, isExternal: false, isIncluded: true, importers: [], dynamicImporters: [], importedIds: [], dynamicallyImportedIds: [], importedIdResolutions: [], dynamicallyImportedIdResolutions: [], meta: {}, moduleSideEffects: true, syntheticNamedExports: false, attributes: {}, exports: [], exportedBindings: null, hasDefaultExport: null };
+  Object.assign(info, extra);
   moduleInfo.set(id, info);
   return info;
 };
@@ -1196,11 +1198,11 @@ const handlers = {
   init,
 
   /** One module is read: `moduleParsed` runs now, with what it imports (the importers are known when the graph is). */
-  async moduleParsed({ id, importedIds, dynamicallyImportedIds, esm, sideEffects }) {
+  async moduleParsed({ id, importedIds, dynamicallyImportedIds, esm, sideEffects, isEntry, exports, hasDefaultExport }) {
     const resolution = (one) => ({ id: one, external: false, moduleSideEffects: true, meta: moduleInfo.get(one)?.meta ?? {}, syntheticNamedExports: false, attributes: {}, resolvedBy: 'rathkit' });
     const t = transformCache.get(id);
     const code = (t && (await t.promise)?.code) ?? (await loadCache.get(id))?.code ?? null;
-    moduleInfoFor(id, { id, code: typeof code === 'string' ? code : null, importedIds, dynamicallyImportedIds, importedIdResolutions: importedIds.map(resolution), dynamicallyImportedIdResolutions: dynamicallyImportedIds.map(resolution), moduleSideEffects: sideEffects, hasDefaultExport: esm ? null : null, isIncluded: true });
+    moduleInfoFor(id, { id, code: typeof code === 'string' ? code : null, importedIds, dynamicallyImportedIds, importedIdResolutions: importedIds.map(resolution), dynamicallyImportedIdResolutions: dynamicallyImportedIds.map(resolution), moduleSideEffects: sideEffects, isEntry: !!isEntry || (moduleInfo.get(id)?.isEntry ?? false), exports, exportedBindings: { '.': exports }, hasDefaultExport: esm ? hasDefaultExport : null, isIncluded: true });
     parsedEarly.add(id);
     for (const plugin of hooksOf('moduleParsed')) await callHook(plugin, 'moduleParsed', [moduleInfo.get(id)]);
     return null;

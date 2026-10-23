@@ -253,6 +253,10 @@ pub fn build_with_fs(fs: Box<dyn FileSystem>, cwd: &Path, entries: &[String], op
         }
     }
     shared.diagnostics = diagnostics;
+    for &slot in &entry_slots {
+        let path = shared.paths[slot].clone();
+        shared.entry_paths.insert(path);
+    }
     let threads = if options.threads == 0 { std::thread::available_parallelism().map_or(4, |n| n.get()) } else { options.threads };
     let state = (Mutex::new(shared), Condvar::new());
     let context = Context { cwd, resolver: &resolver, options, state: &state };
@@ -281,6 +285,8 @@ struct Shared {
     pending: usize,
     /// Files met as `new URL("./x", import.meta.url)`: copied files whatever their extension.
     as_assets: std::collections::HashSet<PathBuf>,
+    /// The entry points, for plugins that are told of a module as it is read.
+    entry_paths: std::collections::HashSet<PathBuf>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -356,7 +362,9 @@ impl Context<'_> {
                             }
                         }
                     }
-                    host.module_parsed(&done.module.path.to_string_lossy(), &imported, &dynamic, done.module.kind == ModuleKind::Esm, done.module.side_effects);
+                    let exports: Vec<String> = done.module.record.exports.iter().map(|e| e.exported.clone()).collect();
+                    let entry = self.state.0.lock().unwrap().entry_paths.contains(&done.module.path);
+                    host.module_parsed(&done.module.path.to_string_lossy(), &imported, &dynamic, done.module.kind == ModuleKind::Esm, done.module.side_effects, &exports, entry);
                 }
             }
             let mut shared = lock.lock().unwrap();
