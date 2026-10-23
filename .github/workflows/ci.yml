@@ -1,0 +1,51 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # The plugin host needs Node 24 or newer; test the oldest and the newest.
+        node: [24, 26]
+    env:
+      # The TypeScript compiler the JSX and decorator programs are compared with.
+      TS_MODULE: ${{ github.workspace }}/bench/node_modules/ts5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - run: node tools/check-zero-deps.mjs
+      - run: cargo build --release
+      # The libraries and the compiler the real-world comparisons bundle (nothing from here is built into the bundler).
+      - run: npm ci --prefix bench --ignore-scripts
+      - run: cargo test --release
+      - run: node tools/run-fixtures.mjs
+      - run: node tools/run-defines.mjs
+      - run: node tools/run-loaders.mjs
+      - run: node tools/run-plugins.mjs
+      - run: node tools/run-split.mjs
+      - run: node tools/run-sourcemaps.mjs
+      - run: node tools/run-watch.mjs
+      - run: node tools/run-serve.mjs
+      - run: node tools/run-jsx.mjs
+      - run: python3 tools/fuzz-bundle.py --count 300
+      - run: node tools/diff-real.mjs "$GITHUB_WORKSPACE/bench"
