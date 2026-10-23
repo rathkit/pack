@@ -106,7 +106,7 @@ enum Shape {
     /// `var`/`let`/`const`.
     Vars(Vec<Declarator>),
     /// An enum or namespace: `var N;` and an immediately called function that fills it in.
-    Declared { symbol: SymbolId, needs_var: bool },
+    Declared { symbol: SymbolId, needs_var: bool, alone: bool },
     Other,
 }
 
@@ -1585,7 +1585,7 @@ impl<'a> Bundler<'a> {
             self.code.insert(id, Code::Wrapped { edits: Vec::new(), json: true, require_cases: None });
             return;
         };
-        let mut scanner = Scanner { bundler: self, module, ast: &parsed.ast, semantic: &parsed.semantic, edits: Vec::new(), shorthand: HashSet::new(), skip: HashSet::new(), written: HashSet::new(), fn_depth: 0, has_tla: false, needs_require: false, top_decl: None, in_wrapper: false, name_hint: None };
+        let mut scanner = Scanner { bundler: self, module, ast: &parsed.ast, semantic: &parsed.semantic, edits: Vec::new(), shorthand: HashSet::new(), skip: HashSet::new(), written: HashSet::new(), fn_depth: 0, has_tla: false, needs_require: false, top_decl: None, in_wrapper: false, name_hint: None, shared_names: None };
         let code = if module.kind == ModuleKind::Esm { scanner.scan_esm(id) } else { scanner.scan_wrapped(id) };
         self.code.insert(id, code);
     }
@@ -1652,6 +1652,8 @@ struct Scanner<'b, 'a> {
     top_decl: Option<NodeId>,
     /// Scanning a CommonJS module's text, where top-level names are not renamed.
     in_wrapper: bool,
+    /// Enums and namespaces of this module's top level that share their name with another one, found when first needed.
+    shared_names: Option<HashSet<SymbolId>>,
     /// An anonymous class expression and the name its surroundings give it (`const X = class {}`).
     name_hint: Option<(NodeId, String)>,
 }
@@ -1748,11 +1750,13 @@ impl<'a> Scanner<'_, 'a> {
                 NodeKind::TsEnum { name, .. } | NodeKind::TsNamespace { name, .. } => match self.semantic.symbol_of(name) {
                     Some(symbol) => {
                         let instantiated = !matches!(ast[decl].kind, NodeKind::TsNamespace { .. }) || self.namespace_has_values(decl);
-                        let needs_var = instantiated && self.semantic.symbol(symbol).kind == SymbolKind::Var;
+                        // An enum with the name to itself is written `var E = function (E) {...}({})`, which names it once.
+                        let alone = matches!(ast[decl].kind, NodeKind::TsEnum { .. }) && self.enum_stands_alone(decl);
+                        let needs_var = instantiated && !alone && self.semantic.symbol(symbol).kind == SymbolKind::Var;
                         if needs_var {
                             self.bundler.register(Key::Symbol(id, symbol), Some(id));
                         }
-                        Shape::Declared { symbol, needs_var }
+                        Shape::Declared { symbol, needs_var, alone }
                     }
                     None => Shape::Other,
                 },
@@ -2628,7 +2632,8 @@ impl Bundler<'_> {
         }
         let text = self.render_stmt_body(id, stmt, names);
         match &stmt.shape {
-            Shape::Declared { symbol, needs_var: true } => format!("var {};\n{text}", names[&Key::Symbol(id, *symbol)]),
+            Shape::Declared { symbol, needs_var: true, .. } => format!("var {};\n{text}", names[&Key::Symbol(id, *symbol)]),
+            Shape::Declared { alone: true, .. } => format!("var {text}"),
             _ => text,
         }
     }
@@ -2917,8 +2922,8 @@ impl Bundler<'_> {
             for stmt in &code.stmts {
                 let text = self.render_stmt_body(module.id, stmt, names);
                 match (&stmt.shape, &stmt.form) {
-                    (Shape::Declared { symbol, needs_var }, _) => {
-                        if *needs_var {
+                    (Shape::Declared { symbol, needs_var, alone }, _) => {
+                        if *needs_var || *alone {
                             let name = names[&Key::Symbol(module.id, *symbol)].clone();
                             if !hoisted.contains(&name) {
                                 hoisted.push(name);
@@ -3062,19 +3067,58 @@ impl Scanner<'_, '_> {
         crate::enums::eval(self.ast, self.semantic, id, enum_node, values)
     }
 
+    /// Whether the top-level enum `node` is the only enum or namespace of its name, so nothing adds to it.
+    fn enum_stands_alone(&mut self, node: NodeId) -> bool {
+        let NodeKind::TsEnum { name, .. } = self.ast[node].kind else { return false };
+        if self.in_wrapper || self.top_decl != Some(node) {
+            return false;
+        }
+        let Some(symbol) = self.semantic.symbol_of(name) else { return false };
+        if self.semantic.symbol(symbol).kind != SymbolKind::Var {
+            return false;
+        }
+        if self.shared_names.is_none() {
+            let ast = self.ast;
+            let mut seen = HashSet::new();
+            let mut shared = HashSet::new();
+            if let NodeKind::Program(body) = ast[ast.root].kind {
+                for &stmt in ast.list(body) {
+                    let decl = match ast[stmt].kind {
+                        NodeKind::ExportNamed(export) => ast.export(export).decl.unwrap_or(stmt),
+                        _ => stmt,
+                    };
+                    if let NodeKind::TsEnum { name, .. } | NodeKind::TsNamespace { name, .. } = ast[decl].kind {
+                        if let Some(symbol) = self.semantic.symbol_of(name) {
+                            if !seen.insert(symbol) {
+                                shared.insert(symbol);
+                            }
+                        }
+                    }
+                }
+            }
+            self.shared_names = Some(shared);
+        }
+        !self.shared_names.as_ref().unwrap().contains(&symbol)
+    }
+
     /// `enum E { A = 1, B }` as `(function (E) { E[E["A"] = 1] = "A"; ... })(E || (E = {}));`
     fn ts_enum_edit(&mut self, node: NodeId) {
         let NodeKind::TsEnum { name, members } = self.ast[node].kind else { return };
+        let alone = self.enum_stands_alone(node);
         let inline_var = self.top_decl != Some(node);
         let target = self.decl_name(name);
         let mut pieces: Vec<Piece> = Vec::new();
         let text = |s: &str| Piece::Text(s.to_string());
-        if inline_var {
+        if alone {
+            // The statement's `var` is written around this (see `render_stmt`).
+            pieces.extend(target.iter().cloned());
+            pieces.push(text(" = "));
+        } else if inline_var {
             pieces.push(text("var "));
             pieces.extend(target.iter().cloned());
             pieces.push(text(";\n"));
         }
-        pieces.push(text("(function ("));
+        pieces.push(text(if alone { "function (" } else { "(function (" }));
         pieces.extend(target.iter().cloned());
         pieces.push(text(") {\n"));
         let mut values: HashMap<crate::ast::Atom, EnumValue> = HashMap::new();
@@ -3128,11 +3172,17 @@ impl Scanner<'_, '_> {
             }
             previous = Some(member_text);
         }
-        pieces.push(text("})("));
-        pieces.extend(target.iter().cloned());
-        pieces.push(text(" || ("));
-        pieces.extend(target.iter().cloned());
-        pieces.push(text(" = {}));"));
+        if alone {
+            pieces.push(text("  return "));
+            pieces.extend(target.iter().cloned());
+            pieces.push(text(";\n}({});"));
+        } else {
+            pieces.push(text("})("));
+            pieces.extend(target.iter().cloned());
+            pieces.push(text(" || ("));
+            pieces.extend(target.iter().cloned());
+            pieces.push(text(" = {}));"));
+        }
         self.push(node, pieces);
     }
 
