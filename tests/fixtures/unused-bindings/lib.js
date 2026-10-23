@@ -3,6 +3,8 @@ const log = (...a) => console.log(...a);
 const unusedCall = log('call');
 const unusedObject = { value: log('object') };
 const unusedFunction = (function () { log('iife'); return 1; })();
+const unusedBare = function () { log('bare iife'); return 1; }();
+const unusedMember = { value: log('member') }.value;
 const unusedClass = class { static s = log('class'); };
 let unusedNew = new Map([[log('new'), 1]]);
 var unusedVar = log('var');

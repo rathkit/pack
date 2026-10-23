@@ -1797,12 +1797,11 @@ impl<'a> Scanner<'_, 'a> {
         if !shake.demand_known || shake.demanded.contains(&sym) {
             return None;
         }
-        let wrap = match ast[init].kind {
-            NodeKind::Object(_) | NodeKind::Class { .. } => true,
-            NodeKind::Function { .. } => !ast[init].has(flags::ARROW),
-            _ => false,
-        };
-        Some((self.span(init), wrap))
+        let (start, end) = self.span(init);
+        // As a statement, text that starts like a function, class or block would read as one (`function () {}()`).
+        let head = self.module.source[start as usize..].trim_start();
+        let wrap = ["function", "class", "{", "async"].iter().any(|word| head.starts_with(word));
+        Some(((start, end), wrap))
     }
 
     /// A CommonJS module: its whole text goes inside a function.
