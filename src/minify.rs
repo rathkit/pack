@@ -716,13 +716,17 @@ fn name_at(mut index: usize) -> String {
         width += 1;
         count *= REST.len();
     }
-    // `index` counts within names of this width.
+    // `index` counts within names of this width. The first letter changes fastest, so
+    // neighbors share their ending, which compresses better than sharing their start.
+    let first = FIRST[index % FIRST.len()];
+    index /= FIRST.len();
     let mut digits = Vec::with_capacity(width);
     for _ in 1..width {
         digits.push(REST[index % REST.len()]);
         index /= REST.len();
     }
-    out.push(FIRST[index % FIRST.len()] as char);
+    let mut out = String::new();
+    out.push(first as char);
     for d in digits.iter().rev() {
         out.push(*d as char);
     }
