@@ -393,8 +393,11 @@ impl Context<'_> {
         }
     }
 
-    fn process(&self, slot: usize, path: &Path) -> Result<Processed, Diagnostic> {
-        let error = |message: String, pos: Option<u32>| Diagnostic { severity: Severity::Error, message, file: Some(path.to_path_buf()), pos };
+    fn process(&self, slot: usize, module_path: &Path) -> Result<Processed, Diagnostic> {
+        // `./logo.svg?raw`: the file is the part before the `?`; the whole name is what plugins and the output know the module by.
+        let (file_path, query) = split_query(module_path);
+        let path: &Path = &file_path;
+        let error = |message: String, pos: Option<u32>| Diagnostic { severity: Severity::Error, message, file: Some(module_path.to_path_buf()), pos };
         let mut diagnostics = Vec::new();
         let package = self.resolver.package_for(path).unwrap_or_else(|e| {
             // The same broken file is met once per module under it; the sort in `finish`
@@ -403,7 +406,7 @@ impl Context<'_> {
             None
         });
         // Without plugins a module is a function of its file: one that has not changed is taken from the last build.
-        let stamp = if self.options.plugins.is_none() && self.options.cache.is_some() { file_stamp(path) } else { None };
+        let stamp = if self.options.plugins.is_none() && self.options.cache.is_some() && query.is_empty() { file_stamp(path) } else { None };
         if let (Some(cache), Some(stamp)) = (&self.options.cache, stamp) {
             if let Some(mut module) = cache.take(path, stamp) {
                 let dir = path.parent().unwrap_or(Path::new("/"));
@@ -417,7 +420,7 @@ impl Context<'_> {
                 return Ok(Processed { module, targets, diagnostics });
             }
         }
-        let id = path.to_string_lossy().into_owned();
+        let id = module_path.to_string_lossy().into_owned();
         let plugin_error = |message: String| error(message, None);
         // What plugins make of the module: `load` replaces reading the file, `transform` changes the text.
         let mut plugin_text: Option<String> = None;
@@ -441,14 +444,15 @@ impl Context<'_> {
         }
         let extension = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
         let forced_asset = self.state.0.lock().unwrap().as_assets.contains(path);
-        let ext_loader = self.loader_for(path).or(forced_asset.then_some(Loader::File));
+        let ext_loader = query_loader(&query).or_else(|| self.loader_for(path)).or(forced_asset.then_some(Loader::File));
         let mut by_plugin = plugin_text.is_some() || plugin_bytes.is_some();
         if let Some(host) = host.filter(|h| h.has("transform")) {
             // Plugins see text: the file's, unless a loader reads it as bytes.
             let base = match (&plugin_text, &plugin_bytes) {
                 (Some(text), _) => Some(text.clone()),
                 (None, Some(_)) => None,
-                (None, None) if ext_loader.is_some_and(|l| l.needs_bytes()) => None,
+                // A file read as bytes (an image, an SVG) is shown to plugins when it is text, as Rollup does.
+                (None, None) if ext_loader.is_some_and(|l| l.needs_bytes()) => self.resolver.read(path).ok().and_then(|bytes| String::from_utf8(bytes).ok()),
                 (None, None) => Some(self.resolver.read_to_string(path).map_err(|e| error(format!("Cannot read file: {e}"), None))?),
             };
             if let Some(base) = base {
@@ -638,7 +642,7 @@ impl Context<'_> {
             Some(l) => l.is_css(),
             None => package.as_ref().is_none_or(|p| p.file_has_side_effects(path)),
         });
-        let module = Module { id: ModuleId(slot as u32), path: path.to_path_buf(), source, kind, parsed, record, edges: Vec::new(), package, side_effects, asset, css, stamp };
+        let module = Module { id: ModuleId(slot as u32), path: module_path.to_path_buf(), source, kind, parsed, record, edges: Vec::new(), package, side_effects, asset, css, stamp };
         Ok(Processed { module, targets, diagnostics })
     }
 
@@ -703,6 +707,14 @@ impl Context<'_> {
         if relative_first && !specifier.starts_with('.') && !specifier.starts_with('/') {
             if let Ok(found) = self.resolver.resolve(dir, &format!("./{specifier}"), kind) {
                 return Target::Path(found.path);
+            }
+        }
+        // `./logo.svg?raw` and `./icon.svg?react`: the file is looked for without the query, which stays on the module's name.
+        if let Some((bare, query)) = specifier.split_once('?') {
+            if !bare.is_empty() && !query.contains('/') && request.kind != RequestKind::Resolve {
+                if let Ok(found) = self.resolver.resolve(dir, bare, kind) {
+                    return Target::Path(PathBuf::from(format!("{}?{query}", found.path.to_string_lossy())));
+                }
             }
         }
         match self.resolver.resolve(dir, specifier, kind) {
@@ -848,3 +860,22 @@ pub fn absolute(cwd: &Path, path: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests;
+
+/// A module name with a query (`/a/logo.svg?raw`): the file, and the query without the `?`.
+fn split_query(path: &Path) -> (PathBuf, String) {
+    let text = path.to_string_lossy();
+    match text.rsplit_once('?') {
+        Some((file, query)) if !file.is_empty() && !query.contains('/') && !text.starts_with('\0') => (PathBuf::from(file), query.to_string()),
+        _ => (path.to_path_buf(), String::new()),
+    }
+}
+
+/// What a query asks for by itself (as in Vite): `?raw` is the text, `?url` the address of a copied file, `?inline` a data URL.
+fn query_loader(query: &str) -> Option<Loader> {
+    query.split('&').find_map(|part| match part.split_once('=').map_or(part, |(k, _)| k) {
+        "raw" => Some(Loader::Text),
+        "url" => Some(Loader::File),
+        "inline" => Some(Loader::DataUrl),
+        _ => None,
+    })
+}
