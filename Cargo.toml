@@ -14,11 +14,6 @@ path = "src/lib.rs"
 name = "rkp"
 path = "src/main.rs"
 
-# The earlier name of the command, kept as an alias.
-[[bin]]
-name = "rathkit-pack"
-path = "src/bin/rathkit-pack.rs"
-
 [[bin]]
 name = "prof"
 path = "src/bin/prof.rs"

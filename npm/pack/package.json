@@ -3,12 +3,37 @@
   "version": "0.0.0-source",
   "description": "A fast, zero-dependency JavaScript and TypeScript bundler (alpha)",
   "license": "Apache-2.0",
-  "repository": { "type": "git", "url": "git+https://github.com/rathkit/pack.git", "directory": "npm/pack" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rathkit/pack.git",
+    "directory": "npm/pack"
+  },
   "homepage": "https://github.com/rathkit/pack#readme",
   "bugs": "https://github.com/rathkit/pack/issues",
-  "bin": { "rkp": "bin/rkp.js", "rathkit-pack": "bin/rkp.js" },
-  "files": ["bin", "README.md", "LICENSE"],
-  "engines": { "node": ">=18" },
+  "bin": {
+    "rkp": "bin/rkp.js"
+  },
+  "files": [
+    "bin",
+    "index.js",
+    "index.d.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "optionalDependencies": {},
-  "publishConfig": { "access": "public" }
+  "publishConfig": {
+    "access": "public"
+  },
+  "main": "index.js",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./package.json": "./package.json"
+  }
 }

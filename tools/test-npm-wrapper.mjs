@@ -1,7 +1,7 @@
 // The npm packages work as installed: the launcher finds this machine's platform package, passes arguments
 // and the exit code through, and no package has an install script or a dependency but the optional ones.
 //   node tools/test-npm-wrapper.mjs
-import { mkdtempSync, mkdirSync, cpSync, readFileSync, writeFileSync, rmSync, readdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, cpSync, readFileSync, writeFileSync, rmSync, readdirSync, existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,9 +19,9 @@ const fail = (message) => {
 const m = run(process.execPath, [join(root, 'tools', 'make-npm-packages.mjs'), '--out', made, '--local']);
 if (m.status !== 0) fail(`cannot make the packages: ${m.stderr}${m.stdout}`);
 
-// The old name of the command is another bin of the launcher.
+// The launcher has one bin.
 const bins = JSON.parse(readFileSync(join(made, 'pack', 'package.json'), 'utf8')).bin;
-if (bins.rkp !== 'bin/rkp.js' || bins['rathkit-pack'] !== 'bin/rkp.js') fail(`the launcher's bins are ${JSON.stringify(bins)}`);
+if (Object.keys(bins).join() !== 'rkp' || bins.rkp !== 'bin/rkp.js') fail(`the launcher's bins are ${JSON.stringify(bins)}`);
 
 // What each package.json says.
 for (const d of readdirSync(made)) {
@@ -55,8 +55,90 @@ if (bad.status === 0) fail('a failing build exited with 0');
 const lonely = join(tmp, 'lonely');
 mkdirSync(join(lonely, 'bin'), { recursive: true });
 cpSync(launcher, join(lonely, 'bin', 'rkp.js'));
+cpSync(join(scope, 'pack', 'index.js'), join(lonely, 'index.js'));
 const none = run(process.execPath, [join(lonely, 'bin', 'rkp.js'), '--version'], { cwd: lonely });
 if (none.status === 0 || !/there is no build for/.test(none.stderr)) fail(`a missing platform package gave ${none.status} ${none.stderr}`);
 
-console.log('npm wrapper: packages are plain, the launcher starts the program, passes arguments and exit codes, and explains a missing build');
+// The API: the same program, started with options. It is imported as installed, from an ES module.
+writeFileSync(join(project, 'package.json'), JSON.stringify({ type: 'module' }));
+writeFileSync(join(project, 'api-main.js'), 'import note from "./note.txt";\nimport "./style.css";\nconsole.log(__ANSWER__, note.trim());\n');
+writeFileSync(join(project, 'note.txt'), 'a note\n');
+writeFileSync(join(project, 'style.css'), 'p { color: red; }\n');
+writeFileSync(join(project, 'index.html'), '<!doctype html><html><head></head><body><script type="module" src="./api-main.js"></script></body></html>\n');
+writeFileSync(join(project, 'remote.js'), 'export const hello = () => "remote";\n');
+writeFileSync(
+  join(project, 'api.mjs'),
+  `import { build, serve, run, version, binaryPath, BuildError } from '@rathkit/pack';
+import { readFileSync, existsSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+const problems = [];
+const check = (ok, what) => ok || problems.push(what);
+check(typeof version() === 'string' && version().length > 0, 'version');
+check(existsSync(binaryPath()), 'binaryPath');
+
+// Options become flags: a define, a loader, minifying, a source map; the files written come back.
+const one = await build({ entries: 'api-main.js', outfile: 'dist/one.mjs', define: { __ANSWER__: '42' }, loader: { '.txt': 'text' }, minify: true, sourcemap: true });
+check(one.ok && one.files.some((f) => f.endsWith('one.mjs')), 'build files ' + JSON.stringify(one.files));
+check(existsSync('dist/one.mjs.map'), 'a source map was asked for');
+const ran = spawnSync(process.execPath, ['dist/one.mjs'], { encoding: 'utf8' });
+check(ran.stdout.trim() === '42 a note', 'the output printed ' + JSON.stringify(ran.stdout));
+
+// A page, with a folder of output.
+const page = await build({ entries: 'index.html', outdir: 'dist/page' });
+check(page.files.some((f) => f.endsWith('index.html')), 'page files ' + JSON.stringify(page.files));
+check(/<script type="module" src="\\.\\/api-main\\.js">/.test(readFileSync('dist/page/index.html', 'utf8')), 'the page points at the built script: ' + readFileSync('dist/page/index.html', 'utf8'));
+
+// Federation options given as an object.
+const fed = await build({ entries: 'remote.js', outdir: 'dist/fed', federation: { name: 'remote', filename: 'remoteEntry.js', exposes: { './hello': './remote.js' } } });
+check(existsSync('dist/fed/remoteEntry.js') && fed.ok, 'federation options as an object');
+
+// A failed build rejects with the errors the program reported; a typo in an option is a TypeError.
+try {
+  await build({ entries: 'missing.js', outfile: 'dist/x.mjs' });
+  check(false, 'a missing entry did not fail');
+} catch (error) {
+  check(error instanceof BuildError && error.errors.length > 0 && error.status !== 0, 'BuildError ' + error);
+}
+try {
+  await build({ entries: 'api-main.js', outfile: 'dist/y.mjs', minfy: true });
+  check(false, 'an unknown option was accepted');
+} catch (error) {
+  check(error instanceof TypeError && /minfy/.test(error.message), 'unknown option ' + error);
+}
+const raw = await run(['--version']);
+check(raw.status === 0 && raw.stdout.startsWith('rkp '), 'run');
+
+// The server answers and stops.
+const server = await serve({ entries: 'api-main.js', port: 43917 });
+const page2 = await fetch(server.url).then((r) => r.text());
+check(/<script/.test(page2), 'the server served a page');
+await server.close();
+
+if (problems.length) { console.log(problems.join('\\n')); process.exit(1); }
+console.log('api ok');
+`,
+);
+const api = run(process.execPath, ['api.mjs'], { cwd: project, env: { ...process.env, RATHKIT_PACK_BIN: '' } });
+if (api.status !== 0 || api.stdout.trim() !== 'api ok') fail(`the API: ${api.stdout}${api.stderr}`);
+
+// The types fit how it is used (when a TypeScript compiler is at hand: bench has one).
+const tsc = join(root, 'bench', 'node_modules', 'typescript', 'bin', 'tsc');
+if (existsSync(tsc)) {
+  writeFileSync(join(project, 'use.mts'), `import { build, serve, type Options, BuildError } from '@rathkit/pack';
+const options: Options = { entries: ['a.js'], outdir: 'dist', minify: { whitespace: true }, define: { A: '1' }, loader: { '.svg': 'dataurl' }, federation: { name: 'x' } };
+const result = await build(options);
+const files: string[] = result.files;
+// @ts-expect-error a typo is not an option
+await build({ entries: 'a.js', outfiel: 'x' });
+// @ts-expect-error a loader that does not exist
+await build({ entries: 'a.js', loader: { '.x': 'nope' } });
+const server = await serve({ entries: 'a.js' });
+const address: string = server.url;
+void [files, address, BuildError];
+`);
+  const t = run(process.execPath, [tsc, '--noEmit', '--strict', '--module', 'nodenext', '--moduleResolution', 'nodenext', '--target', 'es2022', '--skipLibCheck', 'false', 'use.mts'], { cwd: project });
+  if (t.status !== 0) fail(`the types: ${t.stdout}${t.stderr}`);
+}
+
+console.log('npm wrapper: packages are plain, the launcher starts the program, passes arguments and exit codes, explains a missing build, and the API builds, serves and is typed');
 rmSync(tmp, { recursive: true, force: true });
