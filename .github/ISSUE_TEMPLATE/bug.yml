@@ -1,0 +1,34 @@
+name: Bug report
+description: Something does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Rathkit Pack is pre-alpha, so some things are known to be missing. Please check the docs first.
+        For security problems, do not file an issue. See the security policy.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The package version or commit you used.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect, and what happened?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The smallest project and command that shows it. Include the pack version.
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      description: Operating system and versions of the tools involved.

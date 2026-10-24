@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or discussion
+    url: https://discord.gg/A5VBxgPaex
+    about: Discord is best-effort and not a support commitment.
+  - name: Report a security vulnerability
+    url: https://github.com/rathkit/.github/blob/main/SECURITY.md
+    about: Please do not open a public issue. Follow the security policy.
