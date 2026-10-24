@@ -32,3 +32,4 @@ First release.
   Sigstore signatures. The binaries are not signed with an operating-system key; see
   [docs/verifying.md](docs/verifying.md).
 - `rathkit-pack --version`.
+- npm packages: `@rathkit/pack` (a launcher) and one package per platform, published with provenance on the `next` tag.

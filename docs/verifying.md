@@ -34,6 +34,19 @@ cosign verify-blob \
 Verify `SHA256SUMS` this way, then the tarball against `SHA256SUMS`. The same command works for any file with its own
 `.sigstore.json`.
 
+## npm
+
+`@rathkit/pack` is the same program for npm: a launcher with one optional dependency, the package for your platform
+(`@rathkit/pack-linux-x64` and so on). None of them has an install script or any dependency but that one. Each is
+published from the `release` workflow with a provenance statement:
+
+```
+npm install --save-dev @rathkit/pack@next
+npm audit signatures
+```
+
+Versions with a suffix (`0.1.0-alpha.0`) are on the `next` tag only.
+
 ## Zero dependencies
 
 ```

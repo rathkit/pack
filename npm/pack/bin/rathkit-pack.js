@@ -1,0 +1,37 @@
+#!/usr/bin/env node
+// Starts the rathkit-pack program for this platform. The program itself comes in a package of its own
+// (@rathkit/pack-<platform>-<cpu>) that npm installs because its `os` and `cpu` fit; nothing runs at install time.
+'use strict';
+const { spawnSync } = require('node:child_process');
+const { existsSync } = require('node:fs');
+const { dirname, join } = require('node:path');
+
+const platform = `${process.platform}-${process.arch}`;
+const exe = process.platform === 'win32' ? 'rathkit-pack.exe' : 'rathkit-pack';
+
+function find() {
+  if (process.env.RATHKIT_PACK_BIN) return process.env.RATHKIT_PACK_BIN;
+  try {
+    return join(dirname(require.resolve(`@rathkit/pack-${platform}/package.json`)), 'bin', exe);
+  } catch {
+    return null;
+  }
+}
+
+const bin = find();
+if (!bin || !existsSync(bin)) {
+  console.error(
+    `rathkit-pack: there is no build for ${platform}.\n` +
+      'Builds exist for linux-x64, linux-arm64, darwin-x64, darwin-arm64 and win32-x64 (glibc on Linux).\n' +
+      'If the platform is one of those, the package @rathkit/pack-' + platform + ' was not installed:\n' +
+      'install again without --omit=optional. Otherwise build from source: https://github.com/rathkit/pack',
+  );
+  process.exit(1);
+}
+const result = spawnSync(bin, process.argv.slice(2), { stdio: 'inherit' });
+if (result.error) {
+  console.error(`rathkit-pack: cannot start ${bin}: ${result.error.message}`);
+  process.exit(1);
+}
+if (result.signal) process.kill(process.pid, result.signal);
+process.exit(result.status ?? 1);

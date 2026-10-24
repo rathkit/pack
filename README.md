@@ -7,6 +7,15 @@ crates), aimed at being fast, clean and safe, and at being easy to move to from 
 **Alpha.** It is early: options, output and plugin support can change between 0.x releases
 (see [CHANGELOG.md](CHANGELOG.md), which also says what the version numbers promise). How to check a release: [docs/verifying.md](docs/verifying.md). This describes what exists today and how it is checked.
 
+## Install
+
+```
+npm install --save-dev @rathkit/pack@next        # the alpha is on the next tag
+```
+
+or a tarball from [the releases](https://github.com/rathkit/pack/releases) (checksums and signatures: [docs/verifying.md](docs/verifying.md)),
+or `cargo build --release` from source.
+
 ## What it does
 
 ```
@@ -240,6 +249,7 @@ node tools/diff-semver.mjs                    # the runtime's version ranges vs 
 node tools/check-estree.mjs DIR...            # the ESTree of every .js file against acorn's (needs acorn; ACORN_DIR)
 node tools/run-loaders.mjs                    # loaders and style sheets (UPDATE_SNAPSHOTS=1 rewrites the CSS snapshots)
 node tools/run-defines.mjs                    # --define vs the values set in Node
+node tools/test-npm-wrapper.mjs                 # the npm launcher and platform packages
 node tools/run-assets.mjs                     # image, font and SVG plugins (url, svgr, file-loader, copy) run for real
 node tools/run-sourcemaps.mjs                 # stack traces through source maps vs the original positions
 node tools/check-pieces.mjs                    # minifying in pieces vs in one pass (add --packages PROJECT for every package)
