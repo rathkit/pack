@@ -1,0 +1,43 @@
+name: Apply for a role
+description: Ask to become a contributor, or suggest someone as a maintainer.
+labels: [role-application]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        You do not need a role to send a pull request. Roles are for people who want to help run
+        the project. See GOVERNANCE.md for what each one means.
+  - type: dropdown
+    id: role
+    attributes:
+      label: Role
+      options:
+        - Contributor (apply for yourself)
+        - Maintainer (suggest someone)
+    validations:
+      required: true
+  - type: input
+    id: username
+    attributes:
+      label: GitHub username
+      description: Your own, or the person you are suggesting.
+    validations:
+      required: true
+  - type: textarea
+    id: work
+    attributes:
+      label: What you have done and what you want to work on
+      description: Link merged pull requests and say which areas interest you.
+    validations:
+      required: true
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Confirm
+      options:
+        - label: Two-factor authentication is on for the account.
+          required: true
+        - label: My commits are signed with a GPG key that GitHub shows as verified.
+          required: true
+        - label: I have read the Code of Conduct, the AI policy and the DCO, and I agree to them.
+          required: true

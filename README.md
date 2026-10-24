@@ -317,6 +317,10 @@ written here, and the profiler is a small signal-based sampler.
 Questions and discussion happen on [Discord](https://discord.gg/A5VBxgPaex). It is best-effort and
 not a support commitment.
 
+## Contributing
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md). Everyone works from a fork, every commit is signed and carries a DCO sign-off, and the [Code of Conduct](CODE_OF_CONDUCT.md) and [AI policy](AI_POLICY.md) apply. Roles are in [GOVERNANCE.md](GOVERNANCE.md).
+
 ## License
 
 Apache License 2.0, see `LICENSE`.

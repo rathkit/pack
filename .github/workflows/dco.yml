@@ -1,0 +1,44 @@
+name: dco
+
+# Fails a pull request when a commit has no Signed-off-by line matching its author, or is not
+# signed with a key GitHub shows as verified. It reads the commit list from the GitHub API, so it
+# checks out nothing and uses no third-party actions.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  commits:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check sign-off and signatures
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -u
+          bad=0
+          gh api --paginate "repos/$REPO/pulls/$PR/commits" --jq '.[] | @base64' > commits.txt
+          while IFS= read -r row; do
+            c=$(printf '%s' "$row" | base64 -d)
+            sha=$(printf '%s' "$c" | jq -r '.sha[0:7]')
+            email=$(printf '%s' "$c" | jq -r '.commit.author.email | ascii_downcase')
+            verified=$(printf '%s' "$c" | jq -r '.commit.verification.verified')
+            signoffs=$(printf '%s' "$c" | jq -r '.commit.message' \
+              | sed -n 's/^Signed-off-by: .*<\(.*\)>[[:space:]]*$/\1/p' | tr 'A-Z' 'a-z')
+            if ! printf '%s\n' "$signoffs" | grep -qxF "$email"; then
+              echo "::error::$sha has no Signed-off-by line matching its author email ($email). Fix: git commit --amend --no-edit -s"
+              bad=1
+            fi
+            if [ "$verified" != "true" ]; then
+              echo "::error::$sha is not signed with a key GitHub shows as verified. See CONTRIBUTING.md"
+              bad=1
+            fi
+          done < commits.txt
+          exit "$bad"
