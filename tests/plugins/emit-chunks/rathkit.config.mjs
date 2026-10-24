@@ -1,4 +1,5 @@
-let seen = null;
+// Modules are read side by side, so what is noted about each is kept apart.
+const parsed = {};
 const workers = {
   name: 'workers',
   transform(code, id) {
@@ -9,14 +10,14 @@ const workers = {
   },
   moduleParsed(info) {
     // What is known as a module is read: its imports, whether it is an entry, its exports.
-    if (info.id.endsWith('main.js')) seen = { imports: info.importedIds.map((i) => i.split('/').pop()).sort(), entry: info.isEntry };
-    if (info.id.endsWith('shared.js')) seen = { ...seen, exports: info.exports };
+    if (info.id.endsWith('main.js')) parsed.main = { imports: info.importedIds.map((i) => i.split('/').pop()).sort(), entry: info.isEntry };
+    if (info.id.endsWith('shared.js')) parsed.shared = { exports: info.exports };
   },
   generateBundle(options, bundle) {
     // Who imports a module is learned as the others are read, and complete once all are.
     const main = this.getModuleInfo([...this.getModuleIds()].find((id) => id.endsWith('main.js')));
     const shared = this.getModuleInfo([...this.getModuleIds()].find((id) => id.endsWith('shared.js')));
-    seen = { imports: seen.imports, importers: main.importers.length, entry: seen.entry, sharedImporters: shared.importers.map((i) => i.split('/').pop()).sort(), exports: seen.exports };
+    const seen = { imports: parsed.main.imports, importers: main.importers.length, entry: parsed.main.entry, sharedImporters: shared.importers.map((i) => i.split('/').pop()).sort(), exports: parsed.shared.exports };
     const chunks = Object.values(bundle).filter((c) => c.type === 'chunk');
     const worker = bundle['worker.mjs'];
     this.emitFile({
