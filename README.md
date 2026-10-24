@@ -225,6 +225,7 @@ node tools/diff-semver.mjs                    # the runtime's version ranges vs 
 node tools/check-estree.mjs DIR...            # the ESTree of every .js file against acorn's (needs acorn; ACORN_DIR)
 node tools/run-loaders.mjs                    # loaders and style sheets (UPDATE_SNAPSHOTS=1 rewrites the CSS snapshots)
 node tools/run-defines.mjs                    # --define vs the values set in Node
+node tools/run-assets.mjs                     # image, font and SVG plugins (url, svgr, file-loader, copy) run for real
 node tools/run-sourcemaps.mjs                 # stack traces through source maps vs the original positions
 node tools/check-pieces.mjs                    # minifying in pieces vs in one pass (add --packages PROJECT for every package)
 node tools/check-sourcemap.mjs OUT.js         # one bundle's map against both ends

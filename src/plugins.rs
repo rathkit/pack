@@ -52,6 +52,8 @@ pub struct CliInfo {
     pub mode: String,
     /// Run the module federation plugin of a config (the Vite one) itself, instead of reading its options.
     pub real_federation_plugin: bool,
+    /// What `--public-path` says (webpack loaders read it as `__webpack_public_path__`).
+    pub public_path: String,
 }
 
 type ResolverFn = dyn Fn(&str, Option<&str>, &str) -> Option<(String, bool)> + Send + Sync;
@@ -191,6 +193,7 @@ impl PluginHost {
             .arg("--no-warnings")
             .arg(&host_file)
             .current_dir(root)
+            .env("RATHKIT_PUBLIC_PATH", &cli.public_path)
             .envs(cli.real_federation_plugin.then_some(("RATHKIT_REAL_FEDERATION_PLUGIN", "1")))
             // `this.parse` in plugins runs this same program (`--estree`).
             .env("RATHKIT_EXE", std::env::current_exe().unwrap_or_default())

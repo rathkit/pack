@@ -695,6 +695,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
                 platform_browser: !options.node_builtins,
                 mode: mode.clone(),
                 real_federation_plugin,
+                public_path: options.public_path.clone(),
             };
             match rathkit_pack::plugins::PluginHost::start(&cwd, Some(file), &info) {
                 Ok(host) => Some(host),

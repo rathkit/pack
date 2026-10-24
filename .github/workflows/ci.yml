@@ -42,6 +42,7 @@ jobs:
       - run: node tools/run-defines.mjs
       - run: node tools/run-loaders.mjs
       - run: node tools/run-plugins.mjs
+      - run: node tools/run-assets.mjs
       - run: node tools/run-split.mjs
       - run: node tools/run-sourcemaps.mjs
       - run: node tools/run-watch.mjs

@@ -778,7 +778,10 @@ const runLoaders = async (resource, query, uses) => {
     content = out === undefined ? input : out;
   }
   for (const file of dependencies) watchFiles.add(file);
-  return { code: Buffer.isBuffer(content) ? content.toString('utf8') : String(content), dependencies };
+  let code = Buffer.isBuffer(content) ? content.toString('utf8') : String(content);
+  // file-loader and url-loader write `__webpack_public_path__ + "name"`; webpack's runtime provides it, so here it is the public path.
+  if (code.includes('__webpack_public_path__') && !/\b(var|let|const)\s+__webpack_public_path__/.test(code)) code = `var __webpack_public_path__ = ${JSON.stringify(process.env.RATHKIT_PUBLIC_PATH ?? '')};\n` + code;
+  return { code, dependencies };
 };
 
 /** `this.loadModule` / `this.importModule`: the module as the build would see it, loaded and transformed. */
