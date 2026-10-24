@@ -4,7 +4,7 @@
 //   npm install && node generate.mjs && node run.mjs [options] [workload...]
 //
 //   --runs N          timed runs per case, after one warm-up run (default 7)
-//   --tools a,b,c     rathkit, esbuild, rolldown, rspack, vite (default all)
+//   --tools a,b,c     rathkit, esbuild, rolldown, rspack, vite (default rathkit; the others are for development only)
 //   --env production  define process.env.NODE_ENV as "production" in every tool (the default), or `none` for no define
 //   --modes a,b       plain, minify, minify+map (default all three)
 //   --markdown        also print the tables as Markdown
@@ -70,7 +70,7 @@ const tools = {
     return { cmd: bin('vite'), args: ['build', '--config', config] };
   },
 };
-const selected = option('--tools', Object.keys(tools).join(',')).split(',');
+const selected = option('--tools', 'rathkit').split(',');
 // What is left after the options are the workloads to run (all of them when none are named).
 const only = args.filter((a) => !a.startsWith('--'));
 
