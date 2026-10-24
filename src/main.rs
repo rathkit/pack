@@ -771,9 +771,16 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
             return Done::Exit(ExitCode::FAILURE);
         }
         entries = expanded;
-        // Each script and sheet of a page is a file of its own.
+        // Each script and sheet of a page is a file of its own (ES modules); the other formats make one file of them all.
         if !pages.is_empty() {
-            bundle_options.splitting = true;
+            match bundle_options.format {
+                rathkit_pack::bundle::Format::Esm => bundle_options.splitting = true,
+                rathkit_pack::bundle::Format::Iife => {}
+                rathkit_pack::bundle::Format::Cjs => {
+                    eprintln!("error: a page runs in a browser, which cannot load CommonJS; use --format esm (the default) or iife");
+                    return Done::Exit(ExitCode::FAILURE);
+                }
+            }
         }
     }
     // Module federation: options from a file, or from a plugin in the config.
@@ -900,8 +907,14 @@ fn write_pages(job: &Job, dir: &std::path::Path, output: &rathkit_pack::bundle::
         let mut html = page.html.clone();
         // Every change to the text, with the place it is made at; applied last first so the places of the others stay true.
         let mut edits: Vec<(usize, usize, String)> = Vec::new();
-        for (reference, path, is_sheet) in page.scripts.iter().map(|(s, p)| (s, p, false)).chain(page.styles.iter().map(|(s, p)| (s, p, true))) {
-            let built = output.chunks.iter().find(|c| c.is_entry && c.facade_module.as_ref().is_some_and(|m| canon(std::path::Path::new(m)) == canon(path)));
+        // With ES modules each script and sheet is a file of its own. In the other formats everything is one file, which the
+        // first script loads and the first sheet links; the other tags would load it again, so they go.
+        let single = !job.bundle_options.splitting;
+        let mut refs: Vec<(&rathkit_pack::html::ScriptRef, &std::path::PathBuf, bool)> = page.scripts.iter().map(|(s, p)| (s, p, false)).chain(page.styles.iter().map(|(s, p)| (s, p, true))).collect();
+        refs.sort_by_key(|(r, _, _)| r.start);
+        let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (reference, path, is_sheet) in refs {
+            let built = output.chunks.iter().find(|c| c.is_entry && (single || c.facade_module.as_ref().is_some_and(|m| canon(std::path::Path::new(m)) == canon(path))));
             let Some(chunk) = built else { return Err(format!("{}: no built file for {}", page.file.display(), reference.src)) };
             let file = if is_sheet {
                 // A sheet is built as an entry: its rules are in the `.css` beside the (empty) script.
@@ -909,13 +922,19 @@ fn write_pages(job: &Job, dir: &std::path::Path, output: &rathkit_pack::bundle::
                 if !output.files.iter().any(|f| f.name == sheet) {
                     return Err(format!("{}: no built style sheet for {}", page.file.display(), reference.src));
                 }
-                let _ = std::fs::remove_file(dir.join(&chunk.file));
-                let _ = std::fs::remove_file(dir.join(format!("{}.map", chunk.file)));
+                if !single {
+                    let _ = std::fs::remove_file(dir.join(&chunk.file));
+                    let _ = std::fs::remove_file(dir.join(format!("{}.map", chunk.file)));
+                }
                 sheet
             } else {
                 chunk.file.clone()
             };
-            edits.push((reference.start, reference.end, format!("{}{}", job.options.public_path, file)));
+            if used.insert(file.clone()) {
+                edits.push((reference.start, reference.end, format!("{}{}", job.options.public_path, file)));
+            } else {
+                edits.push((reference.tag_start, reference.tag_end, String::new()));
+            }
         }
         // Images, icons, media and the `url()`s of `<style>` blocks: files of the project are copied under a name with a hash.
         // A file that is in `public/` stays where it is, and one that is nowhere stays as written.

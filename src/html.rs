@@ -7,6 +7,9 @@ pub struct ScriptRef {
     pub start: usize,
     pub end: usize,
     pub src: String,
+    /// The whole tag, from `<` to the end of the element (past `</script>` for a script).
+    pub tag_start: usize,
+    pub tag_end: usize,
 }
 
 /// The module scripts of a page that point at local files, in order.
@@ -60,7 +63,7 @@ pub fn assets(html: &str) -> Vec<ScriptRef> {
             let end = html[start..close].find(|c: char| Some(c as u8) == quote && quote.is_some() || (quote.is_none() && (c == ')' || c.is_ascii_whitespace()))).map_or(close, |m| start + m);
             let value = html[start..end].to_string();
             if !value.is_empty() && !value.starts_with("//") && !value.contains("://") && !value.starts_with("data:") {
-                out.push(ScriptRef { start, end, src: value });
+                out.push(ScriptRef { start, end, src: value, tag_start: start, tag_end: end });
             }
             i = end.max(i + n + 4);
         }
@@ -97,10 +100,16 @@ fn references(html: &str, open: &str, pick: impl Fn(&[(String, String, usize)]) 
             i += 1;
         }
         let attrs: Vec<(String, String, usize)> = attributes(&html[after..i.min(html.len())]).into_iter().map(|(n, v, p)| (n, v, p + after)).collect();
+        // A script ends at its closing tag.
+        let tag_end = if open == "<script" {
+            lower[i.min(lower.len())..].find("</script").and_then(|n| lower[i + n..].find('>').map(|m| i + n + m + 1)).unwrap_or((i + 1).min(html.len()))
+        } else {
+            (i + 1).min(html.len())
+        };
         for (_, value, start) in pick(&attrs) {
             let remote = value.starts_with("//") || value.contains("://") || value.starts_with("data:");
             if !remote && !value.is_empty() {
-                out.push(ScriptRef { start, end: start + value.len(), src: value });
+                out.push(ScriptRef { start, end: start + value.len(), src: value, tag_start, tag_end });
             }
         }
         at = i.max(after);

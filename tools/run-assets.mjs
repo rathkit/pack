@@ -66,6 +66,19 @@ const cases = [
       return /<style>[^<]*@font-face[^<]*font-family:\s*'?Mono'?/.test(html) ? null : `no inlined @font-face\n${html}`;
     },
   },
+  // A page in the other formats: one file holds every script and sheet, and the page loads it once.
+  {
+    name: 'page as an iife', page: 'two-scripts.html', flags: ['--format', 'iife'], config: 'unfonts-inline.config.mjs',
+    verify: (out) => {
+      const html = readFileSync(join(out, 'two-scripts.html'), 'utf8');
+      const scripts = html.match(/<script[^>]*><\/script>/g) ?? [];
+      if (scripts.length !== 1 || !/src="\.\/bundle\.js"/.test(scripts[0])) return `the page loads ${JSON.stringify(scripts)}`;
+      if ((html.match(/<link rel="stylesheet"/g) ?? []).length !== 1 || !/href="\.\/bundle\.css"/.test(html)) return `the page links ${html}`;
+      return /^\(\(\) => \{/.test(readFileSync(join(out, 'bundle.js'), 'utf8')) ? null : 'bundle.js is not an iife';
+    },
+  },
+  // CommonJS cannot run in a page.
+  { name: 'page as commonjs', page: 'index.html', flags: ['--format', 'cjs'], config: 'unfonts-inline.config.mjs', failure: /cannot load CommonJS/ },
   // A font plugin that downloads the fonts of a Google Fonts style sheet and adds them to the output (needs the network).
   { name: 'vite-plugin-webfont-dl', entry: 'use-webfont.js', config: 'webfont-dl.config.mjs', out: ['ok'], network: 'https://fonts.googleapis.com/css2?family=Press+Start+2P', files: [/\.woff2$/, /^webfonts-.*\.css$/] },
   // No plugin: a font package's style sheet names its font files, which are copied and the addresses rewritten.
@@ -90,12 +103,13 @@ for (const c of cases) {
   if (c.config) copyFileSync(join(dir, c.config), join(dir, 'rathkit.config.mjs'));
   const out = join(dir, 'dist');
   const file = join(out, 'bundle.mjs');
-  const b = spawnSync(bin, ['bundle', c.page ?? c.entry, ...(c.page ? ['--outdir', out] : ['--outfile', file, '--external', 'react', '--external', 'react-dom/server'])], { cwd: dir, encoding: 'utf8' });
+  const b = spawnSync(bin, ['bundle', c.page ?? c.entry, ...(c.page ? ['--outdir', out, ...(c.flags ?? [])] : ['--outfile', file, '--external', 'react', '--external', 'react-dom/server'])], { cwd: dir, encoding: 'utf8' });
   let problem = null;
-  if (b.status !== 0) problem = `bundler failed: ${b.stderr.trim()}`;
+  if (c.failure) problem = b.status !== 0 && c.failure.test(b.stderr) ? null : `expected the build to fail with ${c.failure}: ${b.status} ${b.stderr}`;
+  else if (b.status !== 0) problem = `bundler failed: ${b.stderr.trim()}`;
   else if (c.page) {
-    problem = null;
-  } else {
+    problem = c.verify ? await c.verify(out, dir) : null;
+  } else if (!c.failure) {
     const r = spawnSync('node', ['--no-warnings', file], { cwd: dir, encoding: 'utf8' });
     const got = r.stdout.trim().split('\n').map((l) => l.replace(/(?<=[-.\/ ])[0-9A-Za-z]{8,32}(?=\.\w+$)/g, 'HASH'));
     if (r.status !== 0) problem = `run failed: ${r.stderr.trim()}`;
