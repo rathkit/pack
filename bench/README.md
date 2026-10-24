@@ -1,8 +1,8 @@
 # Measuring
 
-`run.mjs` builds fixed inputs with rathkit-pack and reports for each case the median and best wall time of the whole
+`run.mjs` builds fixed inputs with rathkit-pack (and, with `--tools`, esbuild, rolldown, rspack and Vite) and reports for each case the median and best wall time of the whole
 command (start-up included), peak memory, output size and gzip size, and whether the output runs and prints what the
-unbundled program prints. Figures are quoted only with this method and the machine they were measured on.
+unbundled program prints. Figures are quoted only with this method and the machine they were measured on; the published ones are in [../docs/benchmarks.md](../docs/benchmarks.md).
 
 ```
 cargo build --release          # in the repository root
@@ -13,7 +13,7 @@ node run.mjs                   # everything, 7 runs per case: about ten minutes
 node run.mjs --markdown --runs 5 lodash react        # chosen workloads, tables as Markdown
 ```
 
-Options: `--tools rathkit`, `--modes plain,minify,minify+map`, `--env production|none` (whether `process.env.NODE_ENV`
+Options: `--tools rathkit,esbuild,rolldown,rspack,vite` (default: rathkit only), `--modes plain,minify,minify+map`, `--env production|none` (whether `process.env.NODE_ENV`
 is defined as `"production"`; the default is production). The binary is `target/release/rathkit-pack` unless
 `RATHKIT_PACK_BIN` says otherwise. Results are also written to `results.json`.
 

@@ -7,6 +7,15 @@ crates), aimed at being fast, clean and safe, and at being easy to move to from 
 **Alpha.** It is early: options, output and plugin support can change between 0.x releases
 (see [CHANGELOG.md](CHANGELOG.md), which also says what the version numbers promise). How to check a release: [docs/verifying.md](docs/verifying.md). This describes what exists today and how it is checked.
 
+## Speed
+
+Measured on seven workloads in three modes (21 cases: the TypeScript compiler, three.js, lodash-es, React, rxjs, two
+generated apps; plain, minified, minified with a source map), the whole command took the least time and the least
+memory in every case, against esbuild, rolldown, rspack and Vite. The closest was the TypeScript compiler minified
+(401 ms against esbuild's 419 ms). Output sizes are about equal, and others are smaller in some cases. The method,
+the machine, the versions and every table: [docs/benchmarks.md](docs/benchmarks.md). One machine, one day: run
+`bench/run.mjs` for yours.
+
 ## Install
 
 ```

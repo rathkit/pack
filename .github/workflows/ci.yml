@@ -14,14 +14,17 @@ concurrency:
 
 jobs:
   check:
-    name: node ${{ matrix.node }}
-    runs-on: ubuntu-latest
+    name: ${{ matrix.os }} node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        # The plugin host needs Node 24 or newer; test the oldest and the newest.
-        node: [24, 26]
+        # The plugin host needs Node 24 or newer; test the oldest and the newest, and a second CPU architecture.
+        include:
+          - { os: ubuntu-latest, node: 24, browser: true }
+          - { os: ubuntu-latest, node: 26, browser: true }
+          - { os: ubuntu-24.04-arm, node: 24, browser: false }
     env:
       # The TypeScript compiler the JSX and decorator programs are compared with.
       TS_MODULE: ${{ github.workspace }}/bench/node_modules/ts5
@@ -53,9 +56,35 @@ jobs:
       - run: node tools/run-jsx.mjs
       - run: node tools/test-federation-runtime.mjs
       - run: node tools/diff-semver.mjs
-      # Module federation in a real browser; the runner has Chrome.
-      - run: node tools/run-federation.mjs
+      # Module federation in a real browser; the x64 runner has Chrome.
+      - if: matrix.browser
+        run: node tools/run-federation.mjs
         env:
           CHROME: google-chrome
       - run: python3 tools/fuzz-bundle.py --count 300
       - run: node tools/diff-real.mjs "$GITHUB_WORKSPACE/bench"
+
+  # The musl build (Alpine): the program has no C dependencies, so it runs there as it is built; this checks it does.
+  musl:
+    name: alpine (musl) node 24
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container: node:24-alpine
+    env:
+      TS_MODULE: ${{ github.workspace }}/bench/node_modules/ts5
+    steps:
+      - run: apk add --no-cache git rust cargo python3 bash
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: cargo build --release
+      - run: ./target/release/rathkit-pack --version
+      - run: npm ci --prefix bench --ignore-scripts
+      - run: cargo test --release
+      - run: node tools/run-fixtures.mjs
+      - run: node tools/run-loaders.mjs
+      - run: node tools/run-plugins.mjs
+      - run: node tools/run-split.mjs
+      - run: node tools/run-watch.mjs
+      - run: node tools/run-serve.mjs
+      - run: node tools/test-npm-wrapper.mjs

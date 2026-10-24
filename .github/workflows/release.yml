@@ -17,8 +17,11 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          - { os: ubuntu-latest, target: linux-x64 }
-          - { os: ubuntu-24.04-arm, target: linux-arm64 }
+          - { os: ubuntu-latest, target: linux-x64-gnu }
+          - { os: ubuntu-24.04-arm, target: linux-arm64-gnu }
+          # Static builds for Alpine and other musl systems (the program has no C dependencies).
+          - { os: ubuntu-latest, target: linux-x64-musl, triple: x86_64-unknown-linux-musl }
+          - { os: ubuntu-24.04-arm, target: linux-arm64-musl, triple: aarch64-unknown-linux-musl }
           - { os: macos-latest, target: macos-arm64 }
           - { os: macos-15-intel, target: macos-x64 }
           - { os: windows-latest, target: windows-x64 }
@@ -33,17 +36,30 @@ jobs:
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME is not v$version"; exit 1; }
-      - run: cargo build --release --locked
-      - run: cargo test --release --locked
+      - name: Build and test
+        shell: bash
+        env:
+          TRIPLE: ${{ matrix.triple }}
+        run: |
+          flags=""
+          if [ -n "$TRIPLE" ]; then rustup target add "$TRIPLE"; flags="--target $TRIPLE"; fi
+          cargo build --release --locked $flags
+          cargo test --release --locked $flags
+      - name: Run the musl build in Alpine
+        if: matrix.triple
+        run: docker run --rm -v "$PWD/target/${{ matrix.triple }}/release:/p:ro" alpine:3.22 /p/rathkit-pack --version
       - name: Package
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
+          TRIPLE: ${{ matrix.triple }}
         run: |
+          out=target/release
+          if [ -n "$TRIPLE" ]; then out="target/$TRIPLE/release"; fi
           name="rathkit-pack-${GITHUB_REF_NAME#v}-$TARGET"
           mkdir "$name"
           cp LICENSE README.md "$name/"
-          if [ "$RUNNER_OS" = Windows ]; then cp target/release/rathkit-pack.exe "$name/"; else cp target/release/rathkit-pack "$name/"; fi
+          if [ "$RUNNER_OS" = Windows ]; then cp "$out/rathkit-pack.exe" "$name/"; else cp "$out/rathkit-pack" "$name/"; fi
           "$name/rathkit-pack" --version
           tar -czf "$name.tar.gz" "$name"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

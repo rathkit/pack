@@ -22,13 +22,17 @@ const version = /^version\s*=\s*"([^"]+)"/m.exec(readFileSync(join(root, 'Cargo.
 
 // The release's names for a platform, and npm's.
 const platforms = [
-  { target: 'linux-x64', os: 'linux', cpu: 'x64', libc: 'glibc' },
-  { target: 'linux-arm64', os: 'linux', cpu: 'arm64', libc: 'glibc' },
+  { target: 'linux-x64-gnu', os: 'linux', cpu: 'x64', libc: 'glibc', suffix: 'gnu' },
+  { target: 'linux-arm64-gnu', os: 'linux', cpu: 'arm64', libc: 'glibc', suffix: 'gnu' },
+  { target: 'linux-x64-musl', os: 'linux', cpu: 'x64', libc: 'musl', suffix: 'musl' },
+  { target: 'linux-arm64-musl', os: 'linux', cpu: 'arm64', libc: 'musl', suffix: 'musl' },
   { target: 'macos-arm64', os: 'darwin', cpu: 'arm64' },
   { target: 'macos-x64', os: 'darwin', cpu: 'x64' },
   { target: 'windows-x64', os: 'win32', cpu: 'x64' },
 ];
-const here = platforms.find((p) => p.os === process.platform && p.cpu === process.arch);
+// Linux with glibc reports its version; musl does not.
+const musl = process.platform === 'linux' && !process.report?.getReport?.().header?.glibcVersionRuntime;
+const here = platforms.find((p) => p.os === process.platform && p.cpu === process.arch && (!p.libc || (p.libc === 'musl') === musl));
 
 rmSync(out, { recursive: true, force: true });
 mkdirSync(out, { recursive: true });
@@ -50,8 +54,9 @@ for (const p of platforms) {
     binary = join(unpack, tarball.replace(/\.tar\.gz$/, ''), exe);
   }
   if (!existsSync(binary)) throw new Error(`missing ${binary}`);
-  const name = `@rathkit/pack-${p.os}-${p.cpu}`;
-  const dir = join(out, `pack-${p.os}-${p.cpu}`);
+  const id = `${p.os}-${p.cpu}${p.suffix ? `-${p.suffix}` : ''}`;
+  const name = `@rathkit/pack-${id}`;
+  const dir = join(out, `pack-${id}`);
   mkdirSync(join(dir, 'bin'), { recursive: true });
   cpSync(binary, join(dir, 'bin', exe));
   if (p.os !== 'win32') chmodSync(join(dir, 'bin', exe), 0o755);

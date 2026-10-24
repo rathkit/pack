@@ -6,7 +6,9 @@ const { spawnSync } = require('node:child_process');
 const { existsSync } = require('node:fs');
 const { dirname, join } = require('node:path');
 
-const platform = `${process.platform}-${process.arch}`;
+// On Linux the package depends on the C library: glibc reports its version, musl (Alpine) does not.
+const libc = process.platform !== 'linux' ? '' : process.report?.getReport?.().header?.glibcVersionRuntime ? '-gnu' : '-musl';
+const platform = `${process.platform}-${process.arch}${libc}`;
 const exe = process.platform === 'win32' ? 'rathkit-pack.exe' : 'rathkit-pack';
 
 function find() {
@@ -22,7 +24,7 @@ const bin = find();
 if (!bin || !existsSync(bin)) {
   console.error(
     `rathkit-pack: there is no build for ${platform}.\n` +
-      'Builds exist for linux-x64, linux-arm64, darwin-x64, darwin-arm64 and win32-x64 (glibc on Linux).\n' +
+      'Builds exist for linux-x64 and linux-arm64 (glibc: -gnu, Alpine: -musl), darwin-x64, darwin-arm64 and win32-x64.\n' +
       'If the platform is one of those, the package @rathkit/pack-' + platform + ' was not installed:\n' +
       'install again without --omit=optional. Otherwise build from source: https://github.com/rathkit/pack',
   );
