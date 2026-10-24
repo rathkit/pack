@@ -39,6 +39,10 @@ const cases = [
       return file && statSync(file).size < statSync(join(dir, 'photo.png')).size ? null : 'the copied PNG was not made smaller';
     },
   },
+  // A font plugin that makes a style sheet of @font-face rules naming the project's font files (`/fonts/...` is the project's).
+  { name: 'unplugin-fonts', entry: 'use-unfonts.js', config: 'unfonts.config.mjs', out: ['ok'], files: [/^Mono-Regular-.*\.woff2$/, /\.css$/] },
+  // A font plugin that downloads the fonts of a Google Fonts style sheet and adds them to the output (needs the network).
+  { name: 'vite-plugin-webfont-dl', entry: 'use-webfont.js', config: 'webfont-dl.config.mjs', out: ['ok'], network: 'https://fonts.googleapis.com/css2?family=Press+Start+2P', files: [/\.woff2$/, /^webfonts-.*\.css$/] },
   // No plugin: a font package's style sheet names its font files, which are copied and the addresses rewritten.
   { name: 'font package style sheet', entry: 'use-font.js', out: ['ok'], files: [/^roboto-mono-latin-400-normal-.*\.woff2$/, /\.css$/] },
   // No plugin: workers are scripts built on their own, with the files they import copied beside them.
@@ -51,6 +55,10 @@ const filesUnder = (d) => readdirSync(d, { withFileTypes: true }).flatMap((e) =>
 const tmp = mkdtempSync(join(tmpdir(), 'assets-'));
 let failed = 0;
 for (const c of cases) {
+  if (c.network && !(await fetch(c.network, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok, () => false))) {
+    console.log(`skip ${c.name}: ${c.network} cannot be reached`);
+    continue;
+  }
   const dir = join(tmp, c.name.replace(/\W+/g, '-'));
   cpSync(join(root, 'tests', 'assets'), dir, { recursive: true });
   symlinkSync(bench, join(dir, 'node_modules'), 'dir');
@@ -67,7 +75,7 @@ for (const c of cases) {
     else if (JSON.stringify(got) !== JSON.stringify(c.out)) problem = `printed ${JSON.stringify(got)}, expected ${JSON.stringify(c.out)}`;
     if (!problem && c.verify) problem = await c.verify(out, dir);
     for (const f of c.files ?? []) {
-      const found = f instanceof RegExp ? existsSync(out) && readdirSync(out).some((n) => f.test(n)) : existsSync(join(out, f)) || existsSync(join(dir, f));
+      const found = f instanceof RegExp ? existsSync(out) && filesUnder(out).some((n) => f.test(n.replace(/^.*\//, ''))) : existsSync(join(out, f)) || existsSync(join(dir, f));
       if (!problem && !found) problem = `missing file ${f}`;
     }
   }

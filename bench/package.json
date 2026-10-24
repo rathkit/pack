@@ -26,10 +26,12 @@
     "three": "0.186.1",
     "ts5": "npm:typescript@5.9.3",
     "typescript": "5.9.3",
+    "unplugin-fonts": "2.1.0",
     "url-loader": "4.1.1",
     "vite": "8.3.5",
     "vite-imagetools": "12.0.1",
     "vite-plugin-image-optimizer": "2.0.3",
-    "vite-plugin-svgr": "5.2.0"
+    "vite-plugin-svgr": "5.2.0",
+    "vite-plugin-webfont-dl": "3.13.1"
   }
 }

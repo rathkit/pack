@@ -47,7 +47,7 @@ rathkit-pack bundle src/main.ts --outfile dist/app.mjs
   `[name]-[hash].[ext]`; `[ext]` has no dot, and the extension is added when the name has no `[ext]`; see `--asset-names` and `--public-path`), `empty`, `css`, `local-css`. By default
   `.txt .md .html` are text, images, fonts, media, `.pdf` and `.wasm` are files, `.css` is a style sheet and
   `.module.css` has local class names (exported as a default object and as named exports; `composes` within a
-  file or `from "./other.module.css"`). A sheet's `@import`s are inlined in order (`@import "x" screen` wraps what
+  file or `from "./other.module.css"`). In a style sheet `url(/fonts/a.woff2)` is a file of the project (its folder, then `public/`), and stays as written when it is nowhere. A sheet's `@import`s are inlined in order (`@import "x" screen` wraps what
   x holds), `url()` points at the copied files, and each chunk's sheets go to a `.css` file next to its `.js`
   (with `--sourcemap`, a `.css.map` too); `--minify` also shrinks the CSS. A copied file nothing uses is not written.
 - Plugins (`--config FILE`, or `rathkit.config.{mjs,js,cjs}` or a `.parcelrc` next to the project): the config
@@ -80,7 +80,9 @@ rathkit-pack bundle src/main.ts --outfile dist/app.mjs
     - Checked in CI on every change: the plugin hooks and contexts above, with small plugins written for the
       purpose (`tools/run-plugins.mjs`, 10 programs); and these real packages, run from `bench/`:
       `@rollup/plugin-url`, `@svgr/rollup`, `vite-plugin-svgr`, `rollup-plugin-copy`, webpack's `url-loader`,
-      `file-loader` and `@svgr/webpack` (`tools/run-assets.mjs`), and `@module-federation/vite` and
+      `file-loader` and `@svgr/webpack`, `vite-imagetools`, `vite-plugin-image-optimizer`, `unplugin-fonts` (the style sheet
+      it makes, not the tags it adds to `index.html`), and `vite-plugin-webfont-dl` (downloads from Google Fonts, so it
+      is skipped when the network is down) (`tools/run-assets.mjs`), and `@module-federation/vite` and
       `@module-federation/enhanced` (`tools/run-federation.mjs`, in Chromium).
     - Tried by hand, not repeated in CI: `@rollup/plugin-json`, `-image`, `-commonjs`, `-node-resolve`, `-babel`,
       `-typescript`; babel-loader; css-loader with style-loader; `copy-webpack-plugin`, `html-webpack-plugin`,

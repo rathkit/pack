@@ -767,6 +767,20 @@ impl Context<'_> {
                 }
             }
         }
+        // In a style sheet `/fonts/a.woff2` is a file of the project (its root, then `public/`) before it is a place on the disk;
+        // one that is nowhere stays as written, to be found when the page loads.
+        if relative_first && specifier.starts_with('/') && !specifier.starts_with("//") {
+            let inside = specifier.trim_start_matches('/');
+            for base in [self.cwd.to_path_buf(), self.cwd.join("public")] {
+                let candidate = base.join(inside);
+                if self.resolver.file_system().is_file(&candidate) {
+                    return Target::Path(candidate);
+                }
+            }
+            if !self.resolver.file_system().is_file(Path::new(specifier)) {
+                return Target::Unresolved;
+            }
+        }
         if relative_first && !specifier.starts_with('.') && !specifier.starts_with('/') {
             if let Ok(found) = self.resolver.resolve(dir, &format!("./{specifier}"), kind) {
                 return Target::Path(found.path);

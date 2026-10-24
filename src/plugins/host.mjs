@@ -1377,7 +1377,10 @@ const handlers = {
         const source = file.source ?? '';
         const fileName = file.fileName ?? fileNameOf(file.name ?? 'asset', source, cli.assetFileNames);
         bundle[fileName] = { type: 'asset', fileName, name: file.name, names: file.name ? [file.name] : [], originalFileName: null, originalFileNames: [], source, needsCodeReference: false };
-        return fileName;
+        // The answer is a reference, as in Rollup: `getFileName` turns it into the name.
+        const reference = `ref${emitted.size + 1}`;
+        emitted.set(reference, { fileName, source, name: file.name, owner: 'generate', explicit: true });
+        return reference;
       };
       await callHook(plugin, 'generateBundle', [options, bundle, true], context);
     }
