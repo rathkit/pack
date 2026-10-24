@@ -3,7 +3,8 @@
 // Node; the lines it prints must match what is listed here, and files a plugin writes must exist.
 //   node tools/run-assets.mjs
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, cpSync, existsSync, mkdtempSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
+import { copyFileSync, cpSync, existsSync, mkdtempSync, readdirSync, rmSync, statSync, symlinkSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -21,15 +22,39 @@ const cases = [
   { name: '@svgr/rollup', entry: 'use-component-default.jsx', config: 'svgr-rollup.config.mjs', out: ['true'] },
   { name: '@svgr/webpack', entry: 'use-component-default.jsx', config: 'webpack-svgr.config.mjs', out: ['true'] },
   { name: 'vite-plugin-svgr (?react)', entry: 'use-component.jsx', config: 'svgr-vite.config.mjs', out: ['true'] },
+  {
+    name: 'vite-imagetools', entry: 'use-imagetools.js', config: 'imagetools.config.mjs', out: ['url photo-HASH.webp', 'meta 16 png', 'srcset 2'],
+    // The resized copy is a real WebP, 16 pixels wide.
+    verify: async (out) => {
+      const file = filesUnder(out).find((f) => f.endsWith('.webp'));
+      const info = file && (await sharp(file).metadata());
+      return info?.format === 'webp' && info.width === 16 ? null : `the .webp file is ${JSON.stringify(info && { format: info.format, width: info.width })}`;
+    },
+  },
+  {
+    name: 'vite-plugin-image-optimizer', entry: 'use-optimizer.js', config: 'optimizer.config.mjs', out: ['string string'],
+    // The PNG that was copied is smaller than the one in the project.
+    verify: async (out, dir) => {
+      const file = filesUnder(out).find((f) => /photo-.*\.png$/.test(f));
+      return file && statSync(file).size < statSync(join(dir, 'photo.png')).size ? null : 'the copied PNG was not made smaller';
+    },
+  },
+  // No plugin: a font package's style sheet names its font files, which are copied and the addresses rewritten.
+  { name: 'font package style sheet', entry: 'use-font.js', out: ['ok'], files: [/^roboto-mono-latin-400-normal-.*\.woff2$/, /\.css$/] },
+  // No plugin: workers are scripts built on their own, with the files they import copied beside them.
+  { name: 'workers', entry: 'worker-main.js', out: ['plain 42 logo-HASH.svg', 'constructor 8 logo-HASH.svg', 'inline function url worker-script-HASH.js'], files: [/^logo-.*\.svg$/, /^worker-script-.*\.js$/] },
   { name: 'rollup-plugin-copy', entry: 'nothing.js', config: 'copy.config.mjs', out: ['copied'], files: ['copied/pic.png'] },
 ];
+const sharp = createRequire(join(bench, 'x.js'))('sharp');
+// All the files under a folder.
+const filesUnder = (d) => readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? filesUnder(join(d, e.name)) : [join(d, e.name)]));
 const tmp = mkdtempSync(join(tmpdir(), 'assets-'));
 let failed = 0;
 for (const c of cases) {
   const dir = join(tmp, c.name.replace(/\W+/g, '-'));
   cpSync(join(root, 'tests', 'assets'), dir, { recursive: true });
   symlinkSync(bench, join(dir, 'node_modules'), 'dir');
-  copyFileSync(join(dir, c.config), join(dir, 'rathkit.config.mjs'));
+  if (c.config) copyFileSync(join(dir, c.config), join(dir, 'rathkit.config.mjs'));
   const out = join(dir, 'dist');
   const file = join(out, 'bundle.mjs');
   const b = spawnSync(bin, ['bundle', c.entry, '--outfile', file, '--external', 'react', '--external', 'react-dom/server'], { cwd: dir, encoding: 'utf8' });
@@ -40,7 +65,11 @@ for (const c of cases) {
     const got = r.stdout.trim().split('\n').map((l) => l.replace(/(?<=[-.\/ ])[0-9A-Za-z]{8,32}(?=\.\w+$)/g, 'HASH'));
     if (r.status !== 0) problem = `run failed: ${r.stderr.trim()}`;
     else if (JSON.stringify(got) !== JSON.stringify(c.out)) problem = `printed ${JSON.stringify(got)}, expected ${JSON.stringify(c.out)}`;
-    for (const f of c.files ?? []) if (!problem && !existsSync(join(out, f)) && !existsSync(join(dir, f))) problem = `missing file ${f}`;
+    if (!problem && c.verify) problem = await c.verify(out, dir);
+    for (const f of c.files ?? []) {
+      const found = f instanceof RegExp ? existsSync(out) && readdirSync(out).some((n) => f.test(n)) : existsSync(join(out, f)) || existsSync(join(dir, f));
+      if (!problem && !found) problem = `missing file ${f}`;
+    }
   }
   console.log(problem ? `FAIL ${c.name}: ${problem}` : `ok   ${c.name}`);
   if (problem) failed++;

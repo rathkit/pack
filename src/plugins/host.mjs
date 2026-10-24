@@ -280,14 +280,22 @@ const moduleInfoFor = (id, extra = {}) => {
 
 // ---- file references ---------------------------------------------------------------------------
 
-const FILE_URL = /import\.meta\.ROLLUP_(?:FILE|ASSET|CHUNK)_URL_([A-Za-z0-9_$]+)/g;
+const FILE_URL = /import\.meta\.ROLLUP_(?:FILE|ASSET|CHUNK)_URL_([A-Za-z0-9_$]+)|__VITE_ASSET__([A-Za-z0-9_$]+?)__(?:\$_(.*?)__)?/g;
 
 /** `import.meta.ROLLUP_FILE_URL_<reference>` becomes the address of the emitted file (or what `resolveFileUrl` says). */
 const replaceFileUrls = async (code, id) => {
-  if (typeof code !== 'string' || !code.includes('import.meta.ROLLUP_')) return code;
+  if (typeof code !== 'string' || !(code.includes('import.meta.ROLLUP_') || code.includes('__VITE_ASSET__'))) return code;
   let out = '';
   let last = 0;
   for (const match of code.matchAll(FILE_URL)) {
+    // Vite's own asset plugin turns `__VITE_ASSET__<reference>__` (what its plugins write for an emitted file) into the file's address.
+    if (match[2] !== undefined) {
+      const asset = emitted.get(match[2]);
+      if (!asset) throw new Error(`Plugin error - Unable to get file name for unknown file "${match[2]}".`);
+      out += code.slice(last, match.index) + (process.env.RATHKIT_PUBLIC_PATH ?? '') + asset.fileName + (match[3] ?? '');
+      last = match.index + match[0].length;
+      continue;
+    }
     const file = emitted.get(match[1]);
     if (!file) throw new Error(`Plugin error - Unable to get file name for unknown file "${match[1]}".`);
     let replacement;

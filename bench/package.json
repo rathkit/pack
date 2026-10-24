@@ -4,6 +4,7 @@
   "type": "module",
   "description": "Other bundlers and the libraries the benchmark bundles; see README.md",
   "dependencies": {
+    "@fontsource/roboto-mono": "5.3.0",
     "@module-federation/enhanced": "2.9.2",
     "@module-federation/vite": "1.23.5",
     "@rollup/plugin-url": "8.0.2",
@@ -20,11 +21,15 @@
     "rollup-plugin-copy": "3.5.0",
     "rxjs": "7.8.2",
     "semver": "7.7.2",
+    "sharp": "0.35.5",
+    "svgo": "4.1.0",
     "three": "0.186.1",
     "ts5": "npm:typescript@5.9.3",
     "typescript": "5.9.3",
     "url-loader": "4.1.1",
     "vite": "8.3.5",
+    "vite-imagetools": "12.0.1",
+    "vite-plugin-image-optimizer": "2.0.3",
     "vite-plugin-svgr": "5.2.0"
   }
 }
