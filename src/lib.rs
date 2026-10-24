@@ -12,6 +12,7 @@ pub mod bundle;
 pub(crate) mod compress;
 pub mod glob;
 pub mod graph;
+pub mod html;
 pub mod json;
 pub mod link;
 pub mod literal;

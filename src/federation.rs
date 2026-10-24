@@ -971,7 +971,7 @@ impl Federation {
             walk(&out_dir, "", &mut found);
             found.sort();
             for (name, bytes) in found {
-                files.push(OutputFile { name, code: String::new(), map: None, data: Some(bytes) });
+                files.push(OutputFile { name, code: String::new(), map: None, data: Some(bytes), original: None });
             }
         }
         let _ = std::fs::remove_dir_all(&out_dir);
@@ -1099,7 +1099,7 @@ impl Federation {
             let signature = format!("{key}|{:?}|{:?}", used.get(&key).map(|(u, _)| u), bundle_options.minify);
             if let Some((stamps, code)) = self.shaken_cache.lock().expect("shaken_cache").get(&signature) {
                 if stamps.iter().all(|(path, time)| std::fs::metadata(path).and_then(|m| m.modified()).is_ok_and(|t| t == *time)) {
-                    files.push(OutputFile { name: file, code: code.clone(), map: None, data: None });
+                    files.push(OutputFile { name: file, code: code.clone(), map: None, data: None, original: None });
                     continue;
                 }
             }
@@ -1116,7 +1116,7 @@ impl Federation {
                 Ok(output) => {
                     let stamps: Vec<(PathBuf, std::time::SystemTime)> = graph.modules.iter().filter_map(|m| std::fs::metadata(&m.path).and_then(|md| md.modified()).ok().map(|t| (m.path.clone(), t))).collect();
                     self.shaken_cache.lock().expect("shaken_cache").insert(signature, (stamps, output.code.clone()));
-                    files.push(OutputFile { name: file, code: output.code, map: None, data: None });
+                    files.push(OutputFile { name: file, code: output.code, map: None, data: None, original: None });
                 }
                 Err(problems) => eprintln!("warning: the copy of {key} with only the exports in use was not built: {}", problems.first().map_or("", |d| d.message.as_str())),
             }
@@ -1130,7 +1130,7 @@ impl Federation {
         let core_file = output.chunks.iter().find(|c| c.facade_module.as_deref() == Some(core.as_str())).map(|c| c.file.clone()).ok_or("the federation runtime was not built; the build needs the esm format with splitting")?;
         if !self.exposes.is_empty() {
             let styles: Vec<(String, Vec<String>)> = self.expose_assets(output).into_iter().filter(|(_, _, _, css)| !css.is_empty()).map(|(e, _, _, css)| (e.key.clone(), css)).collect();
-            output.files.push(OutputFile { name: self.filename.clone(), code: self.remote_entry(&core_file, hot, &styles), map: None, data: None });
+            output.files.push(OutputFile { name: self.filename.clone(), code: self.remote_entry(&core_file, hot, &styles), map: None, data: None, original: None });
         }
         for reason in self.shaken_skipped.lock().expect("shaken_skipped").iter() {
             eprintln!("warning: no copy of {reason} was written with only the exports in use; it is shared whole");
@@ -1145,7 +1145,7 @@ impl Federation {
         output.files.extend(types);
         if let Some(name) = &self.manifest {
             let manifest = self.manifest_json(output, has_types);
-            output.files.push(OutputFile { name: name.clone(), code: manifest, map: None, data: None });
+            output.files.push(OutputFile { name: name.clone(), code: manifest, map: None, data: None, original: None });
         }
         Ok(())
     }

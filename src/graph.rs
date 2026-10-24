@@ -605,7 +605,7 @@ impl Context<'_> {
                     let name = crate::loader::asset_name(&self.options.asset_names, &file_name, &bytes);
                     let url = format!("{}{}", self.options.public_path, name);
                     let js = crate::loader::synthesize(loader, &bytes, &file_name, Some(&url));
-                    asset = Some(Asset { name, url, data: Arc::new(bytes) });
+                    asset = Some(Asset { name, url, data: Arc::new(bytes), original: path.to_string_lossy().into_owned() });
                     js
                 } else {
                     crate::loader::synthesize(loader, &bytes, &file_name, None)

@@ -123,6 +123,8 @@ pub struct BundleFile {
     pub code: String,
     pub bytes: Option<Vec<u8>>,
     pub map: Option<String>,
+    /// For a copied file: where it came from.
+    pub original: Option<String>,
     /// For a chunk: what it is made of.
     pub info: Option<ChunkInfo>,
 }
@@ -335,6 +337,12 @@ impl PluginHost {
     /// Plugins' `transformIndexHtml`.
     pub fn transform_index_html(&self, html: &str, url: &str) -> Result<String, String> {
         let result = self.call("transformIndexHtml", &format!("{{\"html\":{},\"path\":{}}}", quote(html), quote(url)))?;
+        Ok(result.as_str().map(str::to_string).unwrap_or_else(|| html.to_string()))
+    }
+
+    /// Plugins' `transformIndexHtml` for a page of a finished build: they are given the built files too.
+    pub fn transform_built_page(&self, html: &str, url: &str) -> Result<String, String> {
+        let result = self.call("transformIndexHtml", &format!("{{\"html\":{},\"path\":{},\"built\":true}}", quote(html), quote(url)))?;
         Ok(result.as_str().map(str::to_string).unwrap_or_else(|| html.to_string()))
     }
 
@@ -580,7 +588,7 @@ impl PluginHost {
                 if f.is_chunk {
                     format!("{{\"type\":\"chunk\",\"fileName\":{},\"name\":{},\"code\":{},\"map\":{},\"isEntry\":{},\"chunk\":{}}}", quote(&f.file_name), opt_str(f.name.as_deref()), quote(&f.code), opt_str(f.map.as_deref()), f.is_entry, chunk_json(&f.file_name, f.is_entry, f.info.as_ref()))
                 } else if let Some(bytes) = &f.bytes {
-                    format!("{{\"type\":\"asset\",\"fileName\":{},\"name\":{},\"source\":{},\"encoding\":\"base64\"}}", quote(&f.file_name), opt_str(f.name.as_deref()), quote(&crate::loader::base64(bytes)))
+                    format!("{{\"type\":\"asset\",\"fileName\":{},\"name\":{},\"source\":{},\"encoding\":\"base64\",\"originalFileName\":{}}}", quote(&f.file_name), opt_str(f.name.as_deref()), quote(&crate::loader::base64(bytes)), opt_str(f.original.as_deref()))
                 } else {
                     format!("{{\"type\":\"asset\",\"fileName\":{},\"name\":{},\"source\":{},\"encoding\":\"utf8\"}}", quote(&f.file_name), opt_str(f.name.as_deref()), quote(&f.code))
                 }
@@ -600,7 +608,7 @@ impl PluginHost {
             } else {
                 (text("source").unwrap_or_default(), None)
             };
-            changed.push(BundleFile { file_name, is_chunk, name: text("name"), is_entry: false, code, bytes, map: text("map"), info: None });
+            changed.push(BundleFile { file_name, is_chunk, name: text("name"), is_entry: false, code, bytes, map: text("map"), original: text("originalFileName"), info: None });
         }
         let deleted = result.get("deleted").and_then(Json::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
         Ok((changed, deleted))
@@ -747,11 +755,16 @@ pub fn post_process(host: &PluginHost, files: &mut Vec<OutputFile>, chunks: &[Ch
         .map(|f| BundleFile {
             file_name: f.name.clone(),
             is_chunk: is_chunk(&f.name) && f.data.is_none(),
-            name: Some(f.name.rsplit_once('.').map_or(f.name.clone(), |(s, _)| s.to_string())),
+            // A copied file is named as it was (`logo.svg`), a chunk by its file name without the extension.
+            name: Some(match &f.original {
+                Some(original) => std::path::Path::new(original).file_name().map_or(f.name.clone(), |n| n.to_string_lossy().into_owned()),
+                None => f.name.rsplit_once('.').map_or(f.name.clone(), |(s, _)| s.to_string()),
+            }),
             is_entry: info_of(&f.name).is_some_and(|i| i.is_entry),
             code: f.code.clone(),
             bytes: f.data.clone(),
             map: f.map.clone(),
+            original: f.original.clone(),
             info: info_of(&f.name).cloned(),
         })
         .collect();
@@ -766,7 +779,7 @@ pub fn post_process(host: &PluginHost, files: &mut Vec<OutputFile>, chunks: &[Ch
                     existing.map = item.map;
                 }
             }
-            None => files.push(OutputFile { name: item.file_name, code: item.code, map: item.map, data: item.bytes }),
+            None => files.push(OutputFile { name: item.file_name, code: item.code, map: item.map, data: item.bytes, original: item.original }),
         }
     }
     Ok(())

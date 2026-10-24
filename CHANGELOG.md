@@ -32,4 +32,5 @@ First release.
   Sigstore signatures. The binaries are not signed with an operating-system key; see
   [docs/verifying.md](docs/verifying.md).
 - `rkp --version`.
+- `rkp bundle index.html --outdir dist`: the page's module scripts are built, the page is rewritten, and plugins' `transformIndexHtml` runs on it.
 - npm packages: `@rathkit/pack` (a launcher) and one package per platform, published with provenance on the `next` tag.

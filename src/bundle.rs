@@ -237,6 +237,8 @@ pub struct OutputFile {
     pub map: Option<String>,
     /// For a copied file: its bytes (and `code` is empty).
     pub data: Option<Vec<u8>>,
+    /// For a copied file: where it was copied from.
+    pub original: Option<String>,
 }
 
 /// The finished bundle.
@@ -848,7 +850,7 @@ impl<'a> Bundler<'a> {
                         _ => map = Some(json),
                     }
                 }
-                files.push(OutputFile { name, code: out, map, data: None });
+                files.push(OutputFile { name, code: out, map, data: None, original: None });
             }
         }
         // A copied file is written when something that stays in the bundle uses its value: a script that
@@ -865,7 +867,7 @@ impl<'a> Bundler<'a> {
         for module in &graph.modules {
             if let (true, Some(asset)) = (self.included(module.id) || used_by_sheets.contains(&module.id), &module.asset) {
                 if seen.insert(asset.name.clone()) {
-                    files.push(OutputFile { name: asset.name.clone(), code: String::new(), map: None, data: Some(asset.data.as_ref().clone()) });
+                    files.push(OutputFile { name: asset.name.clone(), code: String::new(), map: None, data: Some(asset.data.as_ref().clone()), original: Some(asset.original.clone()) });
                 }
             }
         }
@@ -879,7 +881,7 @@ impl<'a> Bundler<'a> {
         let file = self.plan.chunks[c].file.clone();
         if !self.mapping {
             let code = if settings.any() { crate::minify::minify_chunk(&raw, &layout, settings, None).map_err(fail)? } else { raw };
-            return Ok(OutputFile { name: file, code, map: None, data: None });
+            return Ok(OutputFile { name: file, code, map: None, data: None, original: None });
         }
         let tagging = std::time::Instant::now();
         let (text, spans) = self.split_tags(&raw, &mut layout);
@@ -915,7 +917,7 @@ impl<'a> Bundler<'a> {
             }
             _ => map_file = Some(map),
         }
-        Ok(OutputFile { name: file, code, map: map_file, data: None })
+        Ok(OutputFile { name: file, code, map: map_file, data: None, original: None })
     }
 
     /// Removes the tags from a chunk's text. What comes back are the pieces of the clean text

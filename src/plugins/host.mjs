@@ -1367,7 +1367,7 @@ const handlers = {
       bundle[f.fileName] =
         f.type === 'chunk'
           ? { importedBindings: {}, referencedFiles: [], implicitlyLoadedBefore: [], modules: {}, moduleIds: [], isDynamicEntry: false, isImplicitEntry: false, facadeModuleId: null, exports: [], imports: [], dynamicImports: [], ...(f.chunk ?? {}), type: 'chunk', fileName: f.fileName, name: f.chunk?.name ?? f.name, code: f.code, map: f.map ? parseMap(f.map) : null, isEntry: !!f.isEntry, preliminaryFileName: f.fileName, sourcemapFileName: f.map ? `${f.fileName}.map` : null }
-          : { type: 'asset', fileName: f.fileName, name: f.name, names: f.name ? [f.name] : [], originalFileName: null, originalFileNames: [], source: f.encoding === 'base64' ? Buffer.from(f.source, 'base64') : f.source, needsCodeReference: false };
+          : { type: 'asset', fileName: f.fileName, name: f.name, names: f.name ? [f.name] : [], originalFileName: f.originalFileName ?? null, originalFileNames: f.originalFileName ? [f.originalFileName] : [], source: f.encoding === 'base64' ? Buffer.from(f.source, 'base64') : f.source, needsCodeReference: false };
     }
     const before = new Map(Object.entries(bundle).map(([k, v]) => [k, v.type === 'chunk' ? v.code : v.source]));
     for (const plugin of hooksOf('generateBundle')) {

@@ -37,6 +37,10 @@ rkp bundle src/main.ts --outfile dist/app.mjs
 - Resolves like Node does (`exports`/`imports` maps with conditions, `node_modules`, `main`
   fields, `sideEffects`) plus the usual bundler extras: `tsconfig.json` `paths` and
   `baseUrl`, `.js` that means `.ts`, `--alias`.
+- Pages: `rkp bundle index.html --outdir dist` builds the module scripts the page points at, writes the page again with
+  the built files (and their style sheets) in place, runs plugins' `transformIndexHtml` with the built files as `bundle`
+  and the entry chunk, and copies `public/`. Only `<script type="module" src>` tags and the style sheets scripts import
+  are built; a `<link rel="stylesheet">` in the page is left as written.
 - Vite's import forms: `./x.svg?raw` (text), `?url` (the copied file's address), `?inline` (a data URL), any other
   query stays on the module name for plugins (`?react`); `import.meta.glob("./dir/*.js", { eager, import, query, base })`
   (literal arguments; `*`, `**`, `?`, `[a-z]`, `{a,b}`, `!` to leave files out; a file added to a listed directory
@@ -82,8 +86,7 @@ rkp bundle src/main.ts --outfile dist/app.mjs
     - Checked in CI on every change: the plugin hooks and contexts above, with small plugins written for the
       purpose (`tools/run-plugins.mjs`, 10 programs); and these real packages, run from `bench/`:
       `@rollup/plugin-url`, `@svgr/rollup`, `vite-plugin-svgr`, `rollup-plugin-copy`, webpack's `url-loader`,
-      `file-loader` and `@svgr/webpack`, `vite-imagetools`, `vite-plugin-image-optimizer`, `unplugin-fonts` (the style sheet
-      it makes, not the tags it adds to `index.html`), and `vite-plugin-webfont-dl` (downloads from Google Fonts, so it
+      `file-loader` and `@svgr/webpack`, `vite-imagetools`, `vite-plugin-image-optimizer`, `unplugin-fonts` (its style sheet, and the tags it adds to a page in a build and in `serve`), and `vite-plugin-webfont-dl` (downloads from Google Fonts, so it
       is skipped when the network is down) (`tools/run-assets.mjs`), and `@module-federation/vite` and
       `@module-federation/enhanced` (`tools/run-federation.mjs`, in Chromium).
     - Tried by hand, not repeated in CI: `@rollup/plugin-json`, `-image`, `-commonjs`, `-node-resolve`, `-babel`,

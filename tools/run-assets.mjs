@@ -3,7 +3,7 @@
 // Node; the lines it prints must match what is listed here, and files a plugin writes must exist.
 //   node tools/run-assets.mjs
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, cpSync, existsSync, mkdtempSync, readdirSync, rmSync, statSync, symlinkSync } from 'node:fs';
+import { readFileSync, copyFileSync, cpSync, existsSync, mkdtempSync, readdirSync, rmSync, statSync, symlinkSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -41,6 +41,23 @@ const cases = [
   },
   // A font plugin that makes a style sheet of @font-face rules naming the project's font files (`/fonts/...` is the project's).
   { name: 'unplugin-fonts', entry: 'use-unfonts.js', config: 'unfonts.config.mjs', out: ['ok'], files: [/^Mono-Regular-.*\.woff2$/, /\.css$/] },
+  // The page of a build: the tags a font plugin adds to index.html (links for Google Fonts, a preload of the copied font, and the font faces inlined).
+  {
+    name: 'unplugin-fonts (page)', page: 'index.html', config: 'unfonts-page.config.mjs',
+    verify: (out) => {
+      const html = readFileSync(join(out, 'index.html'), 'utf8');
+      const wanted = [/rel="preconnect" href="https:\/\/fonts\.gstatic\.com\/"/, /href="https:\/\/fonts\.googleapis\.com\/css2\?family=Roboto/, /rel="preload" as="font" type="font\/woff2" href="\/Mono-Regular-[a-z0-9]+\.woff2"/, /<script type="module" src="\.\/bundle\.js">/, /<link rel="stylesheet" href="\.\/bundle\.css">/];
+      const missing = wanted.find((w) => !w.test(html));
+      return missing ? `index.html lacks ${missing}\n${html}` : null;
+    },
+  },
+  {
+    name: 'unplugin-fonts (inlined font faces)', page: 'index.html', config: 'unfonts-inline.config.mjs',
+    verify: (out) => {
+      const html = readFileSync(join(out, 'index.html'), 'utf8');
+      return /<style>[^<]*@font-face[^<]*font-family:\s*'?Mono'?/.test(html) ? null : `no inlined @font-face\n${html}`;
+    },
+  },
   // A font plugin that downloads the fonts of a Google Fonts style sheet and adds them to the output (needs the network).
   { name: 'vite-plugin-webfont-dl', entry: 'use-webfont.js', config: 'webfont-dl.config.mjs', out: ['ok'], network: 'https://fonts.googleapis.com/css2?family=Press+Start+2P', files: [/\.woff2$/, /^webfonts-.*\.css$/] },
   // No plugin: a font package's style sheet names its font files, which are copied and the addresses rewritten.
@@ -65,10 +82,12 @@ for (const c of cases) {
   if (c.config) copyFileSync(join(dir, c.config), join(dir, 'rathkit.config.mjs'));
   const out = join(dir, 'dist');
   const file = join(out, 'bundle.mjs');
-  const b = spawnSync(bin, ['bundle', c.entry, '--outfile', file, '--external', 'react', '--external', 'react-dom/server'], { cwd: dir, encoding: 'utf8' });
+  const b = spawnSync(bin, ['bundle', c.page ?? c.entry, ...(c.page ? ['--outdir', out] : ['--outfile', file, '--external', 'react', '--external', 'react-dom/server'])], { cwd: dir, encoding: 'utf8' });
   let problem = null;
   if (b.status !== 0) problem = `bundler failed: ${b.stderr.trim()}`;
-  else {
+  else if (c.page) {
+    problem = null;
+  } else {
     const r = spawnSync('node', ['--no-warnings', file], { cwd: dir, encoding: 'utf8' });
     const got = r.stdout.trim().split('\n').map((l) => l.replace(/(?<=[-.\/ ])[0-9A-Za-z]{8,32}(?=\.\w+$)/g, 'HASH'));
     if (r.status !== 0) problem = `run failed: ${r.stderr.trim()}`;

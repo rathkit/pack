@@ -74,6 +74,8 @@ pub struct Asset {
     /// What the program and style sheets refer to it by.
     pub url: String,
     pub data: std::sync::Arc<Vec<u8>>,
+    /// The file it was copied from.
+    pub original: String,
 }
 
 /// The module text for a loader that makes a plain value.

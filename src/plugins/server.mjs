@@ -261,7 +261,7 @@ const injectTags = (html, tags) => {
 };
 
 /** Vite's `transformIndexHtml`: functions, `{ order, handler }`, results as a string, `{ html, tags }` or a list of tags. */
-async function transformIndexHtml(html, url = '/') {
+async function transformIndexHtml(html, url = '/', built = false) {
   const hooks = plugins
     .map((p) => ({ plugin: p, hook: p.transformIndexHtml }))
     .filter((h) => h.hook)
@@ -269,6 +269,11 @@ async function transformIndexHtml(html, url = '/') {
     .filter((h) => typeof h.fn === 'function');
   const sorted = [...hooks.filter((h) => h.order === 'pre'), ...hooks.filter((h) => !h.order || (h.order !== 'pre' && h.order !== 'post')), ...hooks.filter((h) => h.order === 'post')];
   const ctx = { path: url, filename: path.join(root, url.split('?')[0].replace(/^\//, '') || 'index.html'), server: dev.server ?? undefined, originalUrl: url };
+  // After a build the hooks see what was built, as in Vite: every file of the output, and the page's entry chunk.
+  if (built && lastBundle) {
+    ctx.bundle = lastBundle;
+    ctx.chunk = Object.values(lastBundle).find((f) => f.type === 'chunk' && f.isEntry);
+  }
   const pending = [];
   for (const { plugin, fn } of sorted) {
     const result = await fn.call(createContext(plugin), html, ctx);
@@ -317,5 +322,5 @@ Object.assign(handlers, {
   serveRequest,
   hotUpdate,
   wsMessage,
-  transformIndexHtml: ({ html, path: url }) => transformIndexHtml(html, url),
+  transformIndexHtml: ({ html, path: url, built }) => transformIndexHtml(html, url, !!built),
 });

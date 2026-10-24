@@ -726,6 +726,44 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
         }
         options.plugins = Some(host.clone());
     }
+    // An html page names its entries: the module scripts it points at. They are built, and the page is written again pointing at the built files.
+    let mut pages: Vec<Page> = Vec::new();
+    if !serve {
+        let mut expanded = Vec::new();
+        for entry in &entries {
+            if !entry.to_ascii_lowercase().ends_with(".html") {
+                expanded.push(entry.clone());
+                continue;
+            }
+            let file = rathkit_pack::graph::absolute(&cwd, entry);
+            let html = match std::fs::read_to_string(&file) {
+                Ok(html) => html,
+                Err(e) => {
+                    eprintln!("error: {entry}: {e}");
+                    return Done::Exit(ExitCode::FAILURE);
+                }
+            };
+            let dir = file.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| cwd.clone());
+            let scripts: Vec<(rathkit_pack::html::ScriptRef, std::path::PathBuf)> = rathkit_pack::html::module_scripts(&html)
+                .into_iter()
+                .map(|s| {
+                    let path = if let Some(rooted) = s.src.strip_prefix('/') { rathkit_pack::graph::absolute(&cwd, rooted) } else { rathkit_pack::graph::absolute(&dir, &s.src) };
+                    (s, path)
+                })
+                .collect();
+            if scripts.is_empty() {
+                eprintln!("error: {entry} has no <script type=\"module\" src=\"...\"> to build");
+                return Done::Exit(ExitCode::FAILURE);
+            }
+            expanded.extend(scripts.iter().map(|(_, path)| path.to_string_lossy().into_owned()));
+            pages.push(Page { file, html, scripts });
+        }
+        if !pages.is_empty() && outdir.is_none() {
+            eprintln!("error: a page is written next to its scripts; give --outdir");
+            return Done::Exit(ExitCode::FAILURE);
+        }
+        entries = expanded;
+    }
     // Module federation: options from a file, or from a plugin in the config.
     let federation_json = match &federation_file {
         Some(file) => match std::fs::read_to_string(file).map_err(|e| e.to_string()).and_then(|t| rathkit_pack::json::Json::parse(&t).map_err(|e| e.to_string())) {
@@ -788,7 +826,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     // Workers are scripts built on their own; the files they read and the files they copy are noted for the build that asked.
     let workers = std::sync::Arc::new(WorkerLog::default());
     options.worker_builder = Some(worker_builder(cwd.clone(), options.clone(), bundle_options.clone(), treeshake, workers.clone(), 0));
-    let job = std::sync::Arc::new(Job { cwd, entries, options, bundle_options, treeshake, outfile, outdir, host: plugin_host, config_file, watch, serve: serve_state, bind: (host_name, port), restart_files, workers });
+    let job = std::sync::Arc::new(Job { cwd, entries, options, bundle_options, treeshake, outfile, outdir, host: plugin_host, config_file, watch, serve: serve_state, bind: (host_name, port), restart_files, workers, pages });
     if let Some(host) = &job.host {
         // Child compilers of webpack plugins build one entry as a script that sets a global.
         let for_children = job.clone();
@@ -824,6 +862,67 @@ struct Job {
     /// Files read at startup whose change means starting again (`tsconfig.json`).
     restart_files: Vec<std::path::PathBuf>,
     workers: std::sync::Arc<WorkerLog>,
+    pages: Vec<Page>,
+}
+
+/// An html page given as an entry: its text, and the scripts in it with the files they come from.
+struct Page {
+    file: std::path::PathBuf,
+    html: String,
+    scripts: Vec<(rathkit_pack::html::ScriptRef, std::path::PathBuf)>,
+}
+
+/// The pages of a build, written next to its scripts: each script points at the built file, the style sheets are linked,
+/// plugins' `transformIndexHtml` runs with the built files, and `public/` is copied.
+fn write_pages(job: &Job, dir: &std::path::Path, output: &rathkit_pack::bundle::Output) -> Result<(), String> {
+    if job.pages.is_empty() {
+        return Ok(());
+    }
+    let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let sheets: Vec<&str> = output.files.iter().map(|f| f.name.as_str()).filter(|n| n.ends_with(".css")).collect();
+    for page in &job.pages {
+        let mut html = page.html.clone();
+        let mut scripts: Vec<_> = page.scripts.iter().collect();
+        scripts.sort_by_key(|(s, _)| std::cmp::Reverse(s.start));
+        for (script, path) in scripts {
+            let built = output.chunks.iter().find(|c| c.is_entry && c.facade_module.as_ref().is_some_and(|m| canon(std::path::Path::new(m)) == canon(path)));
+            let Some(chunk) = built else { return Err(format!("{}: no built file for {}", page.file.display(), script.src)) };
+            html.replace_range(script.start..script.end, &format!("{}{}", job.options.public_path, chunk.file));
+        }
+        let links: String = sheets.iter().filter(|n| !html.contains(*n)).map(|n| format!("<link rel=\"stylesheet\" href=\"{}{n}\">\n", job.options.public_path)).collect();
+        if !links.is_empty() {
+            match html.to_ascii_lowercase().find("</head>") {
+                Some(at) => html.insert_str(at, &links),
+                None => html = format!("{links}{html}"),
+            }
+        }
+        let relative = page.file.strip_prefix(&job.cwd).unwrap_or(&page.file).to_path_buf();
+        if let Some(host) = &job.host {
+            html = host.transform_built_page(&html, &format!("/{}", relative.to_string_lossy().replace('\\', "/")))?;
+        }
+        let target = dir.join(relative.file_name().map(std::path::PathBuf::from).unwrap_or_default());
+        std::fs::write(&target, html).map_err(|e| format!("{}: {e}", target.display()))?;
+        println!("{}  page", target.display());
+    }
+    copy_public(&job.cwd.join("public"), dir)
+}
+
+/// What is in `public/` goes to the output as it is.
+fn copy_public(from: &std::path::Path, to: &std::path::Path) -> Result<(), String> {
+    if !from.is_dir() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(from).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let target = to.join(entry.file_name());
+        if entry.path().is_dir() {
+            std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
+            copy_public(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target).map_err(|e| format!("{}: {e}", target.display()))?;
+        }
+    }
+    Ok(())
 }
 
 /// What building workers read and wrote, kept for the build that asked for them.
@@ -1092,7 +1191,7 @@ fn run_build(job: &Job) -> Outcome {
         // What the workers copy goes beside the rest.
         for (name, data) in job.workers.files.lock().unwrap().drain(..) {
             if !output.files.iter().any(|f| f.name == name) {
-                output.files.push(rathkit_pack::bundle::OutputFile { name, code: String::new(), map: None, data: Some(data) });
+                output.files.push(rathkit_pack::bundle::OutputFile { name, code: String::new(), map: None, data: Some(data), original: None });
             }
         }
     }
@@ -1168,6 +1267,10 @@ fn run_build(job: &Job) -> Outcome {
                     }
                 }
                 println!("{}  {:.1} KB", dir.join(&file.name).display(), file.data.as_ref().map_or(file.code.len(), |d| d.len()) as f64 / 1024.0);
+            }
+            if let Err(message) = write_pages(job, &dir, &output) {
+                eprintln!("error: {message}");
+                return outcome;
             }
             ExitCode::SUCCESS
         }
