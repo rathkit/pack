@@ -115,13 +115,13 @@ rathkit-pack bundle src/main.ts --outfile dist/app.mjs
   - `serve` does the same in development: the build is in memory, `remoteEntry.js` and the manifest are served to pages
     of other local dev servers (`--cors-origin ORIGIN` adds other origins), and a change rebuilds the remote and
     reloads the pages of hosts that use it.
-  - `@module-federation/vite`'s `federation()` is read for its options by default. With `RATHKIT_REAL_FEDERATION_PLUGIN=1`
+  - `@module-federation/vite`'s `federation()` is read for its options by default. With `--real-federation-plugin`
     the plugin itself is run by the plugin layer, and its remote loads in a host built here.
   - A package with `treeShaking` is shared whole (with a warning) when it is CommonJS. `promise`, `var` and `internal`
     addresses are code from the config, used as written. A regular expression in `include` / `exclude` `request` keeps its
     flags. Types read by a host are kept up to date while watching: remotes are asked again (at most every ten seconds), a zip
     that has not changed leaves the files alone, and the folders in `node_modules` are put back after packages are installed.
-    Under `nodenext`, a CommonJS project importing a remote gets TS1479, since the types are ES modules.
+    Under `nodenext` the types are found from ES and CommonJS projects alike.
 - Tree-shakes at statement level, honoring `"sideEffects": false`.
 - `--define KEY=VALUE` (also `--define:KEY=VALUE`) replaces a global name, a chain such as
   `process.env.NODE_ENV`, or `import.meta.env.X` with a constant, another name or an expression.

@@ -538,6 +538,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     let mut cli_defines: Vec<rathkit_pack::define::Define> = Vec::new();
     let mut federation_file: Option<String> = None;
     let mut cors_origins: Vec<String> = Vec::new();
+    let mut real_federation_plugin = false;
     let mut bundle_options = rathkit_pack::bundle::Options::default();
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -559,6 +560,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
             "--splitting" => bundle_options.splitting = true,
             "--federation" => federation_file = it.next().cloned(),
             "--cors-origin" => cors_origins.extend(it.next().cloned()),
+            "--real-federation-plugin" => real_federation_plugin = true,
             "--minify" => {
                 bundle_options.minify.whitespace = true;
                 bundle_options.minify.identifiers = true;
@@ -692,6 +694,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
                 loaders: options.loaders.iter().map(|(e, l)| (e.clone(), format!("{l:?}").to_ascii_lowercase())).collect(),
                 platform_browser: !options.node_builtins,
                 mode: mode.clone(),
+                real_federation_plugin,
             };
             match rathkit_pack::plugins::PluginHost::start(&cwd, Some(file), &info) {
                 Ok(host) => Some(host),

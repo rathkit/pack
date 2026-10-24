@@ -219,7 +219,7 @@ if (haveRspack) {
     if (!existsSync(join(bench, 'node_modules', '@module-federation', 'vite'))) return;
     const dir = copy('vite-remote-plugin');
     const built = await new Promise((resolve) => {
-      const child = spawn(bin, ['bundle', 'src/main.js', '--outdir', 'dist', '--splitting', '--define', 'process.env.NODE_ENV="production"'], { cwd: dir, env: { ...process.env, RATHKIT_REAL_FEDERATION_PLUGIN: '1' } });
+      const child = spawn(bin, ['bundle', 'src/main.js', '--outdir', 'dist', '--splitting', '--real-federation-plugin', '--define', 'process.env.NODE_ENV="production"'], { cwd: dir });
       let output = '';
       child.stdout.on('data', (d) => (output += d));
       child.stderr.on('data', (d) => (output += d));
@@ -334,6 +334,12 @@ scenario('types: a remote publishes declarations and a host checks its imports a
   // The same under node16 / nodenext resolution, which looks at the `exports` of the package that stands for the remote.
   const nodenext = spawnSync('node', [typescript, '-p', hostDir, '--module', 'nodenext', '--moduleResolution', 'nodenext'], { encoding: 'utf8' });
   check('and under nodenext resolution', nodenext.status === 0, nodenext.stdout);
+  // And a project that is CommonJS, which reads the types through the other file of the pair.
+  const cjsDir = copy('host-types', 'host-types-cjs', false);
+  writeFileSync(join(cjsDir, 'package.json'), '{ "name": "host-types-cjs", "private": true }\n');
+  await build('host-types', { entry: 'src/index.ts', as: 'host-types-cjs', links: false });
+  const cjs = spawnSync('node', [typescript, '-p', cjsDir, '--module', 'nodenext', '--moduleResolution', 'nodenext'], { encoding: 'utf8' });
+  check('and in a CommonJS project under nodenext', cjs.status === 0, cjs.stdout);
   const source = join(hostDir, 'src', 'index.ts');
   writeFileSync(source, readFileSync(source, 'utf8').replace("size: version", "size: 'big'"));
   const bad = check_types();

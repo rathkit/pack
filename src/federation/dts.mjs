@@ -182,7 +182,7 @@ function linkModules(modules) {
     fs.rmSync(folder, { recursive: true, force: true });
     fs.mkdirSync(folder, { recursive: true });
     // `exports` so that node16 / nodenext resolution, which needs it for `remote/Button`, finds the files too.
-    fs.writeFileSync(marker, JSON.stringify({ name, private: true, 'rathkit-types': true, type: 'module', exports: { './*': { types: './*.d.ts' } } }, null, 2) + '\n');
+    fs.writeFileSync(marker, JSON.stringify({ name, private: true, 'rathkit-types': true, type: 'module', exports: { './*': { import: { types: './*.d.ts' }, require: { types: './*.d.cts' } } } }, null, 2) + '\n');
     for (const [expose, { file, hasDefault }] of Object.entries(entries)) {
       const target = path.join(folder, `${expose}.d.ts`);
       fs.mkdirSync(path.dirname(target), { recursive: true });
@@ -190,6 +190,8 @@ function linkModules(modules) {
       // With the `.js` that an ES module's import has under node16 / nodenext (it names the .d.ts all the same).
       const spec = JSON.stringify((from.startsWith('.') ? from : './' + from) + '.js');
       fs.writeFileSync(target, `export * from ${spec};\n${hasDefault ? `export { default } from ${spec};\n` : ''}`);
+      // A CommonJS file under node16 / nodenext reads the same types through a file of its own kind.
+      fs.writeFileSync(target.replace(/\.d\.ts$/, '.d.cts'), `export * from ${spec};\n${hasDefault ? `import __default from ${spec};\nexport default __default;\n` : ''}`);
     }
   }
 }

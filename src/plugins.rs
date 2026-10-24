@@ -50,6 +50,8 @@ pub struct CliInfo {
     pub loaders: Vec<(String, String)>,
     pub platform_browser: bool,
     pub mode: String,
+    /// Run the module federation plugin of a config (the Vite one) itself, instead of reading its options.
+    pub real_federation_plugin: bool,
 }
 
 type ResolverFn = dyn Fn(&str, Option<&str>, &str) -> Option<(String, bool)> + Send + Sync;
@@ -189,6 +191,7 @@ impl PluginHost {
             .arg("--no-warnings")
             .arg(&host_file)
             .current_dir(root)
+            .envs(cli.real_federation_plugin.then_some(("RATHKIT_REAL_FEDERATION_PLUGIN", "1")))
             // `this.parse` in plugins runs this same program (`--estree`).
             .env("RATHKIT_EXE", std::env::current_exe().unwrap_or_default())
             .stdin(Stdio::piped())
