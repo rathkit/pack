@@ -1,7 +1,7 @@
 // Compares bundlers on the same inputs: wall time of the whole command (start-up included), peak memory, output
 // size, and whether the output runs and prints the same thing.
 //
-//   npm install && node generate.mjs && node run.mjs [options] [workload...]
+//   pnpm install && node generate.mjs && node run.mjs [options] [workload...]
 //
 //   --runs N          timed runs per case, after one warm-up run (default 7)
 //   --tools a,b,c     rathkit, esbuild, rolldown, rspack, vite (default rathkit; the others are for development only)
@@ -74,7 +74,7 @@ const selected = option('--tools', 'rathkit').split(',');
 // What is left after the options are the workloads to run (all of them when none are named).
 const only = args.filter((a) => !a.startsWith('--'));
 
-for (const need of [existsSync(RK) ? null : `the rathkit-pack binary (cargo build --release, or RATHKIT_PACK_BIN): ${RK}`, existsSync(join(here, 'node_modules')) ? null : 'npm install (in bench/)', existsSync(join(here, 'inputs/generated')) ? null : 'node generate.mjs']) {
+for (const need of [existsSync(RK) ? null : `the rathkit-pack binary (cargo build --release, or RATHKIT_PACK_BIN): ${RK}`, existsSync(join(here, 'node_modules')) ? null : 'pnpm install (in bench/)', existsSync(join(here, 'inputs/generated')) ? null : 'node generate.mjs']) {
   if (need) {
     console.error(`missing: ${need}`);
     process.exit(2);

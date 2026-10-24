@@ -2,7 +2,7 @@
 // agree on one copy of React, and two development servers do the same with a change in one reloading the other's page.
 //   node tools/run-federation.mjs [scenario...]
 // Needs a Chromium-based browser (CHROME, a Playwright download, or one on the PATH). The scenarios that involve rspack need
-// `npm ci --prefix bench`. Without a browser it says so and passes.
+// `pnpm install --dir bench`. Without a browser it says so and passes.
 import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, writeFileSync, mkdtempSync, rmSync, cpSync, symlinkSync, mkdirSync, statSync } from 'node:fs';
@@ -98,7 +98,7 @@ let rspack;
 const buildRspack = async (name) => {
   const dir = copy(name);
   rspack ??= await import(join(bench, 'node_modules', '@rspack', 'core', 'dist', 'index.js')).catch(() => null);
-  if (!rspack) throw new Error('rspack is not installed (npm ci --prefix bench)');
+  if (!rspack) throw new Error('rspack is not installed (pnpm install --dir bench)');
   const config = (await import(join(dir, 'rspack.config.mjs'))).default;
   // Resolve the packages from the bench folder.
   config.resolve = { modules: [join(bench, 'node_modules'), 'node_modules'] };
@@ -235,7 +235,7 @@ if (haveRspack) {
   scenario('a host built by rathkit-pack loads a remote built by Vite with its federation plugin', async () => {
     const viteBin = join(bench, 'node_modules', 'vite', 'bin', 'vite.js');
     if (!existsSync(viteBin) || !existsSync(join(bench, 'node_modules', '@module-federation', 'vite'))) {
-      console.log('federation: vite or @module-federation/vite is not installed (npm ci --prefix bench); skipped');
+      console.log('federation: vite or @module-federation/vite is not installed (pnpm install --dir bench); skipped');
       return;
     }
     const dir = copy('vite-remote');
@@ -290,7 +290,7 @@ if (haveRspack) {
     check('with their React', /same=true/.test(r.text ?? '') && !/same=false/.test(r.text ?? ''), r.text);
   });
 } else {
-  console.log('federation: rspack is not installed (npm ci --prefix bench); the scenarios with it are skipped');
+  console.log('federation: rspack is not installed (pnpm install --dir bench); the scenarios with it are skipped');
 }
 
 scenario('an ES module container, prefix and eager shared packages, runtime plugins', async () => {
@@ -314,7 +314,7 @@ scenario('an ES module container, prefix and eager shared packages, runtime plug
 scenario('types: a remote publishes declarations and a host checks its imports against them', async () => {
   const typescript = join(bench, 'node_modules', 'typescript', 'bin', 'tsc');
   if (!existsSync(typescript)) {
-    console.log('federation: typescript is not installed (npm ci --prefix bench); the types scenario is skipped');
+    console.log('federation: typescript is not installed (pnpm install --dir bench); the types scenario is skipped');
     return;
   }
   const remote = await build('remote-types', { entry: 'src/index.ts' });

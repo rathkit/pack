@@ -1,6 +1,6 @@
 # Verifying a release
 
-Every GitHub Release of rathkit-pack has, for each version:
+Every GitHub Release of Rathkit Pack has, for each version:
 
 | File | What it is |
 | --- | --- |
@@ -41,8 +41,8 @@ Verify `SHA256SUMS` this way, then the tarball against `SHA256SUMS`. The same co
 published from the `release` workflow with a provenance statement:
 
 ```
-npm install --save-dev @rathkit/pack@next
-npm audit signatures
+pnpm add -D @rathkit/pack@next
+pnpm audit signatures
 ```
 
 Versions with a suffix (`0.1.0-alpha.0`) are on the `next` tag only.

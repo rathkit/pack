@@ -13,7 +13,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const bin = process.env.RATHKIT_PACK_BIN ?? join(root, 'target', 'release', 'rkp');
 const bench = join(root, 'bench', 'node_modules');
 if (!existsSync(join(bench, '@rollup', 'plugin-url'))) {
-  console.log('assets: skipped (run npm install in bench first)');
+  console.log('assets: skipped (run pnpm install in bench first)');
   process.exit(0);
 }
 const cases = [

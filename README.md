@@ -1,11 +1,12 @@
-# rathkit-pack
+# Rathkit Pack
 
-A JavaScript and TypeScript bundler written in Rust with **no dependencies** (not even
-crates), aimed at being fast, clean and safe, and at being easy to move to from other bundlers
-(their plugins run as they are).
+A JavaScript and TypeScript bundler written in Rust, with zero dependencies (not even crates).
 
-**Alpha.** It is early: options, output and plugin support can change between 0.x releases
-(see [CHANGELOG.md](CHANGELOG.md), which also says what the version numbers promise). How to check a release: [docs/verifying.md](docs/verifying.md). This describes what exists today and how it is checked.
+> Fast, clean and safe, and easy to move to: plugins written for other bundlers run (what is covered by tests is listed below).
+
+**Status: alpha.** It is early: options, output and plugin support can change between 0.x releases (see [CHANGELOG.md](CHANGELOG.md), which also says what the version numbers promise). This describes what exists today and how it is checked. How to check a release: [docs/verifying.md](docs/verifying.md).
+
+Site: <https://rathkit.com>
 
 ## Speed
 
@@ -19,7 +20,7 @@ the machine, the versions and every table: [docs/benchmarks.md](docs/benchmarks.
 ## Install
 
 ```
-npm install --save-dev @rathkit/pack@next        # the alpha is on the next tag
+pnpm add -D @rathkit/pack@next        # the alpha is on the next tag
 ```
 
 or a tarball from [the releases](https://github.com/rathkit/pack/releases) (checksums and signatures: [docs/verifying.md](docs/verifying.md)),
@@ -31,7 +32,7 @@ or `cargo build --release` from source.
 rkp bundle src/main.ts --outfile dist/app.mjs
 ```
 
-(`rkp` is the command, and `rathkit-pack` still works as another name for it. The project, the crate and the npm package are rathkit-pack and `@rathkit/pack`.)
+(`rkp` is the command, and `rathkit-pack` still works as another name for it. The project is Rathkit Pack; the crate is `rathkit-pack` and the npm package is `@rathkit/pack`.)
 
 - Parses ES modules, CommonJS, JSON, TypeScript, JSX and TSX.
 - Resolves like Node does (`exports`/`imports` maps with conditions, `node_modules`, `main`

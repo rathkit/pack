@@ -1,11 +1,11 @@
 # Changelog
 
-All notable changes to rathkit-pack are listed here, newest first. The notes of each GitHub
+All notable changes to Rathkit Pack are listed here, newest first. The notes of each GitHub
 Release are the section of its version.
 
 ## Versions
 
-rathkit-pack follows [Semantic Versioning](https://semver.org) with the usual 0.x reading:
+Rathkit Pack follows [Semantic Versioning](https://semver.org) with the usual 0.x reading:
 **while the major version is 0, any release may change options, output and plugin support**.
 A change that breaks a documented option or flag is listed under "Changed" or "Removed" with the
 version in which it happened, and the minor number is raised for it (0.1 to 0.2); patch releases

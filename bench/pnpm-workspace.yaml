@@ -1,0 +1,5 @@
+minimumReleaseAgeExclude:
+  - unplugin-fonts@2.1.0
+# undici is pulled in by @module-federation/dts-plugin at 7.29.1, which has known advisories; 7.30.1 is the first fixed release.
+overrides:
+  undici: ">=7.30.1 <8"

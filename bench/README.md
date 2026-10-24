@@ -1,13 +1,13 @@
 # Measuring
 
-`run.mjs` builds fixed inputs with rathkit-pack (and, with `--tools`, esbuild, rolldown, rspack and Vite) and reports for each case the median and best wall time of the whole
+`run.mjs` builds fixed inputs with Rathkit Pack (and, with `--tools`, esbuild, rolldown, rspack and Vite) and reports for each case the median and best wall time of the whole
 command (start-up included), peak memory, output size and gzip size, and whether the output runs and prints what the
 unbundled program prints. Figures are quoted only with this method and the machine they were measured on; the published ones are in [../docs/benchmarks.md](../docs/benchmarks.md).
 
 ```
 cargo build --release          # in the repository root
 cd bench
-npm install                    # the libraries to bundle and the packages the tests use, at pinned versions
+pnpm install                   # the libraries to bundle and the packages the tests use, at pinned versions
 node generate.mjs              # the two generated workloads (1,500 JavaScript modules, 500 TypeScript modules)
 node run.mjs                   # everything, 7 runs per case: about ten minutes
 node run.mjs --markdown --runs 5 lodash react        # chosen workloads, tables as Markdown
