@@ -7,6 +7,10 @@ use rathkit_pack::parser::{ParseOptions, parse};
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.split_first() {
+        Some((cmd, _)) if cmd == "--version" || cmd == "-V" => {
+            println!("rathkit-pack {}", env!("CARGO_PKG_VERSION"));
+            ExitCode::SUCCESS
+        }
         Some((cmd, files)) if cmd == "--lex-check" && !files.is_empty() => lex_check(files),
         Some((cmd, files)) if cmd == "--parse-check" && !files.is_empty() => parse_check(files),
         Some((cmd, files)) if cmd == "--minify-verify" && !files.is_empty() => minify_verify(files),
@@ -39,8 +43,7 @@ fn main() -> ExitCode {
         Some((cmd, files)) if cmd == "--ts-verdicts" && !files.is_empty() => ts_verdicts(files),
         Some((cmd, files)) if cmd == "--link-dump" && !files.is_empty() => link_dump(files),
         _ => {
-            eprintln!("rathkit-pack: the bundler is not implemented yet; only the lexer exists so far");
-            eprintln!("usage: rathkit-pack --lex-check|--parse-check|--parse-verdicts|--script-verdicts|--bench <file.js>...\n       rathkit-pack --scopes <file.js>\n       rathkit-pack bundle <entry.js>... [--outfile FILE | --outdir DIR --splitting] [--format esm|cjs|iife] [--no-treeshake] [--define KEY=VALUE]... [--loader .ext=NAME]... [--jsx automatic|classic] [--external NAME]... [--condition NAME]...\n       rathkit-pack --graph <entry.js>... [--quiet] [--threads N] [--external NAME]... [--condition NAME]...");
+            eprintln!("usage: rathkit-pack bundle <entry>... | serve <entry>... | --version\n       rathkit-pack --lex-check|--parse-check|--parse-verdicts|--script-verdicts|--bench <file.js>... (development aids)\n       rathkit-pack --scopes <file.js>\n       rathkit-pack bundle <entry.js>... [--outfile FILE | --outdir DIR --splitting] [--format esm|cjs|iife] [--no-treeshake] [--define KEY=VALUE]... [--loader .ext=NAME]... [--jsx automatic|classic] [--external NAME]... [--condition NAME]...\n       rathkit-pack --graph <entry.js>... [--quiet] [--threads N] [--external NAME]... [--condition NAME]...");
             ExitCode::from(2)
         }
     }
