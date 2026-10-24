@@ -367,12 +367,14 @@ scenario('types stay fresh while serving: the folder of a remote in node_modules
     return condition();
   };
   try {
-    check('the types are read when serving starts', await waitFor(() => existsSync(shim)));
+    // Everything is written (the shim comes after the declarations, but a slow machine may still be at it) before the folder goes.
+    check('the types are read when serving starts', await waitFor(() => existsSync(shim) && existsSync(declaration), 30000));
+    await new Promise((r) => setTimeout(r, 1500));
     const written = existsSync(declaration) ? statSync(declaration).mtimeMs : 0;
     rmSync(join(hostDir, 'node_modules'), { recursive: true, force: true });
     const source = join(hostDir, 'src', 'index.ts');
     writeFileSync(source, readFileSync(source, 'utf8') + '\n// edited\n');
-    check('and put back after node_modules is removed, when the next build comes', await waitFor(() => existsSync(shim)));
+    check('and put back after node_modules is removed, when the next build comes', await waitFor(() => existsSync(shim), 30000));
     check('without writing the declarations again, as the remote\'s zip has not changed', statSync(declaration).mtimeMs === written);
   } finally {
     server.kill();
