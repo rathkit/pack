@@ -40,7 +40,7 @@ rkp bundle src/main.ts --outfile dist/app.mjs
 - Pages: `rkp bundle index.html --outdir dist` builds the module scripts the page points at, writes the page again with
   the built files (and their style sheets) in place, runs plugins' `transformIndexHtml` with the built files as `bundle`
   and the entry chunk, and copies `public/`. `<script type="module" src>` tags
-  and `<link rel="stylesheet" href>` tags that point at files of the project are built, and the page points at the built files; links to other sites are left as written.
+  and `<link rel="stylesheet" href>` tags that point at files of the project are built, and the page points at the built files; links to other sites are left as written. The images, icons and media a page names (`<img src>`, `<link rel="icon">`, `<video poster>`, `url()` in `<style>`) are copied under a name with a hash; a file in `public/` stays where it is, and one that is nowhere stays as written (`srcset` and `style=""` attributes are not read). A page's scripts and sheets are separate files, so a page build always splits code: scripts that share code share a file, and the output is ES modules.
 - Vite's import forms: `./x.svg?raw` (text), `?url` (the copied file's address), `?inline` (a data URL), any other
   query stays on the module name for plugins (`?react`); `import.meta.glob("./dir/*.js", { eager, import, query, base })`
   (literal arguments; `*`, `**`, `?`, `[a-z]`, `{a,b}`, `!` to leave files out; a file added to a listed directory

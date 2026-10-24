@@ -13,7 +13,7 @@ pub struct ScriptRef {
 pub fn module_scripts(html: &str) -> Vec<ScriptRef> {
     references(html, "<script", |attrs| {
         let module = attrs.iter().any(|(n, v, _)| n == "type" && v.eq_ignore_ascii_case("module"));
-        module.then(|| attrs.iter().find(|(n, _, _)| n == "src").cloned()).flatten()
+        if module { attrs.iter().filter(|(n, _, _)| n == "src").cloned().collect() } else { Vec::new() }
     })
 }
 
@@ -21,12 +21,57 @@ pub fn module_scripts(html: &str) -> Vec<ScriptRef> {
 pub fn style_sheets(html: &str) -> Vec<ScriptRef> {
     references(html, "<link", |attrs| {
         let sheet = attrs.iter().any(|(n, v, _)| n == "rel" && v.split_ascii_whitespace().any(|w| w.eq_ignore_ascii_case("stylesheet")));
-        sheet.then(|| attrs.iter().find(|(n, _, _)| n == "href").cloned()).flatten()
+        if sheet { attrs.iter().filter(|(n, _, _)| n == "href").cloned().collect() } else { Vec::new() }
     })
 }
 
+/// The other files a page names: images, media, icons and manifests, and the `url()`s in its `<style>` blocks. Local
+/// files only; whether one exists is for the caller to see.
+pub fn assets(html: &str) -> Vec<ScriptRef> {
+    let mut out = Vec::new();
+    for tag in ["<img", "<source", "<video", "<audio", "<track", "<embed"] {
+        out.extend(references(html, tag, |attrs| attrs.iter().filter(|(n, _, _)| matches!(n.as_str(), "src" | "poster")).cloned().collect()));
+    }
+    // Links that name a file the page uses; `preconnect` and the like name a place, not a file.
+    out.extend(references(html, "<link", |attrs| {
+        let rel: Vec<String> = attrs.iter().filter(|(n, _, _)| n == "rel").flat_map(|(_, v, _)| v.split_ascii_whitespace().map(str::to_ascii_lowercase).collect::<Vec<_>>()).collect();
+        let files = rel.iter().any(|r| matches!(r.as_str(), "icon" | "apple-touch-icon" | "mask-icon" | "manifest" | "preload" | "prefetch" | "modulepreload"));
+        if files && !rel.iter().any(|r| r == "stylesheet") { attrs.iter().filter(|(n, _, _)| n == "href").cloned().collect() } else { Vec::new() }
+    }));
+    // `url(...)` inside `<style>` blocks.
+    let lower = html.to_ascii_lowercase();
+    let mut at = 0;
+    while let Some(found) = lower[at..].find("<style") {
+        let open_end = match lower[at + found..].find('>') {
+            Some(n) => at + found + n + 1,
+            None => break,
+        };
+        let close = lower[open_end..].find("</style").map_or(html.len(), |n| open_end + n);
+        let mut i = open_end;
+        while let Some(n) = lower[i..close].find("url(") {
+            let mut start = i + n + 4;
+            while html.as_bytes().get(start).is_some_and(|b| b.is_ascii_whitespace()) {
+                start += 1;
+            }
+            let quote = html.as_bytes().get(start).copied().filter(|b| *b == b'"' || *b == b'\'');
+            if quote.is_some() {
+                start += 1;
+            }
+            let end = html[start..close].find(|c: char| Some(c as u8) == quote && quote.is_some() || (quote.is_none() && (c == ')' || c.is_ascii_whitespace()))).map_or(close, |m| start + m);
+            let value = html[start..end].to_string();
+            if !value.is_empty() && !value.starts_with("//") && !value.contains("://") && !value.starts_with("data:") {
+                out.push(ScriptRef { start, end, src: value });
+            }
+            i = end.max(i + n + 4);
+        }
+        at = close;
+    }
+    out.sort_by_key(|r| r.start);
+    out
+}
+
 /// The local file a tag points at: `pick` chooses the attribute from the tag's attributes.
-fn references(html: &str, open: &str, pick: impl Fn(&[(String, String, usize)]) -> Option<(String, String, usize)>) -> Vec<ScriptRef> {
+fn references(html: &str, open: &str, pick: impl Fn(&[(String, String, usize)]) -> Vec<(String, String, usize)>) -> Vec<ScriptRef> {
     let bytes = html.as_bytes();
     let lower = html.to_ascii_lowercase();
     let mut out = Vec::new();
@@ -52,7 +97,7 @@ fn references(html: &str, open: &str, pick: impl Fn(&[(String, String, usize)]) 
             i += 1;
         }
         let attrs: Vec<(String, String, usize)> = attributes(&html[after..i.min(html.len())]).into_iter().map(|(n, v, p)| (n, v, p + after)).collect();
-        if let Some((_, value, start)) = pick(&attrs) {
+        for (_, value, start) in pick(&attrs) {
             let remote = value.starts_with("//") || value.contains("://") || value.starts_with("data:");
             if !remote && !value.is_empty() {
                 out.push(ScriptRef { start, end: start + value.len(), src: value });
@@ -127,6 +172,13 @@ mod tests {
     fn finds_local_style_sheets() {
         let html = "<link rel=\"stylesheet\" href=\"/a.css\"><link rel=icon href=i.png><link href='b.css' rel='preload stylesheet'><link rel=\"stylesheet\" href=\"https://x.test/c.css\">";
         assert_eq!(style_sheets(html).iter().map(|s| s.src.as_str()).collect::<Vec<_>>(), ["/a.css", "b.css"]);
+    }
+
+    #[test]
+    fn finds_the_other_files() {
+        let html = "<link rel=icon href=/i.png><link rel=preconnect href=https://a.test><img src=\"a.png\" alt><video poster=p.jpg src=v.mp4></video><style>a{background:url('b.png')}c{background:url(d.png) , url(//x.test/e.png)}</style><img src=https://x.test/f.png>";
+        let found: Vec<String> = assets(html).into_iter().map(|r| r.src).collect();
+        assert_eq!(found, ["/i.png", "a.png", "p.jpg", "v.mp4", "b.png", "d.png"]);
     }
 
     #[test]

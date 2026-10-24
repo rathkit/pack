@@ -52,7 +52,11 @@ const cases = [
       // The linked sheet is built: its image is copied and named in it, and the script made for it is gone.
       const sheet = readFileSync(join(out, 'page.css'), 'utf8');
       if (!/url\(\.\/pic-[a-z0-9]+\.png\)/.test(sheet)) return `page.css was not built: ${sheet}`;
-      return existsSync(join(out, 'page.js')) ? 'the script made for page.css was left in the output' : null;
+      if (existsSync(join(out, 'page.js'))) return 'the script made for page.css was left in the output';
+      // The image the page names three ways (an icon, an `<img>`, a `url()` in a `<style>`) is copied once, and each says where.
+      const named = html.match(/\.\/pic-[a-z0-9]+\.png/g) ?? [];
+      if (named.length !== 3 || new Set(named).size !== 1 || !existsSync(join(out, named[0]))) return `the image was named ${JSON.stringify(named)}\n${html}`;
+      return null;
     },
   },
   {

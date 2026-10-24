@@ -887,19 +887,20 @@ struct Page {
 }
 
 /// The pages of a build, written next to its scripts: each script points at the built file, the style sheets are linked,
-/// plugins' `transformIndexHtml` runs with the built files, and `public/` is copied.
+/// the images and other files a page names are copied, plugins' `transformIndexHtml` runs with the built files, and
+/// `public/` is copied.
 fn write_pages(job: &Job, dir: &std::path::Path, output: &rathkit_pack::bundle::Output) -> Result<(), String> {
     if job.pages.is_empty() {
         return Ok(());
     }
     let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let sheets: Vec<&str> = output.files.iter().map(|f| f.name.as_str()).filter(|n| n.ends_with(".css")).collect();
+    let public = job.cwd.join("public");
     for page in &job.pages {
         let mut html = page.html.clone();
-        // Every reference, last first so the places of the earlier ones stay true.
-        let mut references: Vec<(&rathkit_pack::html::ScriptRef, &std::path::PathBuf, bool)> = page.scripts.iter().map(|(s, p)| (s, p, false)).chain(page.styles.iter().map(|(s, p)| (s, p, true))).collect();
-        references.sort_by_key(|(s, _, _)| std::cmp::Reverse(s.start));
-        for (reference, path, is_sheet) in references {
+        // Every change to the text, with the place it is made at; applied last first so the places of the others stay true.
+        let mut edits: Vec<(usize, usize, String)> = Vec::new();
+        for (reference, path, is_sheet) in page.scripts.iter().map(|(s, p)| (s, p, false)).chain(page.styles.iter().map(|(s, p)| (s, p, true))) {
             let built = output.chunks.iter().find(|c| c.is_entry && c.facade_module.as_ref().is_some_and(|m| canon(std::path::Path::new(m)) == canon(path)));
             let Some(chunk) = built else { return Err(format!("{}: no built file for {}", page.file.display(), reference.src)) };
             let file = if is_sheet {
@@ -914,7 +915,32 @@ fn write_pages(job: &Job, dir: &std::path::Path, output: &rathkit_pack::bundle::
             } else {
                 chunk.file.clone()
             };
-            html.replace_range(reference.start..reference.end, &format!("{}{}", job.options.public_path, file));
+            edits.push((reference.start, reference.end, format!("{}{}", job.options.public_path, file)));
+        }
+        // Images, icons, media and the `url()`s of `<style>` blocks: files of the project are copied under a name with a hash.
+        // A file that is in `public/` stays where it is, and one that is nowhere stays as written.
+        let page_dir = page.file.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| job.cwd.clone());
+        for reference in rathkit_pack::html::assets(&page.html) {
+            let (wanted, suffix) = match reference.src.find(['?', '#']) {
+                Some(at) => (&reference.src[..at], &reference.src[at..]),
+                None => (reference.src.as_str(), ""),
+            };
+            let file = match wanted.strip_prefix('/') {
+                Some(rooted) if public.join(rooted).is_file() => continue,
+                Some(rooted) => job.cwd.join(rooted),
+                None => page_dir.join(wanted),
+            };
+            if !file.is_file() {
+                continue;
+            }
+            let bytes = std::fs::read(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+            let name = rathkit_pack::loader::asset_name(&job.options.asset_names, &file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), &bytes);
+            std::fs::write(dir.join(&name), &bytes).map_err(|e| format!("{name}: {e}"))?;
+            edits.push((reference.start, reference.end, format!("{}{name}{suffix}", job.options.public_path)));
+        }
+        edits.sort_by_key(|(start, _, _)| std::cmp::Reverse(*start));
+        for (start, end, text) in edits {
+            html.replace_range(start..end, &text);
         }
         let links: String = sheets.iter().filter(|n| !html.contains(*n)).map(|n| format!("<link rel=\"stylesheet\" href=\"{}{n}\">\n", job.options.public_path)).collect();
         if !links.is_empty() {
@@ -931,7 +957,7 @@ fn write_pages(job: &Job, dir: &std::path::Path, output: &rathkit_pack::bundle::
         std::fs::write(&target, html).map_err(|e| format!("{}: {e}", target.display()))?;
         println!("{}  page", target.display());
     }
-    copy_public(&job.cwd.join("public"), dir)
+    copy_public(&public, dir)
 }
 
 /// What is in `public/` goes to the output as it is.
