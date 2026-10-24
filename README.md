@@ -1,10 +1,11 @@
 # rathkit-pack
 
 A JavaScript and TypeScript bundler written in Rust with **no dependencies** (not even
-crates), aimed at being faster, cleaner and safer than the incumbents, and at being easy to
-move to.
+crates), aimed at being fast, clean and safe, and at being easy to move to from other bundlers
+(their plugins run as they are).
 
-It is early. This describes what exists today and how it is checked.
+**Alpha.** It is early: options, output and plugin support can change between 0.x releases
+(see [CHANGELOG.md](CHANGELOG.md), which also says what the version numbers promise). How to check a release: [docs/verifying.md](docs/verifying.md). This describes what exists today and how it is checked.
 
 ## What it does
 
@@ -47,15 +48,23 @@ rathkit-pack bundle src/main.ts --outfile dist/app.mjs
     `runAsChild`). `DefinePlugin`, `EnvironmentPlugin`, `ProvidePlugin`, `BannerPlugin`, `IgnorePlugin`,
     `NormalModuleReplacementPlugin` and `EntryPlugin` are built in (so `webpack` need not be installed; `require('webpack')`
     falls back to this version); `MiniCssExtractPlugin` is done by the bundler's own style sheet pipeline.
-    Real plugins tried: `copy-webpack-plugin`, `html-webpack-plugin`, `mini-css-extract-plugin` with
-    `css-loader`, `compression-webpack-plugin`, `webpack-manifest-plugin`, `clean-webpack-plugin`.
   - **Parcel** plugins from `.parcelrc` (or `parcel` in the config): transformers, resolvers, reporters,
     optimizers, validators, compressors, namers and runtimes, with `@parcel/plugin` (the real one, or a small
     stand-in when it is not installed). Parcel's own plugins for JavaScript, CSS, HTML and JSON are what the
-    bundler does itself. Real plugins tried: `@parcel/transformer-sass`, `-less`, `-yaml`, `-toml`, `-graphql`
-    and `@parcel/compressor-gzip`.
-  - Real Rollup plugins tried: `@rollup/plugin-json`, `-image`, `-commonjs`, `-node-resolve`, `-babel`,
-    `-typescript`; webpack loaders: babel-loader, css-loader with style-loader.
+    bundler does itself.
+  - **What is covered by tests.** Plugin support is claimed only as far as this list goes.
+    - Checked in CI on every change: the plugin hooks and contexts above, with small plugins written for the
+      purpose (`tools/run-plugins.mjs`, 10 programs); and these real packages, run from `bench/`:
+      `@rollup/plugin-url`, `@svgr/rollup`, `vite-plugin-svgr`, `rollup-plugin-copy`, webpack's `url-loader`,
+      `file-loader` and `@svgr/webpack` (`tools/run-assets.mjs`), and `@module-federation/vite` and
+      `@module-federation/enhanced` (`tools/run-federation.mjs`, in Chromium).
+    - Tried by hand, not repeated in CI: `@rollup/plugin-json`, `-image`, `-commonjs`, `-node-resolve`, `-babel`,
+      `-typescript`; babel-loader; css-loader with style-loader; `copy-webpack-plugin`, `html-webpack-plugin`,
+      `mini-css-extract-plugin`, `compression-webpack-plugin`, `webpack-manifest-plugin`,
+      `clean-webpack-plugin`; `@parcel/transformer-sass`, `-less`, `-yaml`, `-toml`, `-graphql` and
+      `@parcel/compressor-gzip`.
+    - Everything else a plugin might do is untested: a plugin not listed may work, and a bug report with
+      the plugin's name is welcome.
   - Not supported: Vite's module-level HMR (`handleHotUpdate` can stop or add reloads, not swap modules), webpack plugins that
     depend on webpack's own module and chunk graph internals beyond the above (for example `SplitChunksPlugin`
     settings are ignored), Parcel packagers and bundlers (the bundler's own are used).
@@ -205,7 +214,7 @@ agrees with them:
 | TypeScript parser | `tsc`'s parser | 12,000 `.d.ts` files, 8,000 source files |
 | Bundles | the same program run unbundled | 32 fixtures in nine output modes, 5 code-splitting programs, 6,000+ random multi-module programs, 570 real packages, real libraries doing real work (TypeScript, Prettier, Terser, Babel, React DOM) |
 | Minifier | the same program under other names and spellings (same trees up to the syntax rewrites it is allowed, same literals, every identifier denotes the same binding), and the same output when run | 37,779 real modules; every bundle test above also runs minified; 1,000 random programs built from the constructs the rewrites touch (`tools/fuzz-syntax.mjs`) |
-| Plugins | the same program with the plugins' effects, run by Node: virtual modules, aliases, transforms, hooks in order, emitted files and chunks, module info, `this.parse`, esbuild namespaces, webpack loaders with pitch and inline requests, webpack compiler hooks (lifecycle order, assets, stats, child compiler, built-in plugins), Parcel plugins of every kind, source maps through a transform (Node's own stack traces) | 10 programs x 3-4 output modes (`tools/run-plugins.mjs`); `--watch` (`tools/run-watch.mjs`); the ESTree of every `.js` file in a project's `node_modules` against acorn's (`tools/check-estree.mjs`; 223,000 files on the development machine); real Rollup, webpack and Parcel plugins tried by hand |
+| Plugins | the same program with the plugins' effects, run by Node: virtual modules, aliases, transforms, hooks in order, emitted files and chunks, module info, `this.parse`, esbuild namespaces, webpack loaders with pitch and inline requests, webpack compiler hooks (lifecycle order, assets, stats, child compiler, built-in plugins), Parcel plugins of every kind, source maps through a transform (Node's own stack traces) | 10 programs x 3-4 output modes (`tools/run-plugins.mjs`); `--watch` (`tools/run-watch.mjs`); the ESTree of every `.js` file in a project's `node_modules` against acorn's (`tools/check-estree.mjs`; 223,000 files on the development machine); real packages as listed under "What is covered by tests" |
 | Loaders, style sheets | the values a program reads from imported text, base64, data URLs, bytes and copied files; CSS text snapshots; every CSS source map segment leads back to the same token in the source | 3 programs x 7 output modes (`tools/run-loaders.mjs`); every style sheet in a project's `node_modules` maps correctly (76 on the development machine) |
 | Defines | the same program run unbundled with the values put in place first, and no dead module left in the bundle | 3 programs x 7 variants x 6 output modes (`tools/run-defines.mjs`) |
 | Minifying in pieces | the same bundle minified in one pass (`tools/check-pieces.mjs`: byte for byte, every format, many cuts and few) | every fixture and every package in a real project; source maps for a 1.1 MB NestJS bundle byte for byte |
