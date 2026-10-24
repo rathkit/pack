@@ -1223,7 +1223,8 @@ fn run_build(job: &Job) -> Outcome {
         return outcome;
     }
     let shake_at = Instant::now();
-    let shaken = if job.treeshake { rathkit_pack::shake::shake(&graph, &linked) } else { rathkit_pack::shake::keep_everything(&graph) };
+    let entry_exports = !(bundle_options.format == rathkit_pack::bundle::Format::Iife && bundle_options.global_name.is_none());
+    let shaken = if job.treeshake { rathkit_pack::shake::shake_entries(&graph, &linked, entry_exports) } else { rathkit_pack::shake::keep_everything(&graph) };
     if timing {
         eprintln!("  shake: {:.1} ms", shake_at.elapsed().as_secs_f64() * 1000.0);
     }

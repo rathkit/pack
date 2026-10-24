@@ -74,7 +74,10 @@ const cases = [
       const scripts = html.match(/<script[^>]*><\/script>/g) ?? [];
       if (scripts.length !== 1 || !/src="\.\/bundle\.js"/.test(scripts[0])) return `the page loads ${JSON.stringify(scripts)}`;
       if ((html.match(/<link rel="stylesheet"/g) ?? []).length !== 1 || !/href="\.\/bundle\.css"/.test(html)) return `the page links ${html}`;
-      return /^\(\(\) => \{/.test(readFileSync(join(out, 'bundle.js'), 'utf8')) ? null : 'bundle.js is not an iife';
+      const js = readFileSync(join(out, 'bundle.js'), 'utf8');
+      if (!/^\(\(\) => \{/.test(js)) return 'bundle.js is not an iife';
+      // Nobody reads what an iife with no global name exports, so none of it is written (nor the sheet's empty default export).
+      return /__export|_default|var __exports/.test(js) ? `bundle.js carries exports nobody reads:\n${js}` : null;
     },
   },
   // CommonJS cannot run in a page.

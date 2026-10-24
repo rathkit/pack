@@ -1711,6 +1711,8 @@ impl<'a> Bundler<'a> {
             let module = graph.module(root);
             let mut out = Vec::new();
             match module.kind {
+                // An iife with no global name has nobody to hand its exports to (and the shaker kept none of them).
+                ModuleKind::Esm if self.format == Format::Iife && self.global_name.is_none() => {}
                 ModuleKind::Esm => {
                     for name in export_names(graph, root) {
                         let Some(binding) = resolve_export(graph, root, &name) else { continue };
@@ -2965,7 +2967,8 @@ impl Bundler<'_> {
             }
             // The entry's exports, as getters so they can be defined before the modules run.
             let target = if format == Format::Cjs { "exports" } else { "__exports" };
-            if !exports.is_empty() && cjs_entry.is_none() {
+            // An iife with no global name has nobody to hand its exports to.
+            if !exports.is_empty() && cjs_entry.is_none() && (format != Format::Iife || self.global_name.is_some()) {
                 out.push_str(HELPER_EXPORT);
                 if format == Format::Iife {
                     out.push_str("var __exports = {};\n");

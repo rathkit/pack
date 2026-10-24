@@ -94,6 +94,11 @@ pub fn keep_everything(graph: &Graph) -> Shaken {
 
 /// Decides what to keep, starting from the graph's entry points.
 pub fn shake(graph: &Graph, linked: &Linked) -> Shaken {
+    shake_entries(graph, linked, true)
+}
+
+/// `entry_exports` false: nobody reads what the entries export (an iife with no global name), so only their effects are kept.
+pub fn shake_entries(graph: &Graph, linked: &Linked, entry_exports: bool) -> Shaken {
     let enums = EnumTable::build(graph);
     let mut modules: Vec<ModuleShake> = graph.modules.iter().map(|m| build_parts(graph, m.id, Some((&enums, linked)))).collect();
     let mut by_symbol: Vec<HashMap<SymbolId, Vec<usize>>> = Vec::with_capacity(modules.len());
@@ -109,7 +114,10 @@ pub fn shake(graph: &Graph, linked: &Linked) -> Shaken {
     let mut shaker = Shaker { graph, linked, modules: &mut modules, by_symbol, work: Vec::new(), exports_done: vec![false; graph.modules.len()], full: vec![false; graph.modules.len()] };
     for &entry in &graph.entries {
         shaker.work.push(Work::Module(entry));
-        shaker.work.push(Work::AllExports(entry));
+        // A module that is not ES keeps all it has: its code runs when it is asked for.
+        if entry_exports || graph.module(entry).kind != crate::graph::ModuleKind::Esm {
+            shaker.work.push(Work::AllExports(entry));
+        }
     }
     shaker.run();
     for module in &mut modules {
