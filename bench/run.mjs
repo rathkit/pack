@@ -9,7 +9,7 @@
 //   --modes a,b       plain, minify, minify+map (default all three)
 //   --markdown        also print the tables as Markdown
 //
-// RATHKIT_PACK_BIN names the rathkit-pack binary (default ../target/release/rathkit-pack).
+// RATHKIT_PACK_BIN names the rathkit-pack binary (default ../target/release/rkp).
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, rmSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -19,7 +19,7 @@ import { builtinModules } from 'node:module';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const bin = (n) => join(here, 'node_modules/.bin', n);
-const RK = process.env.RATHKIT_PACK_BIN ?? join(here, '..', 'target', 'release', 'rathkit-pack');
+const RK = process.env.RATHKIT_PACK_BIN ?? join(here, '..', 'target', 'release', 'rkp');
 
 const args = process.argv.slice(2);
 const option = (name, fallback) => {

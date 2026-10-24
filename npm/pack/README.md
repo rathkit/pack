@@ -6,7 +6,7 @@ lists the one platform package that fits as an optional dependency.
 
 ```
 npm install --save-dev @rathkit/pack@next
-npx rathkit-pack bundle src/main.ts --outfile dist/app.mjs
+npx rkp bundle src/main.ts --outfile dist/app.mjs
 ```
 
 Versions with a suffix such as `0.1.0-alpha.0` are published under the `next` tag, never `latest`. Node 24 or later is

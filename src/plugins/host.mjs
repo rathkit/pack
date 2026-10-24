@@ -175,7 +175,7 @@ const createContext = (plugin, owner = 'build') => {
 // `this.parse` is synchronous, so it cannot ask the bundler over the message channel; it runs the
 // bundler's own parser (`--estree`) as a child process and reads the ESTree it prints.
 const parsed = new Map();
-// A worker owns one long-lived `rathkit-pack --estree-server` process; the main thread asks it a question and
+// A worker owns one long-lived `rkp --estree-server` process; the main thread asks it a question and
 // waits for the answer with Atomics.wait, so plugins can call `this.parse` as the synchronous function it is.
 const SERVER_WORKER = `
 const { workerData, parentPort } = require('node:worker_threads');
@@ -1147,7 +1147,7 @@ async function init(params) {
   };
 }
 
-// ---- requests from rathkit-pack ----------------------------------------------------------------
+// ---- requests from rkp ----------------------------------------------------------------
 
 const encodeCode = (code) => (typeof code === 'string' ? code : code === undefined || code === null ? '' : Buffer.from(code).toString('utf8'));
 

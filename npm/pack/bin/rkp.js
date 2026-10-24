@@ -9,7 +9,7 @@ const { dirname, join } = require('node:path');
 // On Linux the package depends on the C library: glibc reports its version, musl (Alpine) does not.
 const libc = process.platform !== 'linux' ? '' : process.report?.getReport?.().header?.glibcVersionRuntime ? '-gnu' : '-musl';
 const platform = `${process.platform}-${process.arch}${libc}`;
-const exe = process.platform === 'win32' ? 'rathkit-pack.exe' : 'rathkit-pack';
+const exe = process.platform === 'win32' ? 'rkp.exe' : 'rkp';
 
 function find() {
   if (process.env.RATHKIT_PACK_BIN) return process.env.RATHKIT_PACK_BIN;
@@ -23,7 +23,7 @@ function find() {
 const bin = find();
 if (!bin || !existsSync(bin)) {
   console.error(
-    `rathkit-pack: there is no build for ${platform}.\n` +
+    `rkp: there is no build for ${platform}.\n` +
       'Builds exist for linux-x64 and linux-arm64 (glibc: -gnu, Alpine: -musl), darwin-x64, darwin-arm64 and win32-x64.\n' +
       'If the platform is one of those, the package @rathkit/pack-' + platform + ' was not installed:\n' +
       'install again without --omit=optional. Otherwise build from source: https://github.com/rathkit/pack',
@@ -32,7 +32,7 @@ if (!bin || !existsSync(bin)) {
 }
 const result = spawnSync(bin, process.argv.slice(2), { stdio: 'inherit' });
 if (result.error) {
-  console.error(`rathkit-pack: cannot start ${bin}: ${result.error.message}`);
+  console.error(`rkp: cannot start ${bin}: ${result.error.message}`);
   process.exit(1);
 }
 if (result.signal) process.kill(process.pid, result.signal);

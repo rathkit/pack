@@ -39,7 +39,7 @@ mkdirSync(out, { recursive: true });
 const made = [];
 const base = JSON.parse(readFileSync(join(root, 'npm', 'pack', 'package.json'), 'utf8'));
 for (const p of platforms) {
-  const exe = p.os === 'win32' ? 'rathkit-pack.exe' : 'rathkit-pack';
+  const exe = p.os === 'win32' ? 'rkp.exe' : 'rkp';
   let binary;
   if (arg('--local')) {
     if (p !== here) continue;

@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const bin = process.env.RATHKIT_PACK_BIN ?? join(root, "target", "release", "rathkit-pack");
+const bin = process.env.RATHKIT_PACK_BIN ?? join(root, "target", "release", "rkp");
 const arg = (name, fallback) => {
   const i = process.argv.indexOf(name);
   return i < 0 ? fallback : Number(process.argv[i + 1]);

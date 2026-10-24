@@ -12,7 +12,7 @@ fn bundled_programs_behave_like_the_originals() {
     }
     let output = Command::new("node")
         .arg("tools/run-fixtures.mjs")
-        .env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rathkit-pack"))
+        .env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rkp"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("run the fixture script");
@@ -30,7 +30,7 @@ fn typescript_features_match_the_compilers_own_transform() {
     };
     let output = Command::new("node")
         .arg("tools/run-jsx.mjs")
-        .env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rathkit-pack"))
+        .env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rkp"))
         .env("TS_MODULE", module)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
@@ -47,7 +47,7 @@ fn split_chunks_behave_like_the_originals() {
     }
     let output = Command::new("node")
         .arg("tools/run-split.mjs")
-        .env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rathkit-pack"))
+        .env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rkp"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("run the splitting script");
@@ -63,7 +63,7 @@ fn defined_constants_behave_like_the_values_they_stand_for() {
     }
     let output = Command::new("node")
         .arg("tools/run-defines.mjs")
-        .env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rathkit-pack"))
+        .env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rkp"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("run the define script");
@@ -79,7 +79,7 @@ fn loaders_and_style_sheets_produce_what_they_should() {
     }
     let output = Command::new("node")
         .arg("tools/run-loaders.mjs")
-        .env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rathkit-pack"))
+        .env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rkp"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("run the loader script");
@@ -95,7 +95,7 @@ fn plugins_of_every_kind_run_in_the_host() {
     }
     let output = Command::new("node")
         .arg("tools/run-plugins.mjs")
-        .env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rathkit-pack"))
+        .env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rkp"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("run the plugin script");
@@ -111,7 +111,7 @@ fn watch_mode_rebuilds_and_tells_plugins() {
     }
     let output = Command::new("node")
         .arg("tools/run-watch.mjs")
-        .env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rathkit-pack"))
+        .env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rkp"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("run the watch script");
@@ -127,7 +127,7 @@ fn estree_matches_acorn() {
     }
     let output = Command::new("node")
         .args(["tools/check-estree.mjs", "tests", "tools"])
-        .env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rathkit-pack"))
+        .env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rkp"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("run the ESTree script");
@@ -143,7 +143,7 @@ fn the_dev_server_serves_and_tells_pages_about_changes() {
     }
     let output = Command::new("node")
         .arg("tools/run-serve.mjs")
-        .env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rathkit-pack"))
+        .env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rkp"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("run the serve script");

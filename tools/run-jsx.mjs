@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { createRequire } from 'node:module';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const bin = process.env.RATHKIT_PACK_BIN ?? join(root, 'target', 'release', 'rathkit-pack');
+const bin = process.env.RATHKIT_PACK_BIN ?? join(root, 'target', 'release', 'rkp');
 const require = createRequire(import.meta.url);
 const ts = require(process.env.TS_MODULE ?? 'typescript');
 const base = join(root, 'tests', 'jsx');

@@ -9,7 +9,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const bin = join(root, 'target', 'release', 'rathkit-pack');
+const bin = join(root, 'target', 'release', 'rkp');
 const project = process.argv[2];
 const limit = Number(process.argv[3] ?? 1e9);
 const modules = join(project, 'node_modules');

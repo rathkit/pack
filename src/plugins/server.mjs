@@ -1,4 +1,4 @@
-// The dev server side of the plugin host: Vite's server hooks for `rathkit-pack serve`.
+// The dev server side of the plugin host: Vite's server hooks for `rkp serve`.
 //
 // This file is appended to host.mjs and shares its scope. The HTTP server itself is in Rust; what lives here is
 // what plugins see of it: `configureServer(server)` with connect-style `server.middlewares`, `server.ws`,

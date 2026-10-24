@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir, homedir } from 'node:os';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const bin = process.env.RATHKIT_PACK_BIN ?? join(root, 'target', 'release', 'rathkit-pack');
+const bin = process.env.RATHKIT_PACK_BIN ?? join(root, 'target', 'release', 'rkp');
 const tests = join(root, 'tests', 'federation');
 const bench = join(root, 'bench');
 const only = process.argv.slice(2);

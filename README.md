@@ -28,8 +28,10 @@ or `cargo build --release` from source.
 ## What it does
 
 ```
-rathkit-pack bundle src/main.ts --outfile dist/app.mjs
+rkp bundle src/main.ts --outfile dist/app.mjs
 ```
+
+(`rkp` is the command; the project, the crate and the npm package are rathkit-pack and `@rathkit/pack`.)
 
 - Parses ES modules, CommonJS, JSON, TypeScript, JSX and TSX.
 - Resolves like Node does (`exports`/`imports` maps with conditions, `node_modules`, `main`
@@ -97,7 +99,7 @@ rathkit-pack bundle src/main.ts --outfile dist/app.mjs
 - `--watch` builds again when a file the build read changes (and plugins' `addWatchFile` files): plugins hear it
   through `watchChange`, a changed config starts everything again, and Ctrl-C ends it cleanly. Modules whose files
   did not change are kept between builds (no reading, parsing or scanning again; without plugins).
-- `rathkit-pack serve ENTRY... [--port N] [--host H]` is a development server with the same options as `bundle`.
+- `rkp serve ENTRY... [--port N] [--host H]` is a development server with the same options as `bundle`.
   The build stays in memory (with source maps) and is served over HTTP, together with your `index.html` (its entry
   `<script src>` is pointed at the built file; the style sheets and the reload client are added), `public/` and
   the project's files. A rebuild tells open pages: style sheet edits are swapped in place, anything else reloads
@@ -208,12 +210,12 @@ rathkit-pack bundle src/main.ts --outfile dist/app.mjs
 ## Options
 
 ```
-rathkit-pack bundle ENTRY... [--outfile FILE | --outdir DIR --splitting] [--no-treeshake]
+rkp bundle ENTRY... [--outfile FILE | --outdir DIR --splitting] [--no-treeshake]
     [--format esm|cjs|iife] [--global-name NAME] [--global SPEC=NAME]...
     [--minify | --minify-whitespace --minify-identifiers --minify-syntax] [--keep-names | --no-keep-names]
     [--sourcemap[=inline|external]] [--no-sources-content]
     [--config FILE | --no-config] [--mode NAME] [--watch]
-rathkit-pack serve ENTRY... [--port N] [--host H] [the options above] [--define KEY=VALUE]... [--loader .ext=NAME]... [--asset-names T] [--public-path P] [--external NAME]... [--condition NAME]... [--main-field NAME]...
+rkp serve ENTRY... [--port N] [--host H] [the options above] [--define KEY=VALUE]... [--loader .ext=NAME]... [--asset-names T] [--public-path P] [--external NAME]... [--condition NAME]... [--main-field NAME]...
     [--alias NAME=PATH]... [--tsconfig FILE | --no-tsconfig]
     [--jsx automatic|classic] [--jsx-import-source S] [--jsx-factory F] [--jsx-fragment F]
     [--experimental-decorators] [--decorator-metadata] [--strict-null-checks] [--original-paths] [--platform-browser]

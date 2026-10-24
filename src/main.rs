@@ -8,7 +8,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.split_first() {
         Some((cmd, _)) if cmd == "--version" || cmd == "-V" => {
-            println!("rathkit-pack {}", env!("CARGO_PKG_VERSION"));
+            println!("rkp {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
         Some((cmd, files)) if cmd == "--lex-check" && !files.is_empty() => lex_check(files),
@@ -43,7 +43,7 @@ fn main() -> ExitCode {
         Some((cmd, files)) if cmd == "--ts-verdicts" && !files.is_empty() => ts_verdicts(files),
         Some((cmd, files)) if cmd == "--link-dump" && !files.is_empty() => link_dump(files),
         _ => {
-            eprintln!("usage: rathkit-pack bundle <entry>... | serve <entry>... | --version\n       rathkit-pack --lex-check|--parse-check|--parse-verdicts|--script-verdicts|--bench <file.js>... (development aids)\n       rathkit-pack --scopes <file.js>\n       rathkit-pack bundle <entry.js>... [--outfile FILE | --outdir DIR --splitting] [--format esm|cjs|iife] [--no-treeshake] [--define KEY=VALUE]... [--loader .ext=NAME]... [--jsx automatic|classic] [--external NAME]... [--condition NAME]...\n       rathkit-pack --graph <entry.js>... [--quiet] [--threads N] [--external NAME]... [--condition NAME]...");
+            eprintln!("usage: rkp bundle <entry>... | serve <entry>... | --version\n       rkp --lex-check|--parse-check|--parse-verdicts|--script-verdicts|--bench <file.js>... (development aids)\n       rkp --scopes <file.js>\n       rkp bundle <entry.js>... [--outfile FILE | --outdir DIR --splitting] [--format esm|cjs|iife] [--no-treeshake] [--define KEY=VALUE]... [--loader .ext=NAME]... [--jsx automatic|classic] [--external NAME]... [--condition NAME]...\n       rkp --graph <entry.js>... [--quiet] [--threads N] [--external NAME]... [--condition NAME]...");
             ExitCode::from(2)
         }
     }
@@ -512,7 +512,7 @@ fn link_dump(entries: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// `rathkit-pack bundle ENTRY... [--outfile FILE]`: builds one ES module file from the entries.
+/// `rkp bundle ENTRY... [--outfile FILE]`: builds one ES module file from the entries.
 fn bundle_command(args: &[String], serve: bool) -> ExitCode {
     loop {
         match bundle_once(args, serve) {
@@ -1268,7 +1268,7 @@ fn watch_loop(job: std::sync::Arc<Job>) -> Done {
     let config_path = job.config_file.as_ref().map(|f| job.cwd.join(f));
     if let Some(state) = &job.serve {
         match rathkit_pack::serve::start(state.clone(), &job.bind.0, job.bind.1) {
-            Ok(port) => println!("rathkit-pack serving at http://{}:{port}/", job.bind.0),
+            Ok(port) => println!("rkp serving at http://{}:{port}/", job.bind.0),
             Err(e) => {
                 eprintln!("error: cannot listen on {}:{}: {e}", job.bind.0, job.bind.1);
                 return Done::Exit(ExitCode::FAILURE);

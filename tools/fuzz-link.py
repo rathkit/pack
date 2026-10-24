@@ -11,7 +11,7 @@ compares it with tools/diff-link.mjs (Node links but never evaluates)."""
 import argparse, os, random, subprocess, sys, tempfile
 
 NAMES = ["a", "b", "c", "d"]
-BIN = os.path.join(os.path.dirname(__file__), "..", "target", "release", "rathkit-pack")
+BIN = os.path.join(os.path.dirname(__file__), "..", "target", "release", "rkp")
 
 
 def module(rng, index, count, strict, acyclic):

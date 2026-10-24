@@ -1,6 +1,6 @@
 // Differential test: asks V8 (through Node) whether each file is valid JavaScript, as a
 // module or as a script/CommonJS body, and prints `path<TAB>module|script|fail` lines in
-// the same format as `rathkit-pack --parse-verdicts`. Diff the two outputs to find files
+// the same format as `rkp --parse-verdicts`. Diff the two outputs to find files
 // the two parsers disagree on.
 //
 //   node --experimental-vm-modules tools/diff-v8.mjs files.txt > v8.tsv

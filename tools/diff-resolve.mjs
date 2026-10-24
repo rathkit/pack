@@ -1,5 +1,5 @@
 // Compares the resolver with Node's own `require.resolve`.
-//   rathkit-pack --resolve-dump FILE... > dump.tsv; node tools/diff-resolve.mjs dump.tsv
+//   rkp --resolve-dump FILE... > dump.tsv; node tools/diff-resolve.mjs dump.tsv
 // Prints disagreements and a summary. Cases where Node itself throws and the resolver also
 // fails agree; a request Node cannot satisfy but the resolver can (or the reverse) does not.
 import { createRequire } from 'node:module';

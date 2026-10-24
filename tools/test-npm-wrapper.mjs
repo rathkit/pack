@@ -32,11 +32,11 @@ const project = join(tmp, 'project');
 const scope = join(project, 'node_modules', '@rathkit');
 mkdirSync(scope, { recursive: true });
 for (const d of readdirSync(made)) cpSync(join(made, d), join(scope, d), { recursive: true });
-const launcher = join(scope, 'pack', 'bin', 'rathkit-pack.js');
+const launcher = join(scope, 'pack', 'bin', 'rkp.js');
 const version = /^version\s*=\s*"([^"]+)"/m.exec(readFileSync(join(root, 'Cargo.toml'), 'utf8'))[1];
 
 const v = run(process.execPath, [launcher, '--version'], { cwd: project });
-if (v.stdout.trim() !== `rathkit-pack ${version}`) fail(`--version printed ${JSON.stringify(v.stdout)} ${v.stderr}`);
+if (v.stdout.trim() !== `rkp ${version}`) fail(`--version printed ${JSON.stringify(v.stdout)} ${v.stderr}`);
 
 writeFileSync(join(project, 'main.js'), 'console.log("hello " + (1 + 2));\n');
 const b = run(process.execPath, [launcher, 'bundle', 'main.js', '--outfile', 'dist/out.mjs'], { cwd: project });
@@ -50,8 +50,8 @@ if (bad.status === 0) fail('a failing build exited with 0');
 // A platform with no package says so.
 const lonely = join(tmp, 'lonely');
 mkdirSync(join(lonely, 'bin'), { recursive: true });
-cpSync(launcher, join(lonely, 'bin', 'rathkit-pack.js'));
-const none = run(process.execPath, [join(lonely, 'bin', 'rathkit-pack.js'), '--version'], { cwd: lonely });
+cpSync(launcher, join(lonely, 'bin', 'rkp.js'));
+const none = run(process.execPath, [join(lonely, 'bin', 'rkp.js'), '--version'], { cwd: lonely });
 if (none.status === 0 || !/there is no build for/.test(none.stderr)) fail(`a missing platform package gave ${none.status} ${none.stderr}`);
 
 console.log('npm wrapper: packages are plain, the launcher starts the program, passes arguments and exit codes, and explains a missing build');

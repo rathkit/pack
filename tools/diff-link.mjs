@@ -1,5 +1,5 @@
 // Compares the linker's namespace names with Node's own module linker.
-//   rathkit-pack --link-dump ENTRY... > dump.txt; node --experimental-vm-modules tools/diff-link.mjs dump.txt
+//   rkp --link-dump ENTRY... > dump.txt; node --experimental-vm-modules tools/diff-link.mjs dump.txt
 // Each entry's import closure is loaded as vm.SourceTextModule and linked but never
 // evaluated, so no package code runs. A link error in Node must be a link error in ours, and
 // otherwise the sorted `Object.keys` of the namespace must equal our export names.

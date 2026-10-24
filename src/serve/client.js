@@ -1,4 +1,4 @@
-// The page side of `rathkit-pack serve`: reloads when the build changes, swaps style sheets without a reload,
+// The page side of `rkp serve`: reloads when the build changes, swaps style sheets without a reload,
 // shows build errors, and gives code written for Vite its `import.meta.hot` (see src/serve.rs for its limits).
 const listeners = new Map();
 const disposers = [];

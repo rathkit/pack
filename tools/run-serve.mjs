@@ -1,4 +1,4 @@
-// Tests for `rathkit-pack serve`: pages, built files and maps from memory, plugin middlewares and
+// Tests for `rkp serve`: pages, built files and maps from memory, plugin middlewares and
 // transformIndexHtml, and what the page is told when files change (style sheets swapped, reload, errors,
 // plugin events, a reload a plugin stops).
 //   node tools/run-serve.mjs
@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const bin = process.env.RATHKIT_PACK_BIN ?? join(root, 'target', 'release', 'rathkit-pack');
+const bin = process.env.RATHKIT_PACK_BIN ?? join(root, 'target', 'release', 'rkp');
 const dir = mkdtempSync(join(tmpdir(), 'serve-'));
 const write = (name, text) => writeFileSync(join(dir, name), text);
 write('main.js', 'import "./style.css";\nimport note from "./note.txt";\nconsole.log("main", note, import.meta.hot ? "hot" : "cold");\n');

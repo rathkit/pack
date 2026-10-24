@@ -11,7 +11,7 @@ name = "rathkit_pack"
 path = "src/lib.rs"
 
 [[bin]]
-name = "rathkit-pack"
+name = "rkp"
 path = "src/main.rs"
 
 [[bin]]

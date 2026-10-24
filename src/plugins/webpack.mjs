@@ -1252,10 +1252,10 @@ class Compiler {
     return !!this.parentCompilation;
   }
   watch() {
-    throw new Error('compiler.watch() is not available: use rathkit-pack bundle --watch');
+    throw new Error('compiler.watch() is not available: use rkp bundle --watch');
   }
   run() {
-    throw new Error('compiler.run() is not available: rathkit-pack runs the build');
+    throw new Error('compiler.run() is not available: rkp runs the build');
   }
   close(callback) {
     callback?.();
@@ -1580,7 +1580,7 @@ const webpackNamespace = {
 };
 const webpackFunction = Object.assign(
   () => {
-    throw new Error('webpack() is not available: rathkit-pack runs the build; put the plugins in the config');
+    throw new Error('webpack() is not available: rkp runs the build; put the plugins in the config');
   },
   webpackNamespace,
 );

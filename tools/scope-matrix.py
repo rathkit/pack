@@ -16,7 +16,7 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-BIN = os.path.join(HERE, "..", "target", "release", "rathkit-pack")
+BIN = os.path.join(HERE, "..", "target", "release", "rkp")
 
 DECLS = {
     "var": "var x;",

@@ -53,7 +53,7 @@ const checkCssMap = (cssFile, dir) => {
 };
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const bin = process.env.RATHKIT_PACK_BIN ?? join(root, 'target', 'release', 'rathkit-pack');
+const bin = process.env.RATHKIT_PACK_BIN ?? join(root, 'target', 'release', 'rkp');
 const base = join(root, 'tests', 'loaders');
 const only = process.argv.slice(2);
 const update = process.env.UPDATE_SNAPSHOTS === '1';

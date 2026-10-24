@@ -14,7 +14,7 @@ node run.mjs --markdown --runs 5 lodash react        # chosen workloads, tables 
 ```
 
 Options: `--tools rathkit,esbuild,rolldown,rspack,vite` (default: rathkit only), `--modes plain,minify,minify+map`, `--env production|none` (whether `process.env.NODE_ENV`
-is defined as `"production"`; the default is production). The binary is `target/release/rathkit-pack` unless
+is defined as `"production"`; the default is production). The binary is `target/release/rkp` unless
 `RATHKIT_PACK_BIN` says otherwise. Results are also written to `results.json`.
 
 Workloads: the TypeScript 5.9 compiler (one 9 MB CommonJS file), three.js (a few classes), lodash-es (`export *`), React with

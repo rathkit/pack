@@ -15,7 +15,7 @@ import argparse, os, random, shutil, subprocess, sys, tempfile
 from concurrent.futures import ThreadPoolExecutor
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
-BIN = os.path.join(ROOT, "target", "release", "rathkit-pack")
+BIN = os.path.join(ROOT, "target", "release", "rkp")
 POOL = ["a", "b", "c", "d", "e", "f", "g", "h"]
 
 

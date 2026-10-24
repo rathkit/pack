@@ -78,7 +78,7 @@ jobs:
         with:
           persist-credentials: false
       - run: cargo build --release
-      - run: ./target/release/rathkit-pack --version
+      - run: ./target/release/rkp --version
       - run: npm ci --prefix bench --ignore-scripts
       - run: cargo test --release
       - run: node tools/run-fixtures.mjs

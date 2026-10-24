@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const bin = process.env.RATHKIT_PACK_BIN ?? join(root, 'target', 'release', 'rathkit-pack');
+const bin = process.env.RATHKIT_PACK_BIN ?? join(root, 'target', 'release', 'rkp');
 const bench = join(root, 'bench', 'node_modules');
 if (!existsSync(join(bench, '@rollup', 'plugin-url'))) {
   console.log('assets: skipped (run npm install in bench first)');

@@ -7,7 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const exe = process.env.RATHKIT_PACK_BIN ?? path.join(here, '../target/release/rathkit-pack');
+const exe = process.env.RATHKIT_PACK_BIN ?? path.join(here, '../target/release/rkp');
 // acorn is the reference: ACORN_DIR names an installed copy, otherwise it is looked for from the current directory.
 let found = process.env.ACORN_DIR;
 if (!found) {

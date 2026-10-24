@@ -1,4 +1,4 @@
-//! The development server of `rathkit-pack serve`: the build kept in memory, served over HTTP, with the page told
+//! The development server of `rkp serve`: the build kept in memory, served over HTTP, with the page told
 //! to reload (or to swap its style sheets) when a rebuild finishes.
 //!
 //! No dependencies: a `TcpListener`, a thread per connection, and server-sent events for the page. Plugins take part

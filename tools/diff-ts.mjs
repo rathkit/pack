@@ -1,5 +1,5 @@
 // Compares the TypeScript parser's verdicts with the TypeScript compiler's own.
-//   rathkit-pack --ts-verdicts FILE... > ours.txt; node tools/diff-ts.mjs files.txt ours.txt
+//   rkp --ts-verdicts FILE... > ours.txt; node tools/diff-ts.mjs files.txt ours.txt
 // files.txt lists the files (one per line), ours.txt has one verdict per file in the same order.
 // The oracle is `ts.createSourceFile(...).parseDiagnostics`: syntax errors only, no type checking.
 import { readFileSync } from 'node:fs';
