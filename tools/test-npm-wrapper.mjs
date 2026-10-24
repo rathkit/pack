@@ -19,6 +19,10 @@ const fail = (message) => {
 const m = run(process.execPath, [join(root, 'tools', 'make-npm-packages.mjs'), '--out', made, '--local']);
 if (m.status !== 0) fail(`cannot make the packages: ${m.stderr}${m.stdout}`);
 
+// The old name of the command is another bin of the launcher.
+const bins = JSON.parse(readFileSync(join(made, 'pack', 'package.json'), 'utf8')).bin;
+if (bins.rkp !== 'bin/rkp.js' || bins['rathkit-pack'] !== 'bin/rkp.js') fail(`the launcher's bins are ${JSON.stringify(bins)}`);
+
 // What each package.json says.
 for (const d of readdirSync(made)) {
   const manifest = JSON.parse(readFileSync(join(made, d, 'package.json'), 'utf8'));

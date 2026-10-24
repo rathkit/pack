@@ -751,18 +751,30 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
                     (s, path)
                 })
                 .collect();
+            let styles: Vec<(rathkit_pack::html::ScriptRef, std::path::PathBuf)> = rathkit_pack::html::style_sheets(&html)
+                .into_iter()
+                .map(|s| {
+                    let path = if let Some(rooted) = s.src.strip_prefix('/') { rathkit_pack::graph::absolute(&cwd, rooted) } else { rathkit_pack::graph::absolute(&dir, &s.src) };
+                    (s, path)
+                })
+                .filter(|(_, path)| path.is_file())
+                .collect();
             if scripts.is_empty() {
                 eprintln!("error: {entry} has no <script type=\"module\" src=\"...\"> to build");
                 return Done::Exit(ExitCode::FAILURE);
             }
-            expanded.extend(scripts.iter().map(|(_, path)| path.to_string_lossy().into_owned()));
-            pages.push(Page { file, html, scripts });
+            expanded.extend(scripts.iter().chain(&styles).map(|(_, path)| path.to_string_lossy().into_owned()));
+            pages.push(Page { file, html, scripts, styles });
         }
         if !pages.is_empty() && outdir.is_none() {
             eprintln!("error: a page is written next to its scripts; give --outdir");
             return Done::Exit(ExitCode::FAILURE);
         }
         entries = expanded;
+        // Each script and sheet of a page is a file of its own.
+        if !pages.is_empty() {
+            bundle_options.splitting = true;
+        }
     }
     // Module federation: options from a file, or from a plugin in the config.
     let federation_json = match &federation_file {
@@ -870,6 +882,8 @@ struct Page {
     file: std::path::PathBuf,
     html: String,
     scripts: Vec<(rathkit_pack::html::ScriptRef, std::path::PathBuf)>,
+    /// The style sheets it links: they are built too, and the link points at the built sheet.
+    styles: Vec<(rathkit_pack::html::ScriptRef, std::path::PathBuf)>,
 }
 
 /// The pages of a build, written next to its scripts: each script points at the built file, the style sheets are linked,
@@ -882,12 +896,25 @@ fn write_pages(job: &Job, dir: &std::path::Path, output: &rathkit_pack::bundle::
     let sheets: Vec<&str> = output.files.iter().map(|f| f.name.as_str()).filter(|n| n.ends_with(".css")).collect();
     for page in &job.pages {
         let mut html = page.html.clone();
-        let mut scripts: Vec<_> = page.scripts.iter().collect();
-        scripts.sort_by_key(|(s, _)| std::cmp::Reverse(s.start));
-        for (script, path) in scripts {
+        // Every reference, last first so the places of the earlier ones stay true.
+        let mut references: Vec<(&rathkit_pack::html::ScriptRef, &std::path::PathBuf, bool)> = page.scripts.iter().map(|(s, p)| (s, p, false)).chain(page.styles.iter().map(|(s, p)| (s, p, true))).collect();
+        references.sort_by_key(|(s, _, _)| std::cmp::Reverse(s.start));
+        for (reference, path, is_sheet) in references {
             let built = output.chunks.iter().find(|c| c.is_entry && c.facade_module.as_ref().is_some_and(|m| canon(std::path::Path::new(m)) == canon(path)));
-            let Some(chunk) = built else { return Err(format!("{}: no built file for {}", page.file.display(), script.src)) };
-            html.replace_range(script.start..script.end, &format!("{}{}", job.options.public_path, chunk.file));
+            let Some(chunk) = built else { return Err(format!("{}: no built file for {}", page.file.display(), reference.src)) };
+            let file = if is_sheet {
+                // A sheet is built as an entry: its rules are in the `.css` beside the (empty) script.
+                let sheet = format!("{}.css", chunk.file.rsplit_once('.').map_or(chunk.file.as_str(), |(stem, _)| stem));
+                if !output.files.iter().any(|f| f.name == sheet) {
+                    return Err(format!("{}: no built style sheet for {}", page.file.display(), reference.src));
+                }
+                let _ = std::fs::remove_file(dir.join(&chunk.file));
+                let _ = std::fs::remove_file(dir.join(format!("{}.map", chunk.file)));
+                sheet
+            } else {
+                chunk.file.clone()
+            };
+            html.replace_range(reference.start..reference.end, &format!("{}{}", job.options.public_path, file));
         }
         let links: String = sheets.iter().filter(|n| !html.contains(*n)).map(|n| format!("<link rel=\"stylesheet\" href=\"{}{n}\">\n", job.options.public_path)).collect();
         if !links.is_empty() {

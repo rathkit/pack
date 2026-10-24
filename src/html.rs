@@ -1,4 +1,4 @@
-//! Just enough of an HTML page for a build: where its module scripts point.
+//! Just enough of an HTML page for a build: where its module scripts and style sheets point.
 
 /// A `<script type="module" src="...">` whose source is a file of the project.
 #[derive(Debug, PartialEq)]
@@ -11,13 +11,29 @@ pub struct ScriptRef {
 
 /// The module scripts of a page that point at local files, in order.
 pub fn module_scripts(html: &str) -> Vec<ScriptRef> {
+    references(html, "<script", |attrs| {
+        let module = attrs.iter().any(|(n, v, _)| n == "type" && v.eq_ignore_ascii_case("module"));
+        module.then(|| attrs.iter().find(|(n, _, _)| n == "src").cloned()).flatten()
+    })
+}
+
+/// The `<link rel="stylesheet" href="...">` tags of a page that point at local files, in order.
+pub fn style_sheets(html: &str) -> Vec<ScriptRef> {
+    references(html, "<link", |attrs| {
+        let sheet = attrs.iter().any(|(n, v, _)| n == "rel" && v.split_ascii_whitespace().any(|w| w.eq_ignore_ascii_case("stylesheet")));
+        sheet.then(|| attrs.iter().find(|(n, _, _)| n == "href").cloned()).flatten()
+    })
+}
+
+/// The local file a tag points at: `pick` chooses the attribute from the tag's attributes.
+fn references(html: &str, open: &str, pick: impl Fn(&[(String, String, usize)]) -> Option<(String, String, usize)>) -> Vec<ScriptRef> {
     let bytes = html.as_bytes();
     let lower = html.to_ascii_lowercase();
     let mut out = Vec::new();
     let mut at = 0;
-    while let Some(found) = lower[at..].find("<script") {
+    while let Some(found) = lower[at..].find(open) {
         let tag_start = at + found;
-        let after = tag_start + "<script".len();
+        let after = tag_start + open.len();
         // `<scripty>` is not a script.
         if !bytes.get(after).is_some_and(|b| b.is_ascii_whitespace() || *b == b'>' || *b == b'/') {
             at = after;
@@ -35,16 +51,8 @@ pub fn module_scripts(html: &str) -> Vec<ScriptRef> {
             }
             i += 1;
         }
-        let attrs = &html[after..i.min(html.len())];
-        let (mut module, mut src) = (false, None);
-        for (name, value, value_start) in attributes(attrs) {
-            match name.as_str() {
-                "type" => module = value.eq_ignore_ascii_case("module"),
-                "src" => src = Some((value_start + after, value)),
-                _ => {}
-            }
-        }
-        if let (true, Some((start, value))) = (module, src) {
+        let attrs: Vec<(String, String, usize)> = attributes(&html[after..i.min(html.len())]).into_iter().map(|(n, v, p)| (n, v, p + after)).collect();
+        if let Some((_, value, start)) = pick(&attrs) {
             let remote = value.starts_with("//") || value.contains("://") || value.starts_with("data:");
             if !remote && !value.is_empty() {
                 out.push(ScriptRef { start, end: start + value.len(), src: value });
@@ -113,6 +121,12 @@ mod tests {
         let found = module_scripts(html);
         assert_eq!(found.iter().map(|s| s.src.as_str()).collect::<Vec<_>>(), ["/src/main.ts", "./b.js"]);
         assert_eq!(&html[found[0].start..found[0].end], "/src/main.ts");
+    }
+
+    #[test]
+    fn finds_local_style_sheets() {
+        let html = "<link rel=\"stylesheet\" href=\"/a.css\"><link rel=icon href=i.png><link href='b.css' rel='preload stylesheet'><link rel=\"stylesheet\" href=\"https://x.test/c.css\">";
+        assert_eq!(style_sheets(html).iter().map(|s| s.src.as_str()).collect::<Vec<_>>(), ["/a.css", "b.css"]);
     }
 
     #[test]

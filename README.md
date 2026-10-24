@@ -31,7 +31,7 @@ or `cargo build --release` from source.
 rkp bundle src/main.ts --outfile dist/app.mjs
 ```
 
-(`rkp` is the command; the project, the crate and the npm package are rathkit-pack and `@rathkit/pack`.)
+(`rkp` is the command, and `rathkit-pack` still works as another name for it. The project, the crate and the npm package are rathkit-pack and `@rathkit/pack`.)
 
 - Parses ES modules, CommonJS, JSON, TypeScript, JSX and TSX.
 - Resolves like Node does (`exports`/`imports` maps with conditions, `node_modules`, `main`
@@ -39,8 +39,8 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   `baseUrl`, `.js` that means `.ts`, `--alias`.
 - Pages: `rkp bundle index.html --outdir dist` builds the module scripts the page points at, writes the page again with
   the built files (and their style sheets) in place, runs plugins' `transformIndexHtml` with the built files as `bundle`
-  and the entry chunk, and copies `public/`. Only `<script type="module" src>` tags and the style sheets scripts import
-  are built; a `<link rel="stylesheet">` in the page is left as written.
+  and the entry chunk, and copies `public/`. `<script type="module" src>` tags
+  and `<link rel="stylesheet" href>` tags that point at files of the project are built, and the page points at the built files; links to other sites are left as written.
 - Vite's import forms: `./x.svg?raw` (text), `?url` (the copied file's address), `?inline` (a data URL), any other
   query stays on the module name for plugins (`?react`); `import.meta.glob("./dir/*.js", { eager, import, query, base })`
   (literal arguments; `*`, `**`, `?`, `[a-z]`, `{a,b}`, `!` to leave files out; a file added to a listed directory

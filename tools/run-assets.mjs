@@ -46,9 +46,13 @@ const cases = [
     name: 'unplugin-fonts (page)', page: 'index.html', config: 'unfonts-page.config.mjs',
     verify: (out) => {
       const html = readFileSync(join(out, 'index.html'), 'utf8');
-      const wanted = [/rel="preconnect" href="https:\/\/fonts\.gstatic\.com\/"/, /href="https:\/\/fonts\.googleapis\.com\/css2\?family=Roboto/, /rel="preload" as="font" type="font\/woff2" href="\/Mono-Regular-[a-z0-9]+\.woff2"/, /<script type="module" src="\.\/bundle\.js">/, /<link rel="stylesheet" href="\.\/bundle\.css">/];
+      const wanted = [/rel="preconnect" href="https:\/\/fonts\.gstatic\.com\/"/, /href="https:\/\/fonts\.googleapis\.com\/css2\?family=Roboto/, /rel="preload" as="font" type="font\/woff2" href="\/Mono-Regular-[a-z0-9]+\.woff2"/, /<script type="module" src="\.\/use-unfonts\.js">/, /<link rel="stylesheet" href="\.\/page\.css">/, /<link rel="stylesheet" href="\.\/use-unfonts\.css">/];
       const missing = wanted.find((w) => !w.test(html));
-      return missing ? `index.html lacks ${missing}\n${html}` : null;
+      if (missing) return `index.html lacks ${missing}\n${html}`;
+      // The linked sheet is built: its image is copied and named in it, and the script made for it is gone.
+      const sheet = readFileSync(join(out, 'page.css'), 'utf8');
+      if (!/url\(\.\/pic-[a-z0-9]+\.png\)/.test(sheet)) return `page.css was not built: ${sheet}`;
+      return existsSync(join(out, 'page.js')) ? 'the script made for page.css was left in the output' : null;
     },
   },
   {

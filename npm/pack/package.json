@@ -6,7 +6,7 @@
   "repository": { "type": "git", "url": "git+https://github.com/rathkit/pack.git", "directory": "npm/pack" },
   "homepage": "https://github.com/rathkit/pack#readme",
   "bugs": "https://github.com/rathkit/pack/issues",
-  "bin": { "rkp": "bin/rkp.js" },
+  "bin": { "rkp": "bin/rkp.js", "rathkit-pack": "bin/rkp.js" },
   "files": ["bin", "README.md", "LICENSE"],
   "engines": { "node": ">=18" },
   "optionalDependencies": {},

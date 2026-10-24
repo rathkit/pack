@@ -59,8 +59,9 @@ jobs:
           name="rathkit-pack-${GITHUB_REF_NAME#v}-$TARGET"
           mkdir "$name"
           cp LICENSE README.md "$name/"
-          if [ "$RUNNER_OS" = Windows ]; then cp "$out/rkp.exe" "$name/"; else cp "$out/rkp" "$name/"; fi
+          if [ "$RUNNER_OS" = Windows ]; then cp "$out/rkp.exe" "$out/rathkit-pack.exe" "$name/"; else cp "$out/rkp" "$out/rathkit-pack" "$name/"; fi
           "$name/rkp" --version
+          "$name/rathkit-pack" --version
           tar -czf "$name.tar.gz" "$name"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

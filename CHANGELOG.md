@@ -31,6 +31,6 @@ First release.
 - Release files: one tarball per platform, `SHA256SUMS`, an SBOM that lists zero components, and
   Sigstore signatures. The binaries are not signed with an operating-system key; see
   [docs/verifying.md](docs/verifying.md).
-- `rkp --version`.
+- The command is `rkp`; `rathkit-pack` is kept as another name for it. `rkp --version`.
 - `rkp bundle index.html --outdir dist`: the page's module scripts are built, the page is rewritten, and plugins' `transformIndexHtml` runs on it.
 - npm packages: `@rathkit/pack` (a launcher) and one package per platform, published with provenance on the `next` tag.
