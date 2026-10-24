@@ -34,6 +34,8 @@ jobs:
           node-version: ${{ matrix.node }}
       - run: rustup toolchain install stable --profile minimal && rustup default stable
       - run: node tools/check-zero-deps.mjs
+      # The release's bill of materials is made from the same rules and must list no components.
+      - run: node tools/make-sbom.mjs "$RUNNER_TEMP/sbom.cdx.json" && node -e "process.exit(require(process.argv[1]).components.length)" "$RUNNER_TEMP/sbom.cdx.json"
       - run: cargo build --release
       # The libraries and the compiler the real-world comparisons bundle (nothing from here is built into the bundler).
       - run: npm ci --prefix bench --ignore-scripts
