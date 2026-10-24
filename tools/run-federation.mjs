@@ -109,15 +109,20 @@ const buildRspack = async (name) => {
 const haveRspack = existsSync(join(bench, 'node_modules', '@module-federation', 'enhanced')) && existsSync(join(bench, 'node_modules', '@rspack', 'core'));
 
 // A page driven through the browser's debugging protocol.
-let browserCount = 0;
 const openPage = async (url, { wait = 3000 } = {}) => {
-  const port = 9400 + (browserCount++ % 100);
-  const profile = mkdtempSync(join(tmp, 'profile-'));
-  const child = spawn(browser, ['--no-sandbox', '--disable-gpu', '--headless=new', `--user-data-dir=${profile}`, `--remote-debugging-port=${port}`, 'about:blank'], { stdio: 'ignore' });
-  let targets;
-  for (let i = 0; i < 50 && !targets; i++) {
-    await new Promise((r) => setTimeout(r, 200));
-    targets = await fetch(`http://127.0.0.1:${port}/json`).then((r) => r.json()).catch(() => undefined);
+  // The browser picks a free port and says which in a file of its profile; a slow start (a runner's first launch) gets time.
+  let child, targets, profile;
+  for (let attempt = 0; attempt < 2 && !targets; attempt++) {
+    profile = mkdtempSync(join(tmp, 'profile-'));
+    child = spawn(browser, ['--no-sandbox', '--disable-gpu', '--headless=new', `--user-data-dir=${profile}`, '--remote-debugging-port=0', 'about:blank'], { stdio: 'ignore' });
+    for (let i = 0; i < 150 && !targets; i++) {
+      await new Promise((r) => setTimeout(r, 200));
+      const file = join(profile, 'DevToolsActivePort');
+      if (!existsSync(file)) continue;
+      const port = readFileSync(file, 'utf8').split('\n')[0];
+      targets = await fetch(`http://127.0.0.1:${port}/json`).then((r) => r.json()).catch(() => undefined);
+    }
+    if (!targets) child.kill();
   }
   if (!targets) throw new Error('the browser did not start');
   const ws = new WebSocket(targets.find((t) => t.type === 'page').webSocketDebuggerUrl);
