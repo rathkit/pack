@@ -28,6 +28,10 @@ pub trait FileSystem: Send + Sync {
     }
     /// Follows symlinks to the real path, so two links to one file are one module.
     fn canonicalize(&self, path: &Path) -> io::Result<PathBuf>;
+    /// The names in a directory, each with whether it is a directory (for `import.meta.glob`).
+    fn read_dir(&self, _path: &Path) -> io::Result<Vec<(String, bool)>> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "no directory listing"))
+    }
 }
 
 /// The real file system.
@@ -54,6 +58,17 @@ impl FileSystem for RealFs {
 
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
         std::fs::read(path)
+    }
+
+    fn read_dir(&self, path: &Path) -> io::Result<Vec<(String, bool)>> {
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            // A link is followed, as the pattern would see the file it points to.
+            let is_dir = std::fs::metadata(entry.path()).map(|m| m.is_dir()).unwrap_or(false);
+            out.push((entry.file_name().to_string_lossy().into_owned(), is_dir));
+        }
+        Ok(out)
     }
 
     fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
@@ -308,6 +323,11 @@ impl Resolver {
     }
 
     /// The bytes of a file, read through the same file system.
+    /// The file system the resolver reads (for `import.meta.glob`).
+    pub fn file_system(&self) -> &dyn FileSystem {
+        &*self.fs
+    }
+
     pub fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
         self.fs.read(path)
     }

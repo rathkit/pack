@@ -2184,7 +2184,8 @@ impl<'a> Scanner<'_, 'a> {
                 if let [first, _] = ast.list(args) {
                     if let NodeKind::Str(spec) = ast[*first].kind {
                         let spec = ast.atom(spec).to_string();
-                        let edge = self.module.record.request_index(&spec, RequestKind::AssetUrl).map(|i| &self.module.edges[i]);
+                        // A script is only a copied file as a worker (a plain `new URL` of one stays as written), so the worker's edge is the one that has a file.
+                        let edge = [RequestKind::WorkerUrl, RequestKind::AssetUrl].into_iter().filter_map(|k| self.module.record.request_index(&spec, k)).map(|i| &self.module.edges[i]).find(|e| matches!(e, Edge::Module(_)));
                         if let Some(Edge::Module(target)) = edge {
                             if let Some(asset) = &self.bundler.graph.module(*target).asset {
                                 let text = json_string(&asset.url);

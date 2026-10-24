@@ -17,10 +17,16 @@ rathkit-pack bundle src/main.ts --outfile dist/app.mjs
 - Resolves like Node does (`exports`/`imports` maps with conditions, `node_modules`, `main`
   fields, `sideEffects`) plus the usual bundler extras: `tsconfig.json` `paths` and
   `baseUrl`, `.js` that means `.ts`, `--alias`.
+- Vite's import forms: `./x.svg?raw` (text), `?url` (the copied file's address), `?inline` (a data URL), any other
+  query stays on the module name for plugins (`?react`); `import.meta.glob("./dir/*.js", { eager, import, query, base })`
+  (literal arguments; `*`, `**`, `?`, `[a-z]`, `{a,b}`, `!` to leave files out; a file added to a listed directory
+  starts a new build when watching); workers: `new Worker(new URL("./w.js", import.meta.url))`, `./w.js?worker`,
+  `?sharedworker`, `?worker&inline` and `?worker&url`. A worker script is built on its own as an ES module (shared
+  code is repeated in it) and copied beside the output; workers need an ES module environment.
 - Links imports across modules (re-exports, `export *`, namespaces, cycles) and reports a
   missing or ambiguous name as an error before anything runs.
 - Loaders (`--loader .ext=NAME`): `text`, `base64`, `dataurl`, `binary`, `file` (copied to the output as
-  `[name]-[hash].[ext]`, see `--asset-names` and `--public-path`), `empty`, `css`, `local-css`. By default
+  `[name]-[hash].[ext]`; `[ext]` has no dot, and the extension is added when the name has no `[ext]`; see `--asset-names` and `--public-path`), `empty`, `css`, `local-css`. By default
   `.txt .md .html` are text, images, fonts, media, `.pdf` and `.wasm` are files, `.css` is a style sheet and
   `.module.css` has local class names (exported as a default object and as named exports; `composes` within a
   file or `from "./other.module.css"`). A sheet's `@import`s are inlined in order (`@import "x" screen` wraps what

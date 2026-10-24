@@ -210,7 +210,7 @@ impl Shaker<'_> {
                 // Only a path was wanted, and resolved edges of this kind are never modules.
                 RequestKind::Resolve => {}
                 // A copied file: its module is kept so the file is written.
-                RequestKind::AssetUrl => self.work.push(Work::Module(*target)),
+                RequestKind::AssetUrl | RequestKind::WorkerUrl => self.work.push(Work::Module(*target)),
             }
         }
     }

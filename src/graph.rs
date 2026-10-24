@@ -152,6 +152,8 @@ pub struct Graph {
     pub modules: Vec<Module>,
     pub entries: Vec<ModuleId>,
     pub diagnostics: Vec<Diagnostic>,
+    /// Directories read for `import.meta.glob`: a file added to one changes the build.
+    pub watch_dirs: Vec<PathBuf>,
 }
 
 impl Graph {
@@ -193,11 +195,16 @@ pub struct GraphOptions {
     pub cache: Option<Arc<ModuleCache>>,
     /// Module federation: remotes and shared packages are not bundled in the usual way.
     pub federation: Option<Arc<crate::federation::Federation>>,
+    /// Builds a script on its own as an ES module (for `new Worker(new URL(...))` and `?worker`).
+    pub worker_builder: Option<Arc<WorkerBuilder>>,
 }
+
+/// A script built alone: its output, or what went wrong.
+pub type WorkerBuilder = dyn Fn(&Path) -> Result<Vec<u8>, String> + Send + Sync;
 
 impl Default for GraphOptions {
     fn default() -> Self {
-        GraphOptions { plugins: None, resolve: ResolveOptions::default(), jsx: JsxOptions::default(), decorator_metadata: false, experimental_decorators: false, strict_null_checks: false, loaders: Vec::new(), asset_names: "[name]-[hash]".to_string(), public_path: "./".to_string(), defines: Default::default(), external: Vec::new(), node_builtins: true, threads: 0, cache: None, federation: None }
+        GraphOptions { plugins: None, resolve: ResolveOptions::default(), jsx: JsxOptions::default(), decorator_metadata: false, experimental_decorators: false, strict_null_checks: false, loaders: Vec::new(), asset_names: "[name]-[hash]".to_string(), public_path: "./".to_string(), defines: Default::default(), external: Vec::new(), node_builtins: true, threads: 0, cache: None, federation: None, worker_builder: None }
     }
 }
 
@@ -288,6 +295,7 @@ struct Shared {
     /// The entry points, for plugins that are told of a module as it is read.
     entry_paths: std::collections::HashSet<PathBuf>,
     diagnostics: Vec<Diagnostic>,
+    watch_dirs: Vec<PathBuf>,
 }
 
 impl Shared {
@@ -430,7 +438,35 @@ impl Context<'_> {
         let mut resolve_dir: Option<PathBuf> = None;
         let mut plugin_side_effects: Option<bool> = None;
         let mut js_face: Option<String> = None;
-        let host = self.options.plugins.as_ref();
+        // `./w.js?worker` is a constructor for a worker; the script itself is built on its own and copied like an asset.
+        let worker = worker_query(&query);
+        let file_name_override = matches!(worker, Some(WorkerQuery::Bundled)).then(|| format!("{}.js", path.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
+        if let Some(kind) = &worker {
+            let build = |what: &str| -> Result<Vec<u8>, Diagnostic> {
+                let builder = self.options.worker_builder.as_ref().ok_or_else(|| error(format!("{what}: workers cannot be built here"), None))?;
+                builder(path).map_err(|m| error(m, None))
+            };
+            match kind {
+                WorkerQuery::Bundled => plugin_bytes = Some(build("worker")?),
+                WorkerQuery::Wrapper { shared, inline, url } => {
+                    let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    let code = if *url {
+                        format!("export default new URL({}, import.meta.url).href;\n", quote(&format!("./{file}?rk-worker")))
+                    } else {
+                        let class = if *shared { "SharedWorker" } else { "Worker" };
+                        if *inline {
+                            let script = String::from_utf8_lossy(&build("worker")?).into_owned();
+                            format!("var code = {};\nexport default function WorkerWrapper(options) {{\n  var url = URL.createObjectURL(new Blob([code], {{ type: \"text/javascript\" }}));\n  try {{ return new {class}(url, {{ type: \"module\", name: options && options.name }}); }} finally {{ URL.revokeObjectURL(url); }}\n}}\n", quote(&script))
+                        } else {
+                            format!("export default function WorkerWrapper(options) {{\n  return new {class}(new URL({}, import.meta.url), {{ type: \"module\", name: options && options.name }});\n}}\n", quote(&format!("./{file}")))
+                        }
+                    };
+                    plugin_text = Some(code);
+                    module_type = Some("js".to_string());
+                }
+            }
+        }
+        let host = self.options.plugins.as_ref().filter(|_| worker.is_none());
         if let Some(host) = host {
             if let Some(loaded) = host.load(&id).map_err(plugin_error)? {
                 plugin_text = loaded.code;
@@ -444,7 +480,11 @@ impl Context<'_> {
         }
         let extension = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
         let forced_asset = self.state.0.lock().unwrap().as_assets.contains(path);
-        let ext_loader = query_loader(&query).or_else(|| self.loader_for(path)).or(forced_asset.then_some(Loader::File));
+        let ext_loader = match &worker {
+            Some(WorkerQuery::Bundled) => Some(Loader::File),
+            Some(WorkerQuery::Wrapper { .. }) => None,
+            None => query_loader(&query).or_else(|| self.loader_for(path)).or(forced_asset.then_some(Loader::File)),
+        };
         let mut by_plugin = plugin_text.is_some() || plugin_bytes.is_some();
         if let Some(host) = host.filter(|h| h.has("transform")) {
             // Plugins see text: the file's, unless a loader reads it as bytes.
@@ -519,6 +559,8 @@ impl Context<'_> {
             Kind::Js(hint) => (None, true, hint, false),
         };
         let mut asset = None;
+        // A module that lists files is not kept between builds: a file added later changes it.
+        let mut used_glob = false;
         let mut css = None;
         let mut css_requests: Vec<Request> = Vec::new();
         let source = match loader {
@@ -528,7 +570,7 @@ impl Context<'_> {
                     (None, Some(text)) => text.into_bytes(),
                     (None, None) => self.resolver.read(path).map_err(|e| error(format!("Cannot read file: {e}"), None))?,
                 };
-                let file_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let file_name = file_name_override.clone().unwrap_or_else(|| path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
                 if loader.is_css() {
                     let text = String::from_utf8_lossy(&bytes).into_owned();
                     let local = loader == Loader::LocalCss;
@@ -575,6 +617,16 @@ impl Context<'_> {
                     (None, Some(bytes)) => String::from_utf8_lossy(&bytes).into_owned(),
                     (None, None) => self.resolver.read_to_string(path).map_err(|e| error(format!("Cannot read file: {e}"), None))?,
                 };
+                // `import.meta.glob(...)` becomes the imports of the files it names.
+                if text.contains("import.meta.glob") {
+                    let mut dirs = Vec::new();
+                    let rewritten = crate::glob::rewrite(&text, path, self.cwd, self.resolver.file_system(), &mut dirs).map_err(|m| error(m, None))?;
+                    self.state.0.lock().unwrap().watch_dirs.extend(dirs);
+                    if let Some(rewritten) = rewritten {
+                        text = rewritten;
+                        used_glob = true;
+                    }
+                }
                 // A map a plugin made points back to what it read; the maps this bundler builds
                 // follow it when it sits at the end of the text, as a file's own would.
                 if let Some(map) = map.take().filter(|_| !as_json) {
@@ -642,6 +694,7 @@ impl Context<'_> {
             Some(l) => l.is_css(),
             None => package.as_ref().is_none_or(|p| p.file_has_side_effects(path)),
         });
+        let stamp = if used_glob { None } else { stamp };
         let module = Module { id: ModuleId(slot as u32), path: module_path.to_path_buf(), source, kind, parsed, record, edges: Vec::new(), package, side_effects, asset, css, stamp };
         Ok(Processed { module, targets, diagnostics })
     }
@@ -660,6 +713,16 @@ impl Context<'_> {
 
     /// `relative_first`: a bare name in a style sheet is a path next to it before it is a package.
     fn resolve_request(&self, dir: &Path, file: &Path, request: &Request, relative_first: bool, diagnostics: &mut Vec<Diagnostic>) -> Target {
+        if request.kind == RequestKind::WorkerUrl {
+            // The script is built on its own: the module is the file with a mark that says so.
+            let mut plain = request.clone();
+            plain.specifier = request.specifier.trim_end_matches("?rk-worker").to_string();
+            return match self.resolve_request_inner(dir, file, &plain, relative_first, diagnostics) {
+                Target::Path(p) => Target::Asset(PathBuf::from(format!("{}?rk-worker", p.display()))),
+                Target::External(_) => Target::Unresolved,
+                other => other,
+            };
+        }
         let target = self.resolve_request_inner(dir, file, request, relative_first, diagnostics);
         if request.kind != RequestKind::AssetUrl {
             return target;
@@ -692,7 +755,7 @@ impl Context<'_> {
                 RequestKind::Dynamic => "dynamic-import",
                 RequestKind::Require => "require-call",
                 RequestKind::Resolve => "require-resolve",
-                RequestKind::AssetUrl => "import-statement",
+                RequestKind::AssetUrl | RequestKind::WorkerUrl => "import-statement",
             };
             match host.resolve_id(specifier, Some(&file.to_string_lossy()), false, plugin_kind) {
                 Ok(Some(found)) if found.external => return Target::External(found.id),
@@ -798,7 +861,7 @@ fn parse_file(source: &str, mode: Mode, syntax: ParseOptions) -> Result<(Parsed,
 /// Turns the discovery result into the final graph: modules renumbered in depth-first order
 /// from the entries, so the numbering does not depend on thread timing.
 fn finish(shared: Shared, entry_slots: &[usize]) -> Graph {
-    let Shared { mut modules, mut diagnostics, .. } = shared;
+    let Shared { mut modules, mut diagnostics, mut watch_dirs, .. } = shared;
     let mut visited = vec![false; modules.len()];
     let mut new_id: Vec<Option<u32>> = vec![None; modules.len()];
     let mut order: Vec<usize> = Vec::new();
@@ -835,7 +898,7 @@ fn finish(shared: Shared, entry_slots: &[usize]) -> Graph {
     // Thread timing also shuffles diagnostics; sort them so the output is stable.
     diagnostics.sort_by(|a, b| (&a.file, a.pos, &a.message).cmp(&(&b.file, b.pos, &b.message)));
     diagnostics.dedup_by(|a, b| a.file == b.file && a.pos == b.pos && a.message == b.message);
-    Graph { jsx: JsxOptions::default(), decorator_metadata: false, experimental_decorators: false, defines: Default::default(), modules: result, entries, diagnostics }
+    Graph { jsx: JsxOptions::default(), decorator_metadata: false, experimental_decorators: false, defines: Default::default(), modules: result, entries, diagnostics, watch_dirs: { watch_dirs.sort(); watch_dirs.dedup(); watch_dirs } }
 }
 
 const NODE_BUILTINS: &[&str] = &[
@@ -867,6 +930,28 @@ fn split_query(path: &Path) -> (PathBuf, String) {
     match text.rsplit_once('?') {
         Some((file, query)) if !file.is_empty() && !query.contains('/') && !text.starts_with('\0') => (PathBuf::from(file), query.to_string()),
         _ => (path.to_path_buf(), String::new()),
+    }
+}
+
+fn quote(text: &str) -> String {
+    Json::String(text.to_string()).to_string()
+}
+
+/// What a worker query asks for: the script built alone (what `new Worker(new URL(...))` copies), or a module that makes the worker.
+enum WorkerQuery {
+    Bundled,
+    Wrapper { shared: bool, inline: bool, url: bool },
+}
+
+fn worker_query(query: &str) -> Option<WorkerQuery> {
+    let parts: Vec<&str> = query.split('&').collect();
+    let has = |name: &str| parts.contains(&name);
+    if has("rk-worker") {
+        Some(WorkerQuery::Bundled)
+    } else if has("worker") || has("sharedworker") {
+        Some(WorkerQuery::Wrapper { shared: has("sharedworker"), inline: has("inline"), url: has("url") })
+    } else {
+        None
     }
 }
 

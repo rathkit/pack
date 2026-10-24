@@ -61,6 +61,14 @@ try {
   write('extra.js', 'export const extra = "x2";\n');
   await until('a rebuild after extra.js changed', () => output().includes('x2'));
 
+  // A file added to a directory that `import.meta.glob` lists is picked up, though no file the build read changed.
+  mkdirSync(join(dir, 'items'));
+  write('items/a.js', 'export default "g1";\n');
+  write('main.js', 'import { value } from "./dep.js";\nimport { extra } from "./extra.js";\nconst items = import.meta.glob("./items/*.js", { eager: true, import: "default" });\nconsole.log(value, extra, items);\n');
+  await until('a build that lists items', () => output().includes('g1'));
+  write('items/b.js', 'export default "g2";\n');
+  await until('a rebuild with a file added to the glob', () => output().includes('g2'));
+
   // The config is read again, so the new plugin's banner shows.
   write('rathkit.config.mjs', config('// config two'));
   await until('a restart with the new config', () => output().startsWith('// config two'));

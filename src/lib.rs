@@ -10,6 +10,7 @@ pub mod lexer;
 pub mod minify;
 pub mod bundle;
 pub(crate) mod compress;
+pub mod glob;
 pub mod graph;
 pub mod json;
 pub mod link;

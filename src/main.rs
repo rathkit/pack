@@ -785,7 +785,10 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
         origins.extend(cors_origins.iter().cloned());
         state.allow_origins(origins);
     }
-    let job = std::sync::Arc::new(Job { cwd, entries, options, bundle_options, treeshake, outfile, outdir, host: plugin_host, config_file, watch, serve: serve_state, bind: (host_name, port), restart_files });
+    // Workers are scripts built on their own; the files they read and the files they copy are noted for the build that asked.
+    let workers = std::sync::Arc::new(WorkerLog::default());
+    options.worker_builder = Some(worker_builder(cwd.clone(), options.clone(), bundle_options.clone(), treeshake, workers.clone(), 0));
+    let job = std::sync::Arc::new(Job { cwd, entries, options, bundle_options, treeshake, outfile, outdir, host: plugin_host, config_file, watch, serve: serve_state, bind: (host_name, port), restart_files, workers });
     if let Some(host) = &job.host {
         // Child compilers of webpack plugins build one entry as a script that sets a global.
         let for_children = job.clone();
@@ -820,6 +823,51 @@ struct Job {
     bind: (String, u16),
     /// Files read at startup whose change means starting again (`tsconfig.json`).
     restart_files: Vec<std::path::PathBuf>,
+    workers: std::sync::Arc<WorkerLog>,
+}
+
+/// What building workers read and wrote, kept for the build that asked for them.
+#[derive(Default)]
+struct WorkerLog {
+    watched: std::sync::Mutex<Vec<std::path::PathBuf>>,
+    /// Files the workers copy (images they import): name and bytes.
+    files: std::sync::Mutex<Vec<(String, Vec<u8>)>>,
+}
+
+/// Builds a script on its own as an ES module with the options of the main build: what a worker is made of.
+/// A worker that starts workers is built the same way, a few levels deep.
+fn worker_builder(cwd: std::path::PathBuf, options: rathkit_pack::graph::GraphOptions, bundle_options: rathkit_pack::bundle::Options, treeshake: bool, log: std::sync::Arc<WorkerLog>, depth: usize) -> std::sync::Arc<rathkit_pack::graph::WorkerBuilder> {
+    std::sync::Arc::new(move |entry: &std::path::Path| {
+        let mut inner = options.clone();
+        inner.cache = None;
+        inner.federation = None;
+        inner.worker_builder = (depth < 3).then(|| worker_builder(cwd.clone(), options.clone(), bundle_options.clone(), treeshake, log.clone(), depth + 1));
+        let graph = rathkit_pack::graph::build(&cwd, &[entry.to_string_lossy().into_owned()], &inner);
+        log.watched.lock().unwrap().extend(graph.modules.iter().map(|m| m.path.clone()).filter(|p| p.is_file()));
+        if graph.has_errors() {
+            return Err(graph.diagnostics.iter().filter(|d| d.severity == rathkit_pack::graph::Severity::Error).map(|d| d.message.clone()).collect::<Vec<_>>().join("\n"));
+        }
+        let linked = rathkit_pack::link::link(&graph);
+        let shaken = if treeshake { rathkit_pack::shake::shake(&graph, &linked) } else { rathkit_pack::shake::keep_everything(&graph) };
+        let mut o = bundle_options.clone();
+        o.format = rathkit_pack::bundle::Format::Esm;
+        o.global_name = None;
+        o.splitting = false;
+        o.sourcemap = rathkit_pack::bundle::SourceMapMode::None;
+        o.entry_names = Vec::new();
+        o.file_name = None;
+        o.globals = Vec::new();
+        o.federation = None;
+        o.hot = false;
+        o.map_base = None;
+        match rathkit_pack::bundle::bundle(&graph, &linked, &shaken, &o) {
+            Ok(output) => {
+                log.files.lock().unwrap().extend(output.files.iter().skip(1).filter_map(|f| f.data.as_ref().map(|d| (f.name.clone(), d.clone()))));
+                Ok(output.code.into_bytes())
+            }
+            Err(diagnostics) => Err(diagnostics.iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("\n")),
+        }
+    })
 }
 
 struct Outcome {
@@ -944,6 +992,8 @@ fn run_build(job: &Job) -> Outcome {
             }
         }
     }
+    outcome.watched.extend(job.workers.watched.lock().unwrap().drain(..));
+    outcome.watched.extend(graph.watch_dirs.iter().cloned());
     if let Some(host) = plugin_host {
         outcome.watched.extend(host.watch_files());
         let failure = graph.diagnostics.iter().find(|d| d.severity == Severity::Error).map(|d| d.message.clone());
@@ -1038,6 +1088,14 @@ fn run_build(job: &Job) -> Outcome {
         federation.remember(&bundle_options);
     }
     let mut result = rathkit_pack::bundle::bundle(&graph, &linked, &shaken, &bundle_options);
+    if let Ok(output) = &mut result {
+        // What the workers copy goes beside the rest.
+        for (name, data) in job.workers.files.lock().unwrap().drain(..) {
+            if !output.files.iter().any(|f| f.name == name) {
+                output.files.push(rathkit_pack::bundle::OutputFile { name, code: String::new(), map: None, data: Some(data) });
+            }
+        }
+    }
     if let (Ok(output), Some(federation)) = (&mut result, &options.federation) {
         if let Err(message) = federation.finish(output, bundle_options.hot, job.watch) {
             result = Err(vec![rathkit_pack::graph::Diagnostic { severity: Severity::Error, message, file: None, pos: None }]);

@@ -1,0 +1,2 @@
+[ './mods/a.js', './mods/b.ts', './mods/skip.js' ] [ './mods/a.js', './mods/sub/c.js' ] { './mods/a.js': 'a', './mods/sub/c.js': 'c' } { '/other/t.txt': 'text file\n' }
+b 1

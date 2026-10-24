@@ -25,6 +25,8 @@ pub enum RequestKind {
     Resolve,
     /// `new URL("./x.png", import.meta.url)`: a file copied to the output, whose new address replaces the string.
     AssetUrl,
+    /// `new Worker(new URL("./w.js", import.meta.url))`: the script is built on its own, and its file's address replaces the string.
+    WorkerUrl,
 }
 
 /// One distinct `(specifier, kind)` a module asks for, in the order first seen.
@@ -356,6 +358,16 @@ impl Builder<'_> {
             let at = dead.partition_point(|&(start, _)| start <= span.start);
             at > 0 && span.end <= dead[at - 1].1
         };
+        // The `new URL(...)` that is the first argument of `new Worker(...)` or `new SharedWorker(...)`.
+        let mut worker_urls: Vec<crate::ast::NodeId> = Vec::new();
+        for index in 1..=self.ast.node_count() {
+            let id = self.ast.node_id(index);
+            if let NodeKind::New { callee, args } = self.ast[id].kind {
+                if matches!(self.ast[callee].kind, NodeKind::Ident(n) if matches!(self.ast.atom(n), "Worker" | "SharedWorker")) && self.semantic.symbol_of(callee).is_none() {
+                    worker_urls.extend(self.ast.list(args).first().copied());
+                }
+            }
+        }
         for index in 1..=self.ast.node_count() {
             let id = self.ast.node_id(index);
             if !dead.is_empty() && is_dead(self.ast[id].span) {
@@ -380,7 +392,8 @@ impl Builder<'_> {
                         if let (true, NodeKind::Str(s)) = (is_meta_url, self.ast[*first].kind) {
                             let specifier = self.ast.atom(s);
                             if specifier.starts_with("./") || specifier.starts_with("../") {
-                                self.request_for(specifier, RequestKind::AssetUrl, Vec::new(), self.ast[*first].span);
+                                let kind = if worker_urls.contains(&id) || specifier.ends_with("?rk-worker") { RequestKind::WorkerUrl } else { RequestKind::AssetUrl };
+                                self.request_for(specifier, kind, Vec::new(), self.ast[*first].span);
                             }
                         }
                     }
