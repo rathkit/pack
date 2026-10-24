@@ -89,14 +89,16 @@ rathkit-pack bundle src/main.ts --outfile dist/app.mjs
   - `remotes` take `name@url`, `script url`, `{ external, shareScope, type }`, manifest URLs (`.json`), and code:
     `promise <expression>` / `var <expression>` give the container (or a promise of it) and `internal <module>` is a module of
     your application. `remoteType` (or `type` on one remote) says how an entry is loaded: a script that defines a global (the
-    default), an ES `module`, `commonjs`, or a SystemJS module (`system`). `import x from "remote/Button"`, `require` and
+    default), an ES `module`, `commonjs`, a SystemJS module (`system`), or a script that calls a function named like the
+    remote (`jsonp`). `import x from "remote/Button"`, `require` and
     `import()` all work, and named imports need no list of exports. A static import of a remote waits for it to load before the
     importing code runs, and so does any chunk with application code in it.
   - `shared` takes `singleton`, `requiredVersion` (from your `package.json` when not given), `strictVersion`, `eager`,
     `version`, `shareScope`, `import: false` (only consume), and a key ending in `/` for everything below a package
     (`lodash-es/`). `include` / `exclude` (`{ version, request, fallbackVersion }`) leave a copy out of sharing, so this
     application uses its own. `treeShaking` also writes the package with only the exports the application reads, in a file of
-    its own (an ES module package), which is used when it has all that is read and the full copy is not fetched. Every copy on
+    its own (an ES module package; other shared packages it reads are shared as usual), which is used when it has all that is
+    read and the full copy is not fetched. While watching, the copy is built again only when a file it is made of changes. Every copy on
     offer is put in the share scope and one is chosen by `shareStrategy` (`version-first`, or `loaded-first`), with npm's
     version range rules (checked against `semver`). A shared package that reads another (React DOM reads React) is loaded
     after it.
@@ -115,9 +117,11 @@ rathkit-pack bundle src/main.ts --outfile dist/app.mjs
     reloads the pages of hosts that use it.
   - `@module-federation/vite`'s `federation()` is read for its options by default. With `RATHKIT_REAL_FEDERATION_PLUGIN=1`
     the plugin itself is run by the plugin layer, and its remote loads in a host built here.
-  - A package with `treeShaking` is shared whole (with a warning) when it is CommonJS, reads other shared packages, or the
-    config has plugins. `promise`, `var` and `internal` addresses are code from the config, used as written. Not supported:
-    `jsonp` entries. A regular expression in `include` / `exclude` `request` goes as its source, without flags.
+  - A package with `treeShaking` is shared whole (with a warning) when it is CommonJS. `promise`, `var` and `internal`
+    addresses are code from the config, used as written. A regular expression in `include` / `exclude` `request` keeps its
+    flags. Types read by a host are kept up to date while watching: remotes are asked again (at most every ten seconds), a zip
+    that has not changed leaves the files alone, and the folders in `node_modules` are put back after packages are installed.
+    Under `nodenext`, a CommonJS project importing a remote gets TS1479, since the types are ES modules.
 - Tree-shakes at statement level, honoring `"sideEffects": false`.
 - `--define KEY=VALUE` (also `--define:KEY=VALUE`) replaces a global name, a chain such as
   `process.env.NODE_ENV`, or `import.meta.env.X` with a constant, another name or an expression.

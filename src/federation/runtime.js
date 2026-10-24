@@ -266,6 +266,13 @@ async function loadEntry(host, info) {
       const exports = await importEntry(entry);
       return exports.get || exports.init ? exports : exports.default;
     }
+    if (type === 'jsonp') {
+      // The script calls a global function named like the remote with its container.
+      return await new Promise((resolve, reject) => {
+        root[entryGlobalName] = resolve;
+        (isBrowser() ? loadScript(host, entry) : runScript(host, entry)).catch(reject);
+      });
+    }
     if (type === 'system' || type === 'systemjs') {
       if (!root.System || typeof root.System.import !== 'function') fail('RUNTIME-001', `${entry} is a SystemJS module and SystemJS is not on the page.`);
       return await root.System.import(entry);
@@ -478,7 +485,7 @@ function leftOut({ version = '0', include, exclude }, name) {
   const matches = (rule) => {
     if (!rule) return true;
     if (rule.version !== undefined && !satisfy(rule.fallbackVersion || version, rule.version)) return false;
-    if (rule.request !== undefined && !new RegExp(rule.request).test(name)) return false;
+    if (rule.request !== undefined && !(rule.request.__regexp === undefined ? new RegExp(rule.request) : new RegExp(rule.request.__regexp, rule.request.flags)).test(name)) return false;
     return true;
   };
   if (include && !matches(include)) return true;

@@ -1127,8 +1127,8 @@ async function init(params) {
   const input = config.input ?? config.build?.rollupOptions?.input ?? config.build?.lib?.entry;
   federationOptions ??= config.federation ?? config.moduleFederation ?? null;
   return {
-    // Functions and promises cannot be carried out of the host (a regular expression goes as its source); what is left is plain data.
-    federation: federationOptions ? JSON.parse(JSON.stringify(federationOptions, (key, value) => (typeof value === 'function' || value instanceof Promise ? undefined : value instanceof RegExp ? value.source : value))) : null,
+    // Functions and promises cannot be carried out of the host (a regular expression goes as its source and flags); what is left is plain data.
+    federation: federationOptions ? JSON.parse(JSON.stringify(federationOptions, (key, value) => (typeof value === 'function' || value instanceof Promise ? undefined : value instanceof RegExp ? { __regexp: value.source, flags: value.flags } : value))) : null,
     plugins: plugins.map((p) => p.name ?? 'anonymous'),
     hooks,
     define: Object.entries(configOptions.define).map(([k, v]) => [k, typeof v === 'string' ? v : JSON.stringify(v)]),

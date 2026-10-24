@@ -123,6 +123,8 @@ pub struct Federation {
     used: Mutex<BTreeSet<String>>,
     /// The types of the remotes were read once; the remotes may be down the first time, and a build can ask again.
     types_read: std::sync::atomic::AtomicBool,
+    /// The remotes whose types have been read.
+    types_remotes: Mutex<Vec<String>>,
     /// Which shared packages the bundled copy of each shared package reads (`shared:react-dom` reads `shared:react`):
     /// found from the module graph, so that the packages are loaded in an order that has each in place when it is read.
     needs: Mutex<std::collections::BTreeMap<String, BTreeSet<String>>>,
@@ -137,9 +139,10 @@ pub struct Federation {
     shaken: Mutex<Vec<(String, String)>>,
     /// Why a shared package got no copy with only the exports in use, said once the build is done.
     shaken_skipped: Mutex<Vec<String>>,
+    /// The copies with only some exports built so far: what they were made from, and the text.
+    shaken_cache: Mutex<HashMap<String, (Vec<(PathBuf, std::time::SystemTime)>, String)>>,
     /// The modules of the application that are containers (remotes written as `internal`).
     internal: Mutex<Vec<PathBuf>>,
-    plugins: std::sync::atomic::AtomicBool,
     /// The declarations written for the exposed modules by the last run, and whether another run is going.
     types_cache: Mutex<Option<Vec<OutputFile>>>,
     types_running: std::sync::atomic::AtomicBool,
@@ -282,7 +285,9 @@ impl Federation {
                 _ => None,
             };
             let remote_type = own.unwrap_or(remote_type);
-            let kind = if remote_type == "system" || remote_type == "systemjs" {
+            let kind = if remote_type == "jsonp" {
+                "jsonp"
+            } else if remote_type == "system" || remote_type == "systemjs" {
                 "system"
             } else if entry.ends_with(".mjs") || remote_type == "module" {
                 "module"
@@ -431,6 +436,7 @@ impl Federation {
             files: RwLock::new(Arc::new(HashMap::new())),
             used: Mutex::new(BTreeSet::new()),
             types_read: std::sync::atomic::AtomicBool::new(false),
+            types_remotes: Mutex::new(Vec::new()),
             needs: Mutex::new(std::collections::BTreeMap::new()),
             fallbacks: Mutex::new(HashMap::new()),
             reads: Mutex::new(std::collections::BTreeMap::new()),
@@ -438,8 +444,8 @@ impl Federation {
             bundle_options: Mutex::new(None),
             shaken: Mutex::new(Vec::new()),
             shaken_skipped: Mutex::new(Vec::new()),
+            shaken_cache: Mutex::new(HashMap::new()),
             internal: Mutex::new(Vec::new()),
-            plugins: std::sync::atomic::AtomicBool::new(false),
             types_cache: Mutex::new(None),
             types_running: std::sync::atomic::AtomicBool::new(false),
             types_hook: Mutex::new(None),
@@ -628,7 +634,8 @@ impl Federation {
         let at = |name: &str| PathBuf::from(format!("{ROOT}/{name}"));
         files.insert(at("runtime.js"), RUNTIME.to_string());
         files.insert(at("semver.js"), SEMVER.to_string());
-        files.insert(at("values.js"), "export const values = Object.create(null);\n".to_string());
+        // One table for the whole application, even for the copies built apart, which have a values.js of their own.
+        files.insert(at("values.js"), format!("export const values = (((globalThis.__FEDERATION__ ||= {{}}).__RATHKIT_VALUES__ ||= {{}})[{}] ||= Object.create(null));\n", quote(&self.name)));
         files.insert(at("start.js"), format!("import {{ ready }} from {};\nawait ready();\n", quote(&format!("{ROOT}/core.js"))));
 
         let resolve_path = |specifier: &str| -> Result<(PathBuf, Option<String>), String> {
@@ -642,7 +649,6 @@ impl Federation {
         let mut shared_used: Vec<String> = Vec::new();
         let reads = self.reads.lock().expect("reads").clone();
         let needs = self.needs.lock().expect("needs").clone();
-        let has_plugins = self.plugins.load(std::sync::atomic::Ordering::SeqCst);
         let mut skipped: Vec<String> = Vec::new();
         let mut internal: Vec<PathBuf> = Vec::new();
         let mut shaken: Vec<(String, String)> = Vec::new();
@@ -683,12 +689,7 @@ impl Federation {
             let config = format!("{{ singleton: {}, requiredVersion: {required}, strictVersion: {}, eager: {}{filters} }}", item.singleton, item.strict_version, item.eager);
             let version_text = version.as_deref().map_or("\"0\"".to_string(), quote);
             // With treeShaking: a second copy that has only the exports the application reads, for others whose needs it covers.
-            let reads_others = needs.get(&format!("shared:{key}")).is_some_and(|n| !n.is_empty());
-            if item.tree_shaking.is_some() && (reads_others || has_plugins) && matches!(reads.get(key), Some((Some(_), true))) {
-                skipped.push(format!("{key}: {}", if reads_others { "it reads other shared packages, which a copy built apart would bundle again" } else { "plugins would see it built twice" }));
-            }
             let shaken = match (&item.tree_shaking, &fallback, reads.get(key)) {
-                _ if reads_others || has_plugins => String::new(),
                 (Some(mode), Some(path), Some((Some(used), true))) if !used.is_empty() => {
                     let list: Vec<&String> = used.iter().collect();
                     let names = list.iter().map(|n| quote(n)).collect::<Vec<_>>().join(", ");
@@ -706,6 +707,10 @@ impl Federation {
                     let file = format!("shaken-{}.js", key.replace(['/', '@'], "_"));
                     shaken.push((key.to_string(), file.clone()));
                     format!(", treeShaking: {{ mode: {}, usedExports: [{names}], get: () => import(new URL({}, import.meta.url).href).then((ns) => () => rt.fallbackValue(ns)) }}", quote(mode), quote(&file))
+                }
+                (Some(_), Some(_), Some((_, false))) => {
+                    skipped.push(format!("{key}: it is CommonJS, whose exports are only known as it runs"));
+                    String::new()
                 }
                 _ => String::new(),
             };
@@ -868,7 +873,6 @@ impl Federation {
         }
         let mut roots: Vec<String> = absolute.iter().enumerate().map(|(i, p)| self.wrap_entry(i, p)).collect();
         roots.push(self.core_path().to_string_lossy().into_owned());
-        self.plugins.store(options.plugins.is_some(), std::sync::atomic::Ordering::SeqCst);
         let mut alone = options.clone();
         alone.federation = None;
         alone.cache = None;
@@ -979,11 +983,24 @@ impl Federation {
     /// happens beside the build and is tried again, at most every ten seconds, until every remote has answered.
     pub fn read_types(self: &Arc<Self>, background: bool) {
         use std::sync::atomic::Ordering::SeqCst;
-        if !self.dts.consume || self.remotes.is_empty() || self.types_read.load(SeqCst) || !self.cwd.join("tsconfig.json").is_file() {
+        if !self.dts.consume || self.remotes.is_empty() || !self.cwd.join("tsconfig.json").is_file() {
+            return;
+        }
+        // Installing packages removes the folders that stand for the remotes in node_modules; they are put back from what was read.
+        if self.types_read.load(SeqCst) && background {
+            let gone = self.types_remotes.lock().expect("types_remotes").iter().any(|name| !self.cwd.join("node_modules").join(name).join("package.json").is_file());
+            if gone {
+                let input = format!("{{\"command\":\"link\",\"cwd\":{},\"typesFolder\":{}}}", quote(&self.cwd.to_string_lossy()), quote(&self.dts.consume_folder));
+                let _ = run_node(DTS, &input, &self.cwd);
+            }
+        }
+        // A one-off build reads once; while watching, the remotes are asked again (at most every ten seconds), since a remote that
+        // is up may have new types, and a zip that has not changed leaves the files alone.
+        if self.types_read.load(SeqCst) && !background {
             return;
         }
         if background {
-            if self.last_read.lock().expect("last_read").is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(10)) || self.reading.swap(true, SeqCst) {
+            if self.last_read.lock().expect("last_read").is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(std::env::var("RATHKIT_TYPES_RETRY_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(10_000))) || self.reading.swap(true, SeqCst) {
                 return;
             }
             *self.last_read.lock().expect("last_read") = Some(std::time::Instant::now());
@@ -1008,6 +1025,7 @@ impl Federation {
                     }
                 }
                 let got = answer.get("fetched").and_then(Json::as_array).map_or(0, |a| a.len());
+                *self.types_remotes.lock().expect("types_remotes") = answer.get("fetched").and_then(Json::as_array).map_or(Vec::new(), |a| a.iter().filter_map(|n| n.as_str().map(String::from)).collect());
                 if got == self.remotes.iter().filter(|r| !matches!(r.kind.as_str(), "code" | "internal")).count() {
                     self.types_read.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
@@ -1066,14 +1084,25 @@ impl Federation {
     /// nothing the others in the build use (code shared between chunks would pull in the whole package).
     fn shaken_files(self: &Arc<Self>) -> Vec<OutputFile> {
         let list = self.shaken.lock().expect("shaken").clone();
-        let (Some(graph_options), Some(mut bundle_options)) = (self.graph_options.lock().expect("graph_options").clone(), self.bundle_options.lock().expect("bundle_options").clone()) else { return Vec::new() };
+        let (Some(mut graph_options), Some(mut bundle_options)) = (self.graph_options.lock().expect("graph_options").clone(), self.bundle_options.lock().expect("bundle_options").clone()) else { return Vec::new() };
         bundle_options.splitting = false;
         bundle_options.federation = None;
         bundle_options.sourcemap = crate::bundle::SourceMapMode::None;
         bundle_options.entry_names = Vec::new();
         bundle_options.file_name = None;
+        // Other shared packages it reads are read from the application's table of what was loaded, as in the rest of the build.
+        graph_options.federation = Some(self.clone());
+        let used = self.reads.lock().expect("reads").clone();
         let mut files = Vec::new();
         for (key, file) in list {
+            // The same copy as last time unless a file it is made of, or what is read from it, has changed.
+            let signature = format!("{key}|{:?}|{:?}", used.get(&key).map(|(u, _)| u), bundle_options.minify);
+            if let Some((stamps, code)) = self.shaken_cache.lock().expect("shaken_cache").get(&signature) {
+                if stamps.iter().all(|(path, time)| std::fs::metadata(path).and_then(|m| m.modified()).is_ok_and(|t| t == *time)) {
+                    files.push(OutputFile { name: file, code: code.clone(), map: None, data: None });
+                    continue;
+                }
+            }
             let entry = format!("{ROOT}/shaken/{key}.js");
             let fs = Box::new(Overlay { federation: self.clone(), inner: Box::new(crate::resolve::RealFs) });
             let graph = crate::graph::build_with_fs(fs, &self.cwd, &[entry], &graph_options);
@@ -1084,7 +1113,11 @@ impl Federation {
             let linked = crate::link::link(&graph);
             let shaken = crate::shake::shake(&graph, &linked);
             match crate::bundle::bundle(&graph, &linked, &shaken, &bundle_options) {
-                Ok(output) => files.push(OutputFile { name: file, code: output.code, map: None, data: None }),
+                Ok(output) => {
+                    let stamps: Vec<(PathBuf, std::time::SystemTime)> = graph.modules.iter().filter_map(|m| std::fs::metadata(&m.path).and_then(|md| md.modified()).ok().map(|t| (m.path.clone(), t))).collect();
+                    self.shaken_cache.lock().expect("shaken_cache").insert(signature, (stamps, output.code.clone()));
+                    files.push(OutputFile { name: file, code: output.code, map: None, data: None });
+                }
                 Err(problems) => eprintln!("warning: the copy of {key} with only the exports in use was not built: {}", problems.first().map_or("", |d| d.message.as_str())),
             }
         }
@@ -1102,7 +1135,11 @@ impl Federation {
         for reason in self.shaken_skipped.lock().expect("shaken_skipped").iter() {
             eprintln!("warning: no copy of {reason} was written with only the exports in use; it is shared whole");
         }
+        let started = std::time::Instant::now();
         output.files.extend(self.shaken_files());
+        if std::env::var_os("RATHKIT_TIMING").is_some() {
+            eprintln!("  federation: copies with only some exports: {:.1} ms", started.elapsed().as_secs_f64() * 1000.0);
+        }
         let types = self.types_files(repeated);
         let has_types = types.iter().any(|f| f.name == format!("{}.zip", self.dts.types_folder));
         output.files.extend(types);
@@ -1151,6 +1188,7 @@ impl Federation {
             "this" => format!("this[{}] = {container};\n", quote(name)),
             "assign" | "assign-properties" => format!("{name} = {container};\n"),
             "commonjs" | "commonjs2" => format!("module.exports = {container};\n"),
+            "jsonp" => format!("{name}({container});\n"),
             "system" => format!("System.register([], (exports, context) => ({{ execute: () => {{ exports({container}); }} }}));\n"),
             "umd" => format!("(function (root, factory) {{ if (typeof exports === 'object' && typeof module === 'object') module.exports = factory(); else root[{}] = factory(); }})(typeof self !== 'undefined' ? self : this, () => {container});\n", quote(name)),
             _ => format!("var {name};\n{name} = {container};\n"),
@@ -1251,6 +1289,7 @@ impl Federation {
                 "module" => "module",
                 "commonjs" | "commonjs2" => "commonjs",
                 "system" => "system",
+                "jsonp" => "jsonp",
                 _ => "global",
             }),
             global = quote(&self.library_name),

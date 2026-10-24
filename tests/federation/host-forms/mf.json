@@ -6,6 +6,10 @@
     "sapp": {
       "external": "sapp@http://localhost:4310/remoteEntry.js",
       "type": "system"
+    },
+    "japp": {
+      "external": "japp@http://localhost:4312/remoteEntry.js",
+      "type": "jsonp"
     }
   },
   "shared": {

@@ -1,0 +1,6 @@
+{
+  "name": "japp",
+  "library": { "type": "jsonp" },
+  "exposes": { "./Button": "./src/Button.js" },
+  "shared": { "react": { "singleton": true, "requiredVersion": "^19.0.0" } }
+}

@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
+import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 
 const request = JSON.parse(fs.readFileSync(0, 'utf8'));
@@ -207,17 +208,24 @@ async function consume({ remotes, typesFolder = '@mf-types', updateTsConfig = fa
       if (!types?.zip) continue;
       const publicPath = manifest.metaData.publicPath && manifest.metaData.publicPath !== 'auto' ? manifest.metaData.publicPath : manifestUrl;
       const zipUrl = new URL(`${types.path ? types.path.replace(/\/?$/, '/') : ''}${types.zip}`, publicPath).href;
-      const files = zipRead(Buffer.from(await (await get(zipUrl, 15000)).arrayBuffer()));
+      const zip = Buffer.from(await (await get(zipUrl, 15000)).arrayBuffer());
+      const files = zipRead(zip);
       const folder = path.join(root, remote.name);
-      fs.rmSync(folder, { recursive: true, force: true });
-      for (const [file, data] of files) {
-        const target = path.join(folder, file);
-        if (!target.startsWith(folder + path.sep)) continue;
-        fs.mkdirSync(path.dirname(target), { recursive: true });
-        fs.writeFileSync(target, data);
+      // The same zip as last time: the files stay as they are (an editor watching them has nothing to read again).
+      const stamp = path.join(folder, '.zip-sha256');
+      const sha = createHash('sha256').update(zip).digest('hex');
+      if (!(fs.existsSync(stamp) && fs.readFileSync(stamp, 'utf8') === sha)) {
+        fs.rmSync(folder, { recursive: true, force: true });
+        for (const [file, data] of files) {
+          const target = path.join(folder, file);
+          if (!target.startsWith(folder + path.sep)) continue;
+          fs.mkdirSync(path.dirname(target), { recursive: true });
+          fs.writeFileSync(target, data);
+        }
+        // The declarations are ES modules, whatever the project around them is.
+        fs.writeFileSync(path.join(folder, 'package.json'), JSON.stringify({ private: true, type: 'module' }) + '\n');
+        fs.writeFileSync(stamp, sha);
       }
-      // The declarations are ES modules, whatever the project around them is.
-      fs.writeFileSync(path.join(folder, 'package.json'), JSON.stringify({ private: true, type: 'module' }) + '\n');
       const apis = files.find(([f]) => f === 'apis.d.ts')?.[1].toString() ?? '';
       modules[remote.name] = {};
       for (const [, key, file] of apis.matchAll(/T extends '([^']+)' \? typeof import\('\.\/([^']+)'\)/g)) {
@@ -236,9 +244,31 @@ async function consume({ remotes, typesFolder = '@mf-types', updateTsConfig = fa
   return { fetched };
 }
 
+// Puts the shims for the remotes' modules in node_modules again from the declarations already in @mf-types, with no network:
+// installing packages removes them.
+function link({ typesFolder = '@mf-types' }) {
+  const root = path.resolve(cwd, typesFolder);
+  const modules = {};
+  const linked = [];
+  for (const name of fs.existsSync(root) ? fs.readdirSync(root) : []) {
+    const folder = path.join(root, name);
+    const apisFile = path.join(folder, 'apis.d.ts');
+    if (!fs.existsSync(apisFile)) continue;
+    modules[name] = {};
+    for (const [, key, file] of fs.readFileSync(apisFile, 'utf8').matchAll(/T extends '([^']+)' \? typeof import\('\.\/([^']+)'\)/g)) {
+      const real = path.join(folder, file);
+      const text = fs.existsSync(`${real}.d.ts`) ? fs.readFileSync(`${real}.d.ts`, 'utf8') : '';
+      modules[name][key.slice(name.length + 1)] = { file: real, hasDefault: hasDefault(text) };
+    }
+    linked.push(name);
+  }
+  linkModules(modules);
+  return { linked };
+}
+
 let answer;
 try {
-  answer = request.command === 'generate' ? generate(request) : await consume(request);
+  answer = request.command === 'generate' ? generate(request) : request.command === 'link' ? link(request) : await consume(request);
 } catch (error) {
   answer = { error: String(error?.stack ?? error) };
 }

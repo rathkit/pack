@@ -249,6 +249,8 @@ test('include and exclude leave a copy out of sharing: this application uses its
   assert.equal((await run({ exclude: { version: '^2.0.0' } })).lib.from, 'host', 'its 2.0.0 is excluded');
   assert.equal((await run({ exclude: { version: '^3.0.0' } })).lib.from, 'remote', 'it is not');
   assert.equal((await run({ exclude: { request: '^lib$' } })).lib.from, 'host', 'by request');
+  assert.equal((await run({ exclude: { request: { __regexp: '^LIB$', flags: 'i' } } })).lib.from, 'host', 'by a regular expression with its flags');
+  assert.equal((await run({ exclude: { request: { __regexp: '^LIB$', flags: '' } } })).lib.from, 'remote', 'and without them it does not match');
   const { h } = await run({ exclude: { version: '^2.0.0' } });
   assert.ok(!h.shareScopeMap.default.lib?.['2.0.0'], 'and it is not offered to others');
 });

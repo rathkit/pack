@@ -5,7 +5,7 @@
 // `npm ci --prefix bench`. Without a browser it says so and passes.
 import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, writeFileSync, mkdtempSync, rmSync, cpSync, symlinkSync, mkdirSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync, mkdtempSync, rmSync, cpSync, symlinkSync, mkdirSync, statSync } from 'node:fs';
 import { join, dirname, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir, homedir } from 'node:os';
@@ -342,6 +342,32 @@ scenario('types: a remote publishes declarations and a host checks its imports a
   check('and runs', r.title === 'done' && /typed:3/.test(r.text ?? ''), JSON.stringify(r));
 });
 
+scenario('types stay fresh while serving: the folder of a remote in node_modules comes back after packages are installed', async () => {
+  const typescript = join(bench, 'node_modules', 'typescript', 'bin', 'tsc');
+  if (!existsSync(typescript)) return;
+  const remote = await build('remote-types', { entry: 'src/index.ts' });
+  serve(4260, remote);
+  const hostDir = copy('host-types', 'host-types-serve', false);
+  const server = spawn(bin, ['serve', 'src/index.ts', '--federation', 'mf.json', '--port', '4362'], { cwd: hostDir, stdio: 'ignore', env: { ...process.env, RATHKIT_TYPES_RETRY_MS: '300' } });
+  const shim = join(hostDir, 'node_modules', 'r3', 'package.json');
+  const declaration = join(hostDir, '@mf-types', 'r3', 'compiled-types', 'Button.d.ts');
+  const waitFor = async (condition, ms = 10000) => {
+    for (let i = 0; i < ms / 100 && !condition(); i++) await new Promise((r) => setTimeout(r, 100));
+    return condition();
+  };
+  try {
+    check('the types are read when serving starts', await waitFor(() => existsSync(shim)));
+    const written = existsSync(declaration) ? statSync(declaration).mtimeMs : 0;
+    rmSync(join(hostDir, 'node_modules'), { recursive: true, force: true });
+    const source = join(hostDir, 'src', 'index.ts');
+    writeFileSync(source, readFileSync(source, 'utf8') + '\n// edited\n');
+    check('and put back after node_modules is removed, when the next build comes', await waitFor(() => existsSync(shim)));
+    check('without writing the declarations again, as the remote\'s zip has not changed', statSync(declaration).mtimeMs === written);
+  } finally {
+    server.kill();
+  }
+});
+
 scenario('style sheets of an exposed module load with it, by the container and by the manifest', async () => {
   const remote = await build('remote-css');
   const host = await build('host-css');
@@ -382,17 +408,20 @@ if (haveRspack) {
   });
 }
 
-scenario('the other forms of a remote\'s address (script, promise) and a container that is a SystemJS module', async () => {
+scenario('the other forms of a remote\'s address (script, promise), and containers that are SystemJS or jsonp', async () => {
   const remote = await build('remote');
   const system = await build('remote-system');
+  const jsonp = await build('remote-jsonp');
   const host = await build('host-forms');
   check('the container is registered with System', /System\.register\(/.test(readFileSync(join(system, 'remoteEntry.js'), 'utf8')));
+  check('the jsonp container calls the function named like the remote', /^japp\(/m.test(readFileSync(join(jsonp, 'remoteEntry.js'), 'utf8')));
   serve(4210, remote);
   serve(4310, system);
+  serve(4312, jsonp);
   serve(4311, host);
   const r = await visit('http://localhost:4311/');
   check('page finished', r.title === 'done', JSON.stringify(r));
-  check('all three load their module', /script button 19\.3\.1/.test(r.text ?? '') && /promise button 19\.3\.1/.test(r.text ?? '') && /system button 19\.3\.1/.test(r.text ?? ''), r.text);
+  check('all three load their module', /script button 19\.3\.1/.test(r.text ?? '') && /promise button 19\.3\.1/.test(r.text ?? '') && /system button 19\.3\.1/.test(r.text ?? '') && /jsonp button 19\.3\.1/.test(r.text ?? ''), r.text);
   check('no errors', !r.logs.some((l) => /EXCEPTION/.test(l)), r.logs.join('\n'));
 });
 
@@ -413,16 +442,24 @@ scenario('a shared package written with only the exports the application reads (
   }
 });
 
-scenario('treeShaking of a package that reads another shared package: it is shared whole, and they share one React', async () => {
+scenario('treeShaking of a package that reads another shared package: its small copy reads the same React', async () => {
   const dir = copy('host-shake-react', 'host-shake-react', false);
   mkdirSync(join(dir, 'node_modules'));
   symlinkSync(join(bench, 'node_modules', 'react'), join(dir, 'node_modules', 'react'), 'dir');
   cpSync(join(dir, 'ui-lib'), join(dir, 'node_modules', 'ui-lib'), { recursive: true });
   const host = await build('host-shake-react', { links: false });
-  check('no copy with only some exports is written, since it would bundle its own React', !readdirSync(host).some((f) => f.startsWith('shaken-')), readdirSync(host).join(','));
+  check('a copy with only the exports in use is written', existsSync(join(host, 'shaken-ui-lib.js')), readdirSync(host).join(','));
+  check('and it has no React of its own', existsSync(join(host, 'shaken-ui-lib.js')) && readFileSync(join(host, 'shaken-ui-lib.js'), 'utf8').length < 3000, existsSync(join(host, 'shaken-ui-lib.js')) ? String(readFileSync(join(host, 'shaken-ui-lib.js'), 'utf8').length) : '');
   serve(4340, host);
-  const r = await visit('http://localhost:4340/');
-  check('the package uses the host\'s React', r.title === 'done' && /lib 19\.3\.1 same=true/.test(r.text ?? ''), JSON.stringify(r));
+  const page = await openPage('http://localhost:4340/');
+  try {
+    const r = await page.settled(8000);
+    check('the package uses the host\'s React', r.title === 'done' && /lib 19\.3\.1 same=true/.test(r.text ?? ''), JSON.stringify(r));
+    const loaded = (await page.eval("performance.getEntriesByType('resource').map((e) => e.name.split('/').pop()).join(',')")).split(',');
+    check('and it is the small copy that is fetched', loaded.includes('shaken-ui-lib.js'), loaded.join(','));
+  } finally {
+    page.close();
+  }
 });
 
 scenario('a remote that is a module of the application (internal), imported statically and with import()', async () => {
