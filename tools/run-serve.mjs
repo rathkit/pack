@@ -31,7 +31,7 @@ export default {
       return { html, tags: [{ tag: 'meta', attrs: { name: 'injected', content: 'yes' }, injectTo: 'head' }] };
     },
     handleHotUpdate({ file, server }) {
-      if (file.endsWith('note.txt')) { server.ws.send('note-changed', { file: file.split('/').pop() }); return []; }
+      if (file.endsWith('note.txt')) { server.ws.send('note-changed', { file: file.split(/[\\/]/).pop() }); return []; }
     },
   }],
 };

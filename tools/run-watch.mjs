@@ -20,7 +20,7 @@ export default {
   plugins: [{
     name: 'recorder',
     buildStart() { note('start watch=' + this.meta.watchMode); },
-    watchChange(id, { event }) { note('change ' + id.split('/').pop() + ' ' + event); },
+    watchChange(id, { event }) { note('change ' + id.split(/[\\\\/]/).pop() + ' ' + event); },
     renderChunk(code) { return { code: ${JSON.stringify(banner)} + '\\n' + code, map: null }; },
     closeWatcher() { note('closeWatcher'); },
   }],
