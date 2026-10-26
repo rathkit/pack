@@ -27,11 +27,17 @@ First release.
 - Module federation: containers, remotes, shared packages, the manifest, generated and consumed
   types, runtime plugins and development servers, compatible with the containers rspack and
   Vite build (tested in Chromium).
-- `--watch` and `serve` (a development server with live reload).
+- `--watch` and `serve` (a development server with live reload). Stopping `--watch` cleanly with Ctrl-C is tested on
+  Linux and macOS only.
 - Release files: one tarball per platform, `SHA256SUMS`, an SBOM that lists zero components, and
   Sigstore signatures. The binaries are not signed with an operating-system key; see
   [docs/verifying.md](docs/verifying.md).
 - The command is `rkp`. `rkp --version`.
-- `rkp bundle index.html --outdir dist`: the page's module scripts are built, the page is rewritten, and plugins' `transformIndexHtml` runs on it.
+- Pages: `rkp bundle index.html --outdir dist` builds the module scripts and linked style sheets a page names, copies the
+  images and media it names and `public/`, rewrites the page, and runs plugins' `transformIndexHtml` on it (ES modules, or
+  one file with `--format iife`).
+- `import.meta.glob`, and workers (`new Worker(new URL(...))`, `?worker`, `?sharedworker`, with `&inline` and `&url`).
+- Builds for linux (x64 and arm64, glibc and musl), macOS (arm64 and x64) and Windows (x64). The unit tests that use fake
+  Unix paths run on Unix only; each release build bundles and runs a program with the binary it made.
 - A JavaScript API in `@rathkit/pack`: `build(options)`, `serve(options)`, `run(args)`, with types.
 - npm packages: `@rathkit/pack` (a launcher) and one package per platform, published with provenance on the `next` tag.
