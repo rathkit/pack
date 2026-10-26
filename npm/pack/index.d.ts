@@ -59,6 +59,12 @@ export interface Options {
   define?: Record<string, string>;
   /** How files with an extension are loaded: `{ '.svg': 'dataurl' }` (text, base64, dataurl, binary, file, empty, css, local-css). */
   loader?: Record<string, 'text' | 'base64' | 'dataurl' | 'binary' | 'file' | 'empty' | 'css' | 'local-css'>;
+  /** The names of entry files, with `[name]` and `[hash]` filled in (a hash of what is in the file and in the files it loads, so a name changes when anything the file runs does). Default `[name]`. No directories. */
+  entryNames?: string;
+  /** The names of the other files (shared code, `import()`ed code), with `[name]` and `[hash]`. Default `[name]-[hash]`. No directories. */
+  chunkNames?: string;
+  /** The extension of each kind of output file: `{ '.js': '.mjs' }`. */
+  outExtension?: { '.js'?: string; '.css'?: string };
   /** The names of copied files; `[name]`, `[hash]` and `[ext]` (no dot) are filled in. */
   assetNames?: string;
   /** What copied files' addresses start with. */

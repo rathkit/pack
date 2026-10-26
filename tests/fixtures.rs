@@ -324,3 +324,46 @@ fn a_call_given_to_pure_is_removed_when_unused() {
     assert_eq!(build_and_run(&dir, &["--pure:styled.div", "--pure", "make"], &[]), "effect ran\nmake ran\nmake ran\nused 2");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn files_are_named_by_templates_and_the_hash_follows_what_they_run() {
+    if Command::new("node").arg("--version").output().is_err() {
+        return;
+    }
+    let dir = scratch("names");
+    let write = |name: &str, text: &str| std::fs::write(dir.join(name), text).unwrap();
+    write("shared.js", "export const shared = 'shared';\n");
+    write("a.js", "import './a.css';\nimport { shared } from './shared.js';\nexport const lazy = () => import('./lazy.js');\nconsole.log('a', shared);\nlazy().then((m) => console.log(m.default));\n");
+    write("b.js", "import { shared } from './shared.js';\nconsole.log('b', shared);\n");
+    write("lazy.js", "import { shared } from './shared.js';\nexport default 'lazy ' + shared;\n");
+    write("a.css", "p { color: red }\n");
+    let flags = ["--outdir", "out", "--splitting", "--entry-names=[name]-[hash]", "--chunk-names=asset-[name]-[hash]", "--out-extension:.js=.mjs", "--out-extension:.css=.styles"];
+    let build = |out: &str| {
+        let mut args = vec!["bundle", "a.js", "b.js"];
+        args.extend(flags.iter().map(|f| if *f == "out" { out } else { *f }));
+        let built = Command::new(env!("CARGO_BIN_EXE_rkp")).current_dir(&dir).args(args).output().expect("rkp starts");
+        assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+        let mut names: Vec<String> = std::fs::read_dir(dir.join(out)).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        names
+    };
+    let first = build("out1");
+    // Entries `name-hash`, the rest `asset-name-hash`, the scripts `.mjs`, the sheet `.styles`.
+    let shape = |name: &str, prefix: &str, ext: &str| name.starts_with(prefix) && name.ends_with(ext) && name.len() == prefix.len() + 8 + ext.len();
+    assert!(first.iter().any(|n| shape(n, "a-", ".mjs")) && first.iter().any(|n| shape(n, "b-", ".mjs")) && first.iter().any(|n| shape(n, "a-", ".styles")), "{first:?}");
+    assert!(first.iter().any(|n| shape(n, "asset-chunk-", ".mjs")) && first.iter().any(|n| shape(n, "asset-lazy-", ".mjs")), "{first:?}");
+    assert_eq!(first.len(), 5, "{first:?}");
+    // The program runs under those names (the files load one another by them).
+    let entry = first.iter().find(|n| shape(n, "a-", ".mjs")).unwrap();
+    let run = Command::new("node").current_dir(dir.join("out1")).arg(entry).output().expect("node starts");
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "a shared\nlazy shared\n", "{}", String::from_utf8_lossy(&run.stderr));
+    // The same build has the same names; a change in a module two files share changes the names of the files that run it, entry and lazy chunk alike.
+    assert_eq!(build("out2"), first);
+    write("shared.js", "export const shared = 'changed';\n");
+    let changed = build("out3");
+    assert!(first.iter().all(|n| !changed.contains(n)), "{first:?} -> {changed:?}");
+    // Not supported: a directory in a name.
+    let bad = Command::new(env!("CARGO_BIN_EXE_rkp")).current_dir(&dir).args(["bundle", "a.js", "--outdir", "x", "--splitting", "--chunk-names=sub/[name]"]).output().unwrap();
+    assert_eq!(bad.status.code(), Some(2));
+    let _ = std::fs::remove_dir_all(&dir);
+}

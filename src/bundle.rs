@@ -217,6 +217,12 @@ pub struct Options {
     /// Remove every `console.*(...)` call, and every `debugger` statement.
     pub drop_console: bool,
     pub drop_debugger: bool,
+    /// How files are named: `[name]` and `[hash]` (a hash of what is in the file and in the files it loads) filled in. Entries and the
+    /// other chunks have a template each; none means the names the build chooses (`name`, and `name-hash` or `chunk-hash` for the rest).
+    pub entry_template: Option<String>,
+    pub chunk_template: Option<String>,
+    /// The extension of each kind of output file, by the one it would have: `(".js", ".mjs")`.
+    pub out_extensions: Vec<(String, String)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -233,7 +239,7 @@ pub enum SourceMapMode {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { splitting: false, format: Format::Esm, global_name: None, globals: Vec::new(), original_paths: false, minify: crate::minify::Options::default(), sourcemap: SourceMapMode::None, sources_content: true, map_base: None, file_name: None, hot: false, entry_names: Vec::new(), federation: None, banner_js: None, footer_js: None, banner_css: None, footer_css: None, drop_console: false, drop_debugger: false }
+        Options { splitting: false, format: Format::Esm, global_name: None, globals: Vec::new(), original_paths: false, minify: crate::minify::Options::default(), sourcemap: SourceMapMode::None, sources_content: true, map_base: None, file_name: None, hot: false, entry_names: Vec::new(), federation: None, banner_js: None, footer_js: None, banner_css: None, footer_css: None, drop_console: false, drop_debugger: false, entry_template: None, chunk_template: None, out_extensions: Vec::new() }
     }
 }
 
@@ -289,6 +295,11 @@ struct Chunk {
     file: String,
     modules: Vec<ModuleId>,
     roots: Vec<ModuleId>,
+    /// What `[name]` stands for in a name template: the entry's own or given name, a lazy chunk's module, or `chunk`.
+    base: String,
+    /// Named by the build (an entry the command line or a plugin gave a file name): templates leave it be.
+    given: bool,
+    is_entry: bool,
 }
 
 /// How chunks refer to one another.
@@ -342,6 +353,7 @@ struct Bundler<'a> {
     hot: bool,
     drop_console: bool,
     drop_debugger: bool,
+    out_extensions: Vec<(String, String)>,
     entry_names: Vec<Option<String>>,
     federation: Option<std::sync::Arc<crate::federation::Federation>>,
     /// Module federation: chunks whose code reads shared packages and remotes wait for the runtime to have loaded them
@@ -447,6 +459,7 @@ impl<'a> Bundler<'a> {
             hot: false,
             drop_console: false,
             drop_debugger: false,
+            out_extensions: Vec::new(),
             entry_names: Vec::new(),
             federation: None,
             ready_calls: HashMap::new(),
@@ -473,6 +486,7 @@ impl<'a> Bundler<'a> {
         self.hot = options.hot;
         self.drop_console = options.drop_console;
         self.drop_debugger = options.drop_debugger;
+        self.out_extensions = options.out_extensions.clone();
         self.federation = options.federation.clone();
         self.format = options.format;
         self.splitting = options.splitting && options.format == Format::Esm;
@@ -552,6 +566,9 @@ impl<'a> Bundler<'a> {
         self.federation_waits();
         let names = self.allocate_names();
         let links = self.chunk_links(&root_exports, &order);
+        if let Err(message) = self.rename_chunks(&links, options) {
+            return Err(vec![Diagnostic { severity: crate::graph::Severity::Error, message, file: None, pos: None }]);
+        }
         let chunk_infos = self.chunk_infos(&roots, &root_exports, &links);
         let timing = std::env::var_os("RATHKIT_TIMING").is_some();
         let mut raws = Vec::new();
@@ -658,6 +675,117 @@ impl<'a> Bundler<'a> {
             let pieces = self.binding_pieces(Some(first), &binding);
             self.ready_calls.insert(c, pieces);
         }
+    }
+
+    /// The extension a kind of output file gets (`.js` by default; `--out-extension:.js=.mjs`).
+    fn out_extension(&self, default: &str) -> String {
+        self.out_extensions.iter().find(|(from, _)| from == default).map_or_else(|| default.to_string(), |(_, to)| to.clone())
+    }
+
+    /// Names the chunks by the templates, once it is known which chunks load which: `[hash]` is a hash of the text of the modules in a chunk
+    /// and of the hashes of the chunks it loads (statically or with `import()`), so a name changes when anything it runs does, and a
+    /// chunk is named after what it loads before it is. (A chunk that loads itself through others is hashed without them at that point.)
+    fn rename_chunks(&mut self, links: &ChunkLinks, options: &Options) -> Result<(), String> {
+        let (entry_template, chunk_template) = (options.entry_template.as_deref(), options.chunk_template.as_deref());
+        if entry_template.is_none() && chunk_template.is_none() && self.out_extensions.is_empty() {
+            return Ok(());
+        }
+        let n = self.plan.chunks.len();
+        let graph = self.graph;
+        let mut loads: Vec<Vec<usize>> = links.deps.clone();
+        for (c, chunk) in self.plan.chunks.iter().enumerate() {
+            for &m in &chunk.modules {
+                for (request, edge) in graph.module(m).record.requests.iter().zip(&graph.module(m).edges) {
+                    if let (RequestKind::Dynamic, Edge::Module(t)) = (request.kind, edge) {
+                        if let Some(&d) = self.plan.root_chunk.get(t) {
+                            if d != c && !loads[c].contains(&d) {
+                                loads[c].push(d);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // What the files are made with besides their modules' text.
+        let mut salt: u64 = 0xcbf29ce484222325;
+        let mix = |hash: &mut u64, bytes: &[u8]| {
+            for &b in bytes {
+                *hash = (*hash ^ b as u64).wrapping_mul(0x100000001b3);
+            }
+        };
+        mix(&mut salt, format!("{:?}{:?}{:?}", self.format, options.minify.whitespace, options.minify.identifiers).as_bytes());
+        mix(&mut salt, format!("{:?}{:?}{}", options.banner_js, options.footer_js, options.minify.syntax).as_bytes());
+        let own: Vec<u64> = self
+            .plan
+            .chunks
+            .iter()
+            .map(|chunk| {
+                let mut h = salt;
+                for &m in &chunk.modules {
+                    let module = graph.module(m);
+                    mix(&mut h, module.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default().as_bytes());
+                    mix(&mut h, module.source.as_bytes());
+                    mix(&mut h, &[0]);
+                }
+                h
+            })
+            .collect();
+        // The final hash of each chunk: its own, then those of the chunks it loads (a chunk met again on the way is left out).
+        fn settle(c: usize, loads: &[Vec<usize>], own: &[u64], done: &mut Vec<Option<u64>>, active: &mut Vec<bool>) -> u64 {
+            if let Some(h) = done[c] {
+                return h;
+            }
+            active[c] = true;
+            let mut h = own[c];
+            let mut deps: Vec<u64> = Vec::new();
+            for &d in &loads[c] {
+                if !active[d] {
+                    deps.push(settle(d, loads, own, done, active));
+                }
+            }
+            deps.sort_unstable();
+            for d in deps {
+                h = (h ^ d).wrapping_mul(0x100000001b3).rotate_left(7);
+            }
+            active[c] = false;
+            done[c] = Some(h);
+            h
+        }
+        let mut done = vec![None; n];
+        let mut active = vec![false; n];
+        let hashes: Vec<u64> = (0..n).map(|c| settle(c, &loads, &own, &mut done, &mut active)).collect();
+        let digits = |mut h: u64| {
+            let mut text = String::new();
+            for _ in 0..8 {
+                text.push(b"0123456789abcdefghijklmnopqrstuvwxyz"[(h % 36) as usize] as char);
+                h /= 36;
+            }
+            text
+        };
+        let mut used: HashSet<String> = HashSet::new();
+        let ext = self.out_extension(".js");
+        for c in 0..n {
+            let chunk = &self.plan.chunks[c];
+            let old_ext = if chunk.file.ends_with(".mjs") { ".mjs" } else { ".js" };
+            let stem = chunk.file.strip_suffix(old_ext).unwrap_or(&chunk.file).to_string();
+            let template = if chunk.given { None } else if chunk.is_entry { entry_template } else { chunk_template };
+            let base = match template {
+                Some(t) => t.replace("[name]", &chunk.base).replace("[hash]", &digits(hashes[c])),
+                None => stem,
+            };
+            if base.contains('/') || base.contains('\\') || base.is_empty() {
+                return Err(format!("the name '{base}' made by a template is not a file name in the output folder (a directory in a name is not supported)"));
+            }
+            let ext = if chunk.given && old_ext == ".mjs" { ".mjs".to_string() } else { ext.clone() };
+            let mut name = format!("{base}{ext}");
+            let mut counter = 2;
+            while !used.insert(name.clone()) {
+                name = format!("{base}-{counter}{ext}");
+                counter += 1;
+            }
+            self.plan.chunks[c].file = name;
+        }
+        Ok(())
     }
 
     /// What each chunk holds and how it connects to the others.
@@ -840,7 +968,7 @@ impl<'a> Bundler<'a> {
                     out.push('\n');
                 }
                 let stem = chunk.file.rsplit_once('.').map_or(chunk.file.as_str(), |(s, _)| s);
-                let name = format!("{stem}.css");
+                let name = format!("{stem}{}", self.out_extension(".css"));
                 let mut map = None;
                 if mapping {
                     let mut builder = crate::sourcemap::Builder::default();
@@ -1270,7 +1398,7 @@ impl<'a> Bundler<'a> {
             of_module[m.index()] = Some(0);
         }
         let root_chunk = graph.entries.iter().map(|&e| (e, 0)).collect();
-        ChunkPlan { chunks: vec![Chunk { file: self.single_name.clone(), modules, roots: graph.entries.clone() }], of_module, root_chunk }
+        ChunkPlan { chunks: vec![Chunk { file: self.single_name.clone(), modules, roots: graph.entries.clone(), base: String::new(), given: true, is_entry: true }], of_module, root_chunk }
     }
 
     /// Groups modules by which roots can reach them: modules reachable from exactly the same
@@ -1317,7 +1445,7 @@ impl<'a> Bundler<'a> {
                 continue;
             }
             let index = *by_signature.entry(bits.clone()).or_insert_with(|| {
-                chunks.push(Chunk { file: String::new(), modules: Vec::new(), roots: Vec::new() });
+                chunks.push(Chunk { file: String::new(), modules: Vec::new(), roots: Vec::new(), base: String::new(), given: false, is_entry: false });
                 signatures.push(bits.clone());
                 chunks.len() - 1
             });
@@ -1334,7 +1462,7 @@ impl<'a> Bundler<'a> {
             let chunk = match exclusive {
                 Some(c) => c,
                 None => {
-                    chunks.push(Chunk { file: String::new(), modules: Vec::new(), roots: Vec::new() });
+                    chunks.push(Chunk { file: String::new(), modules: Vec::new(), roots: Vec::new(), base: String::new(), given: false, is_entry: false });
                     chunks.len() - 1
                 }
             };
@@ -1368,18 +1496,28 @@ impl<'a> Bundler<'a> {
                 text
             };
             let mut ext = ".js";
-            let base = match chunk.roots.first() {
+            let (base, name_base, given, is_entry) = match chunk.roots.first() {
                 Some(&root) if order_of_root[&root] < entry_count => match self.entry_names.get(order_of_root[&root]).and_then(|n| n.as_deref()) {
                     Some(given) if given.ends_with(".mjs") => {
                         ext = ".mjs";
-                        given[..given.len() - 4].to_string()
+                        let b = given[..given.len() - 4].to_string();
+                        (b.clone(), b, true, true)
                     }
-                    Some(given) => given.strip_suffix(".js").unwrap_or(given).to_string(),
-                    None => stem(root),
+                    Some(given) => {
+                        let b = given.strip_suffix(".js").unwrap_or(given).to_string();
+                        (b.clone(), b, true, true)
+                    }
+                    None => {
+                        let b = stem(root);
+                        (b.clone(), b, false, true)
+                    }
                 },
-                Some(&root) => format!("{}-{digest}", stem(root)),
-                None => format!("chunk-{digest}"),
+                Some(&root) => (format!("{}-{digest}", stem(root)), stem(root), false, false),
+                None => (format!("chunk-{digest}"), "chunk".to_string(), false, false),
             };
+            chunk.base = name_base;
+            chunk.given = given;
+            chunk.is_entry = is_entry;
             let mut name = format!("{base}{ext}");
             let mut counter = 2;
             while !used.insert(name.clone()) {

@@ -641,6 +641,34 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
                 public_path_given = true;
             }
             "--preserve-symlinks" => options.resolve.preserve_symlinks = true,
+            // Templates for the names of files: [name] and [hash] (a hash of what is in the file and what it loads).
+            arg if arg == "--entry-names" || arg == "--chunk-names" || arg.starts_with("--entry-names=") || arg.starts_with("--chunk-names=") => {
+                let entry = arg.starts_with("--entry-names");
+                let value = match arg.split_once('=') {
+                    Some((_, v)) => v.to_string(),
+                    None => it.next().cloned().unwrap_or_default(),
+                };
+                if value.is_empty() || value.contains("[dir]") || value.contains('/') {
+                    eprintln!("error: {} needs a template such as [name]-[hash] (a [dir] or a / in it is not supported: files go in one folder)", if entry { "--entry-names" } else { "--chunk-names" });
+                    return Done::Exit(ExitCode::from(2));
+                }
+                if entry {
+                    bundle_options.entry_template = Some(value);
+                } else {
+                    bundle_options.chunk_template = Some(value);
+                }
+            }
+            // --out-extension:.js=.mjs
+            arg if arg == "--out-extension" || arg.starts_with("--out-extension:") => {
+                let spec = if arg == "--out-extension" { it.next().cloned() } else { Some(arg["--out-extension:".len()..].to_string()) };
+                match spec.as_deref().and_then(|v| v.split_once('=')) {
+                    Some((from @ (".js" | ".css"), to)) if to.starts_with('.') && !to.contains(['/', '\\']) => bundle_options.out_extensions.push((from.to_string(), to.to_string())),
+                    _ => {
+                        eprintln!("error: --out-extension is .js=.EXT or .css=.EXT");
+                        return Done::Exit(ExitCode::from(2));
+                    }
+                }
+            }
             // --pure:NAME: calls of NAME (a name, or a chain such as styled.div) are free of effects, so an unused one is removed.
             arg if arg == "--pure" || arg.starts_with("--pure:") => {
                 let name = if arg == "--pure" { it.next().cloned().unwrap_or_default() } else { arg["--pure:".len()..].to_string() };
@@ -1010,7 +1038,9 @@ fn write_pages(job: &Job, dir: &std::path::Path, output: &rathkit_pack::bundle::
         return Ok(());
     }
     let canon = |p: &std::path::Path| std::fs::canonicalize(p).map(|c| rathkit_pack::resolve::without_verbatim_prefix(&c)).unwrap_or_else(|_| p.to_path_buf());
-    let sheets: Vec<&str> = output.files.iter().map(|f| f.name.as_str()).filter(|n| n.ends_with(".css")).collect();
+    // Style sheet files end in `.css`, or in what --out-extension:.css= says.
+    let css_extension = job.bundle_options.out_extensions.iter().find(|(from, _)| from == ".css").map_or(".css", |(_, to)| to.as_str());
+    let sheets: Vec<&str> = output.files.iter().map(|f| f.name.as_str()).filter(|n| n.ends_with(css_extension)).collect();
     let public = job.cwd.join("public");
     for page in &job.pages {
         let mut html = page.html.clone();
@@ -1027,7 +1057,7 @@ fn write_pages(job: &Job, dir: &std::path::Path, output: &rathkit_pack::bundle::
             let Some(chunk) = built else { return Err(format!("{}: no built file for {}", page.file.display(), reference.src)) };
             let file = if is_sheet {
                 // A sheet is built as an entry: its rules are in the `.css` beside the (empty) script.
-                let sheet = format!("{}.css", chunk.file.rsplit_once('.').map_or(chunk.file.as_str(), |(stem, _)| stem));
+                let sheet = format!("{}{css_extension}", chunk.file.rsplit_once('.').map_or(chunk.file.as_str(), |(stem, _)| stem));
                 if !output.files.iter().any(|f| f.name == sheet) {
                     return Err(format!("{}: no built style sheet for {}", page.file.display(), reference.src));
                 }

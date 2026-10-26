@@ -50,7 +50,7 @@ class BuildError extends Error {
   }
 }
 
-const KEYS = new Set(['entries', 'cwd', 'env', 'signal', 'outfile', 'outdir', 'format', 'globalName', 'globals', 'minify', 'keepNames', 'sourcemap', 'sourcesContent', 'splitting', 'treeShaking', 'platform', 'external', 'conditions', 'mainFields', 'alias', 'define', 'loader', 'assetNames', 'publicPath', 'jsx', 'jsxImportSource', 'jsxFactory', 'jsxFragment', 'decoratorMetadata', 'experimentalDecorators', 'strictNullChecks', 'tsconfig', 'config', 'mode', 'envDir', 'envPrefix', 'envFiles', 'banner', 'footer', 'drop', 'packages', 'resolveExtensions', 'preserveSymlinks', 'metafile', 'pure', 'federation', 'originalPaths', 'corsOrigins', 'port', 'host']);
+const KEYS = new Set(['entries', 'cwd', 'env', 'signal', 'outfile', 'outdir', 'format', 'globalName', 'globals', 'minify', 'keepNames', 'sourcemap', 'sourcesContent', 'splitting', 'treeShaking', 'platform', 'external', 'conditions', 'mainFields', 'alias', 'define', 'loader', 'assetNames', 'publicPath', 'jsx', 'jsxImportSource', 'jsxFactory', 'jsxFragment', 'decoratorMetadata', 'experimentalDecorators', 'strictNullChecks', 'tsconfig', 'config', 'mode', 'envDir', 'envPrefix', 'envFiles', 'banner', 'footer', 'drop', 'packages', 'resolveExtensions', 'preserveSymlinks', 'metafile', 'pure', 'entryNames', 'chunkNames', 'outExtension', 'federation', 'originalPaths', 'corsOrigins', 'port', 'host']);
 
 /** The command line for options. A key that is not an option is an error, so a typo is not ignored. */
 function toArgs(options, cleanups) {
@@ -105,6 +105,9 @@ function toArgs(options, cleanups) {
     else for (const [kind, text] of Object.entries(value ?? {})) args.push(`${flag}:${kind}=${text}`);
   }
   each('--drop', options.drop);
+  add('--entry-names', options.entryNames);
+  add('--chunk-names', options.chunkNames);
+  Object.entries(options.outExtension ?? {}).forEach(([from, to]) => args.push(`--out-extension:${from}=${to}`));
   (options.pure ?? []).forEach((name) => args.push(`--pure:${name}`));
   add('--packages', options.packages);
   if (options.resolveExtensions) args.push('--resolve-extensions', options.resolveExtensions.join(','));
