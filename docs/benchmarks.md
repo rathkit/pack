@@ -18,7 +18,7 @@ run `bench/run.mjs` to get your own. Nothing here is a claim about inputs that w
   React with react-dom/server, an rxjs pipeline, and two generated apps (1,500 JavaScript modules and 500 TypeScript
   modules, `bench/generate.mjs`). three.js and lodash are timed but not run.
 - **Machine:** Intel Core i7-11850H (16 threads), 31 GB, Linux 6.6 under WSL2, nothing else running (load average
-  0.1 before the run). Node 26.12.0; rustc 1.99.1; Rathkit Pack at commit `99e7057` (release build); esbuild 0.28.2,
+  1.1 before the run). Node 26.12.0; rustc 1.99.1; Rathkit Pack at commit `a2105a3` (release build); esbuild 0.28.2,
   rolldown 1.2.15, @rspack/core 2.2.9, Vite 8.3.5.
 
 Reproduce: `cargo build --release && cd bench && pnpm install && node generate.mjs && node run.mjs --tools rathkit,esbuild,rolldown,rspack,vite --markdown`.
@@ -29,54 +29,54 @@ Plain:
 
 | | Rathkit Pack | esbuild | rolldown | rspack | Vite |
 |---|---|---|---|---|---|
-| TypeScript compiler | 181 | 413 | 772 | 384 | 965 |
-| three.js | 44 | 99 | 158 | 170 | 253 |
-| lodash-es | 26 | 68 | 173 | 160 | 241 |
-| React + react-dom/server | 14 | 51 | 121 | 114 | 193 |
-| rxjs | 13 | 54 | 159 | 136 | 253 |
-| 1,500-module app | 191 | 527 | 269 | 643 | 380 |
-| 500-module TypeScript app | 67 | 90 | 174 | 377 | 266 |
+| TypeScript compiler | 181 | 407 | 742 | 380 | 983 |
+| three.js | 46 | 104 | 161 | 170 | 273 |
+| lodash-es | 27 | 76 | 187 | 202 | 268 |
+| React + react-dom/server | 13 | 54 | 124 | 118 | 199 |
+| rxjs | 14 | 60 | 161 | 139 | 211 |
+| 1,500-module app | 191 | 549 | 270 | 651 | 364 |
+| 500-module TypeScript app | 67 | 94 | 172 | 373 | 266 |
 
 Minified:
 
 | | Rathkit Pack | esbuild | rolldown | rspack | Vite |
 |---|---|---|---|---|---|
-| TypeScript compiler | 401 | 419 | 926 | 1931 | 1152 |
-| three.js | 50 | 107 | 166 | 350 | 268 |
-| lodash-es | 28 | 67 | 171 | 207 | 240 |
-| React + react-dom/server | 22 | 52 | 123 | 203 | 197 |
-| rxjs | 16 | 56 | 164 | 193 | 214 |
-| 1,500-module app | 193 | 545 | 274 | 853 | 377 |
-| 500-module TypeScript app | 75 | 92 | 173 | 574 | 261 |
+| TypeScript compiler | 397 | 424 | 953 | 2049 | 1163 |
+| three.js | 49 | 119 | 172 | 359 | 282 |
+| lodash-es | 34 | 74 | 179 | 216 | 250 |
+| React + react-dom/server | 24 | 56 | 136 | 205 | 203 |
+| rxjs | 17 | 61 | 168 | 195 | 210 |
+| 1,500-module app | 193 | 547 | 263 | 872 | 364 |
+| 500-module TypeScript app | 76 | 94 | 174 | 545 | 261 |
 
 Minified with a source map:
 
 | | Rathkit Pack | esbuild | rolldown | rspack | Vite |
 |---|---|---|---|---|---|
-| TypeScript compiler | 530 | 609 | 1058 | 2184 | 1222 |
-| three.js | 72 | 123 | 185 | 458 | 283 |
-| lodash-es | 40 | 71 | 187 | 218 | 248 |
-| React + react-dom/server | 39 | 59 | 136 | 221 | 206 |
-| rxjs | 23 | 63 | 178 | 207 | 229 |
-| 1,500-module app | 215 | 549 | 291 | 897 | 393 |
-| 500-module TypeScript app | 82 | 96 | 182 | 608 | 278 |
+| TypeScript compiler | 539 | 638 | 1062 | 2286 | 1312 |
+| three.js | 72 | 128 | 199 | 411 | 294 |
+| lodash-es | 41 | 84 | 206 | 226 | 268 |
+| React + react-dom/server | 32 | 60 | 137 | 222 | 208 |
+| rxjs | 23 | 68 | 179 | 205 | 220 |
+| 1,500-module app | 215 | 603 | 289 | 918 | 384 |
+| 500-module TypeScript app | 84 | 98 | 181 | 599 | 270 |
 
-Geometric mean of each tool's time relative to Rathkit Pack, over these seven workloads: plain, esbuild 2.6x, rolldown
-4.5x, rspack 5.0x, Vite 6.7x; minified, esbuild 2.1x, rolldown 3.7x, rspack 7.1x, Vite 5.2x; minified with a map,
-esbuild 1.7x, rolldown 3.0x, rspack 5.8x, Vite 4.1x. On the TypeScript compiler, minified, the gap to esbuild is small
-(401 ms against 419 ms).
+Geometric mean of each tool's time relative to Rathkit Pack, over these seven workloads: plain, esbuild 2.7x, rolldown
+4.5x, rspack 5.2x, Vite 6.6x; minified, esbuild 2.1x, rolldown 3.6x, rspack 6.9x, Vite 5.1x; minified with a map,
+esbuild 1.9x, rolldown 3.1x, rspack 5.9x, Vite 4.2x. On the TypeScript compiler, minified, the gap to esbuild is small
+(397 ms against 424 ms).
 
 ## Peak memory (MB, minified with a source map)
 
 | | Rathkit Pack | esbuild | rolldown | rspack | Vite |
 |---|---|---|---|---|---|
-| TypeScript compiler | 228 | 266 | 509 | 431 | 457 |
-| three.js | 43 | 61 | 201 | 182 | 229 |
-| lodash-es | 22 | 60 | 257 | 149 | 277 |
-| React + react-dom/server | 20 | 48 | 189 | 132 | 218 |
-| rxjs | 10 | 53 | 244 | 135 | 218 |
-| 1,500-module app | 92 | 384 | 490 | 366 | 514 |
-| 500-module TypeScript app | 30 | 57 | 198 | 186 | 216 |
+| TypeScript compiler | 230 | 266 | 503 | 433 | 455 |
+| three.js | 44 | 61 | 195 | 183 | 236 |
+| lodash-es | 22 | 61 | 251 | 150 | 280 |
+| React + react-dom/server | 20 | 48 | 201 | 133 | 217 |
+| rxjs | 10 | 54 | 240 | 135 | 217 |
+| 1,500-module app | 93 | 383 | 490 | 367 | 512 |
+| 500-module TypeScript app | 30 | 58 | 196 | 184 | 219 |
 
 ## Output size (KB / gzip KB, minified)
 
@@ -84,10 +84,10 @@ esbuild 1.7x, rolldown 3.0x, rspack 5.8x, Vite 4.1x. On the TypeScript compiler,
 |---|---|---|---|---|---|
 | TypeScript compiler | 3484 / 973 | 3514 / 1012 | 3472 / 970 | 3405 / 965 | 4385 / 1052 |
 | three.js | 524 / 128 | 517 / 130 | 513 / 126 | 519 / 128 | 601 / 134 |
-| lodash-es | 76 / 27 | 81 / 30 | 73 / 26 | 78 / 29 | 114 / 31 |
+| lodash-es | 76 / 27 | 81 / 30 | 73 / 26 | 78 / 29 | 132 / 32 |
 | React + react-dom/server | 227 / 68 | 229 / 69 | 228 / 68 | 225 / 68 | 275 / 71 |
-| rxjs | 25 / 7 | 157 / 34 | 151 / 27 | 140 / 28 | 33 / 8 |
-| 1,500-module app | 80 / 20 | 92 / 25 | 80 / 20 | 1 / 0 (*) | 155 / 24 |
+| rxjs | 25 / 7 | 157 / 34 | 151 / 27 | 140 / 28 | 35 / 8 |
+| 1,500-module app | 80 / 20 | 92 / 25 | 80 / 20 | 1 / 0 | 155 / 24 |
 | 500-module TypeScript app | 172 / 20 | 187 / 23 | 198 / 20 | 512 / 41 | 263 / 22 |
 
 (*) rspack folds the whole generated app to a constant, so its size says nothing about that case. Different tools
@@ -95,5 +95,6 @@ pick different package entry points (rxjs has an ES and a CommonJS build), which
 
 **Where others are smaller:** minified, rolldown is smaller than Rathkit Pack on the TypeScript compiler (3472 against
 3484 KB; gzip 970 against 973), three.js, and lodash-es; rspack is smaller on the TypeScript compiler (3405 / 965); both
-are within a few percent. Plain (not minified), esbuild is smaller on three.js (1090 against 1220 KB), and rolldown and
-Vite are smaller on React (488 and 470 against 580 KB).
+are within a few percent. Plain (not minified), esbuild is smaller on three.js (1090 against 1220 KB), rolldown and Vite
+are smaller on React (488 and 471 against 580 KB), and rolldown and Vite are smaller on the TypeScript compiler (7774
+and 7683 against 8967 KB).
