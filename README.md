@@ -75,10 +75,13 @@ rkp bundle src/main.ts --outfile dist/app.mjs
 - `--target=es2015` ... `es2025` (or `esnext`, the default, which rewrites nothing): the version of JavaScript the output may use.
   Syntax newer than it is rewritten, as `--target` does in esbuild: `a ** b` and `**=` (`Math.pow`), `?.`, `??`, `||=` `&&=` `??=`
   (a value used twice goes in a temporary `var` declared once at the top of the file), numeric separators, `catch` without a
-  binding, and a trailing comma in a call or parameter list. `es2015` is the lowest target. Anything the target cannot have and this
+  binding, a trailing comma in a call or parameter list, and object spread (`__spreadValues` and `__spreadProps`, which keep getters
+  and methods) and object rest (`__objRest`) in a declaration, a function parameter (also of an arrow with an expression body)
+  or a `for of`. `es2015` is the lowest target. Anything the target cannot have and this
   cannot rewrite stops the build with a message that names it and the target, never passes through: BigInt literals and top-level
-  await can never be rewritten, and async functions, async iteration, object spread and rest, class fields, private members and
-  static blocks are not rewritten yet. Regular expression syntax and library functions are not looked at, and engine targets such
+  await can never be rewritten, and async functions, async iteration, class fields, private members and static blocks are not
+  rewritten yet, nor is object rest anywhere else (nested in another pattern, in an assignment, in `catch`), or a `__proto__`
+  property after a spread. Regular expression syntax and library functions are not looked at, and engine targets such
   as `chrome80` are not supported. Checked by running programs as written and rewritten for every target in plain, minified,
   CommonJS and IIFE form, and by parsing each result as the language of its target (`tools/run-target.mjs`).
 - Vite's import forms: `./a.wasm?init` (a function that instantiates the module and resolves to the instance, reading the copied file with

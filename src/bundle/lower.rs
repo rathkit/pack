@@ -30,6 +30,10 @@ impl Scanner<'_, '_> {
         !self.bundler.target.supports(feature)
     }
 
+    fn lower_error_message(&mut self, node: NodeId, message: String) {
+        self.bundler.errors.push(Diagnostic { severity: crate::graph::Severity::Error, message, file: Some(self.module.path.clone()), pos: Some(self.ast[node].span.start) });
+    }
+
     fn lower_error(&mut self, feature: Feature, node: NodeId) {
         let target = self.bundler.target.name();
         // BigInt and top-level await have no older way of being written; the others will be rewritten.
@@ -118,6 +122,9 @@ impl Scanner<'_, '_> {
                         self.lower_error(feature, node);
                     }
                 }
+                if self.lowers(Feature::ObjectRest) {
+                    self.lower_rest_params(node, params, body);
+                }
                 if self.lowers(Feature::TrailingComma) {
                     if let Some(&last) = ast.list(params).last() {
                         let from = ast[last].span.end;
@@ -130,8 +137,11 @@ impl Scanner<'_, '_> {
                 }
             }
             // Not rewritten yet: stop instead of writing what the target cannot run.
-            NodeKind::Object(props) if self.lowers(Feature::ObjectSpread) && ast.list(props).iter().any(|&p| matches!(ast[p].kind, NodeKind::Spread(_))) => self.lower_error(Feature::ObjectSpread, node),
-            NodeKind::ObjectPattern(props) if self.lowers(Feature::ObjectRest) && ast.list(props).iter().any(|&p| matches!(ast[p].kind, NodeKind::Rest(_))) => self.lower_error(Feature::ObjectRest, node),
+            NodeKind::Object(props) if self.lowers(Feature::ObjectSpread) && ast.list(props).iter().any(|&p| matches!(ast[p].kind, NodeKind::Spread(_))) => self.lower_object_spread(node, props),
+            // A pattern with `...rest` is rewritten where its parent does it (a declaration, a parameter, a `for of`); anywhere else it is refused.
+            NodeKind::VarDeclarator { target, init: Some(init) } if self.has_object_rest(target) && self.lowers(Feature::ObjectRest) => self.lower_rest_declarator(node, target, init),
+            NodeKind::ForOf { left, body, .. } if self.lowers(Feature::ObjectRest) && self.for_of_rest(left).is_some() => self.lower_rest_for_of(node, left, body),
+            NodeKind::ObjectPattern(_) if self.has_object_rest(node) && self.lowers(Feature::ObjectRest) && !self.skip.contains(&node) => self.lower_error(Feature::ObjectRest, node),
             NodeKind::ClassField { key, .. } if self.lowers(Feature::ClassField) || (self.lowers(Feature::ClassPrivate) && matches!(ast[key].kind, NodeKind::PrivateName(_))) => {
                 let feature = if matches!(ast[key].kind, NodeKind::PrivateName(_)) { Feature::ClassPrivate } else { Feature::ClassField };
                 self.lower_error(feature, node);
@@ -427,5 +437,228 @@ impl Scanner<'_, '_> {
         out.extend(current);
         out.push(text(")"));
         out
+    }
+
+    // ---- object spread and rest ----
+
+    /// `{ a, ...b, c }` as `__spreadProps(__spreadValues({ a }, b), { c })`: each spread copies what is enumerable, and the plain
+    /// properties after one are defined (so getters and methods stay what they are).
+    fn lower_object_spread(&mut self, node: NodeId, props: List) {
+        let ast = self.ast;
+        enum Segment {
+            Run(u32, u32),
+            Spread(NodeId),
+        }
+        let mut segments: Vec<Segment> = Vec::new();
+        let mut run: Option<(u32, u32)> = None;
+        let mut spread_seen = false;
+        for &p in ast.list(props) {
+            // `__proto__: x` sets the prototype of the object it is written in, which a copy after a spread cannot do.
+            if spread_seen && matches!(ast[p].kind, NodeKind::Property { key, kind: crate::ast::PropKind::Init, .. } if matches!(ast[key].kind, NodeKind::PropName(a) if ast.atom(a) == "__proto__") && ast[p].flags & (crate::ast::flags::COMPUTED | crate::ast::flags::SHORTHAND) == 0) {
+                let target = self.bundler.target.name();
+                self.lower_error_message(p, format!("a __proto__ property after a spread cannot be rewritten for the target {target} (put it before the spread, or use Object.setPrototypeOf)"));
+                return;
+            }
+            if let NodeKind::Spread(argument) = ast[p].kind {
+                spread_seen = true;
+                if let Some((a, b)) = run.take() {
+                    segments.push(Segment::Run(a, b));
+                }
+                segments.push(Segment::Spread(argument));
+            } else {
+                let (start, end) = self.span(p);
+                run = Some(match run {
+                    Some((a, _)) => (a, end),
+                    None => (start, end),
+                });
+            }
+        }
+        if let Some((a, b)) = run {
+            segments.push(Segment::Run(a, b));
+        }
+        self.bundler.helpers.spread = true;
+        let mut acc: Vec<Piece> = vec![text("{}")];
+        let mut fresh = true;
+        for segment in segments {
+            match segment {
+                Segment::Run(a, b) if fresh => acc = vec![text("{ "), Piece::Range(a, b), text(" }")],
+                Segment::Run(a, b) => {
+                    let mut next = vec![text("__spreadProps(")];
+                    next.extend(acc);
+                    next.extend([text(", { "), Piece::Range(a, b), text(" })")]);
+                    acc = next;
+                }
+                Segment::Spread(argument) => {
+                    let (a, b) = self.span(argument);
+                    let mut next = vec![text("__spreadValues(")];
+                    next.extend(acc);
+                    next.extend([text(", ("), Piece::Range(a, b), text("))")]);
+                    acc = next;
+                }
+            }
+            fresh = false;
+        }
+        self.push(node, acc);
+    }
+
+    /// Whether a pattern is an object pattern that ends with `...rest`.
+    fn has_object_rest(&self, pattern: NodeId) -> bool {
+        match self.ast[pattern].kind {
+            NodeKind::ObjectPattern(props) => self.ast.list(props).iter().any(|&p| matches!(self.ast[p].kind, NodeKind::Rest(_))),
+            _ => false,
+        }
+    }
+
+    /// The parts of `{ a, b: x, ...rest }`: the span of the plain properties, the keys that are left out of the rest, and the rest's name.
+    /// `None` after an error (a computed key, or something this does not handle).
+    fn rest_parts(&mut self, pattern: NodeId) -> Option<(Option<(u32, u32)>, Vec<String>, NodeId)> {
+        let ast = self.ast;
+        let NodeKind::ObjectPattern(props) = ast[pattern].kind else { return None };
+        let mut plain: Option<(u32, u32)> = None;
+        let mut keys = Vec::new();
+        let mut rest = None;
+        for &p in ast.list(props) {
+            match ast[p].kind {
+                NodeKind::Rest(target) if matches!(ast[target].kind, NodeKind::BindingIdent(_)) => rest = Some(target),
+                NodeKind::PatternProp { key, .. } if ast[p].flags & crate::ast::flags::COMPUTED == 0 => {
+                    let name = match ast[key].kind {
+                        NodeKind::PropName(a) | NodeKind::Str(a) => json_string(ast.atom(a)),
+                        _ => {
+                            self.lower_error(Feature::ObjectRest, pattern);
+                            return None;
+                        }
+                    };
+                    keys.push(name);
+                    let (start, end) = self.span(p);
+                    plain = Some(match plain {
+                        Some((a, _)) => (a, end),
+                        None => (start, end),
+                    });
+                }
+                _ => {
+                    self.lower_error(Feature::ObjectRest, pattern);
+                    return None;
+                }
+            }
+        }
+        let rest = rest?;
+        self.skip.insert(pattern);
+        Some((plain, keys, rest))
+    }
+
+    /// `const { a, ...rest } = init` as `const { a } = (T = init), rest = __objRest(T, ["a"])`.
+    fn lower_rest_declarator(&mut self, node: NodeId, pattern: NodeId, init: NodeId) {
+        let Some((plain, keys, rest)) = self.rest_parts(pattern) else { return };
+        let (is, ie) = self.span(init);
+        let (rs, re) = self.span(rest);
+        self.bundler.helpers.spread = true;
+        let mut pieces: Vec<Piece> = Vec::new();
+        match plain {
+            Some((a, b)) => {
+                let t = self.temp();
+                pieces.extend([text("{ "), Piece::Range(a, b), text(&format!(" }} = ({t} = (")), Piece::Range(is, ie), text("))")]);
+                pieces.extend([text(", "), Piece::Range(rs, re), text(&format!(" = __objRest({t}, [{}])", keys.join(", ")))]);
+            }
+            None => {
+                pieces.extend([Piece::Range(rs, re), text(" = __objRest("), Piece::Range(is, ie), text(", [])")]);
+            }
+        }
+        self.push(node, pieces);
+    }
+
+    /// The declarator of `for (const { a, ...rest } of list)`, when that is what the left side is.
+    fn for_of_rest(&self, left: NodeId) -> Option<NodeId> {
+        let NodeKind::VarDecl { decls, .. } = self.ast[left].kind else { return None };
+        let [only] = self.ast.list(decls) else { return None };
+        match self.ast[*only].kind {
+            NodeKind::VarDeclarator { target, init: None } if self.has_object_rest(target) => Some(target),
+            _ => None,
+        }
+    }
+
+    /// `for (const { a, ...rest } of list) body` as `for (const __rkarg0 of list) { const { a } = __rkarg0, rest = __objRest(...); body }`.
+    fn lower_rest_for_of(&mut self, node: NodeId, left: NodeId, body: NodeId) {
+        let ast = self.ast;
+        let Some(pattern) = self.for_of_rest(left) else { return };
+        let NodeKind::VarDecl { kind, .. } = ast[left].kind else { return };
+        let Some((plain, keys, rest)) = self.rest_parts(pattern) else { return };
+        let _ = node;
+        let name = self.argument_name();
+        let (rs, re) = self.span(rest);
+        self.bundler.helpers.spread = true;
+        let mut declaration = vec![text(kind.as_str()), text(" ")];
+        if let Some((a, b)) = plain {
+            declaration.extend([text("{ "), Piece::Range(a, b), text(&format!(" }} = {name}, "))]);
+        }
+        declaration.extend([Piece::Range(rs, re), text(&format!(" = __objRest({name}, [{}]);", keys.join(", ")))]);
+        let (ps, pe) = self.span(pattern);
+        self.edits.push(Edit { start: ps, end: pe, pieces: vec![text(&name)], shorthand: None, transparent: false });
+        let (bs, be) = self.span(body);
+        if matches!(ast[body].kind, NodeKind::Block(_)) {
+            self.edits.push(Edit { start: bs + 1, end: bs + 1, pieces: [vec![text(" ")], declaration].concat(), shorthand: None, transparent: false });
+        } else {
+            self.edits.push(Edit { start: bs, end: bs, pieces: [vec![text("{ ")], declaration, vec![text(" ")]].concat(), shorthand: None, transparent: false });
+            self.edits.push(Edit { start: be, end: be, pieces: vec![text(" }")], shorthand: None, transparent: false });
+        }
+    }
+
+    /// A name for a parameter that stands in for a pattern.
+    fn argument_name(&mut self) -> String {
+        let name = format!("__rkarg{}", self.bundler.temp_count);
+        self.bundler.temp_count += 1;
+        name
+    }
+
+    /// Parameters that are `{ a, ...rest }` (or that with a default) become a name, and the body starts by destructuring it.
+    fn lower_rest_params(&mut self, function: NodeId, params: List, body: NodeId) {
+        let ast = self.ast;
+        let mut statements: Vec<Piece> = Vec::new();
+        let mut last_end = 0;
+        for &param in ast.list(params) {
+            let pattern = match ast[param].kind {
+                NodeKind::ObjectPattern(_) if self.has_object_rest(param) => param,
+                NodeKind::AssignPattern { target, .. } if self.has_object_rest(target) => target,
+                _ => continue,
+            };
+            let Some((plain, keys, rest)) = self.rest_parts(pattern) else { continue };
+            let name = self.argument_name();
+            let (rs, re) = self.span(rest);
+            self.bundler.helpers.spread = true;
+            statements.push(text("var "));
+            if let Some((a, b)) = plain {
+                statements.extend([text("{ "), Piece::Range(a, b), text(&format!(" }} = {name}, "))]);
+            }
+            statements.extend([Piece::Range(rs, re), text(&format!(" = __objRest({name}, [{}]); ", keys.join(", ")))]);
+            let (ps, pe) = self.span(pattern);
+            self.edits.push(Edit { start: ps, end: pe, pieces: vec![text(&name)], shorthand: None, transparent: false });
+            last_end = self.span(param).1;
+        }
+        if statements.is_empty() {
+            return;
+        }
+        let (bs, _) = self.span(body);
+        if matches!(ast[body].kind, NodeKind::Block(_)) {
+            // After the directives (`"use strict"`) that begin the body.
+            let NodeKind::Block(list) = ast[body].kind else { return };
+            let mut at = bs + 1;
+            for &statement in ast.list(list) {
+                match ast[statement].kind {
+                    NodeKind::ExprStmt(_) if ast[statement].flags & crate::ast::flags::DIRECTIVE != 0 => at = ast[statement].span.end,
+                    _ => break,
+                }
+            }
+            self.edits.push(Edit { start: at, end: at, pieces: [vec![text(" ")], statements].concat(), shorthand: None, transparent: false });
+        } else {
+            // An arrow with an expression for a body: `=> expression` becomes `=> { var ...; return expression; }`.
+            let region = self.source_between(last_end, bs);
+            let Some(arrow) = region.rfind("=>") else {
+                self.lower_error(Feature::ObjectRest, function);
+                return;
+            };
+            let at = last_end + arrow as u32 + 2;
+            let end = ast[function].span.end;
+            self.edits.push(Edit { start: at, end: at, pieces: [vec![text(" { ")], statements, vec![text("return ")]].concat(), shorthand: None, transparent: false });
+            self.edits.push(Edit { start: end, end, pieces: vec![text("; }")], shorthand: None, transparent: false });
+        }
     }
 }

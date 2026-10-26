@@ -338,6 +338,8 @@ struct Helpers {
     to_ns: bool,
     require_shim: bool,
     path_shim: bool,
+    /// `__spreadValues`, `__spreadProps` and `__objRest`: object spread and rest written for an older target.
+    spread: bool,
 }
 
 struct Bundler<'a> {
@@ -2895,6 +2897,7 @@ fn json_string(text: &str) -> String {
 // ---- output ----------------------------------------------------------------------------------
 
 const HELPER_CJS: &str = "var __cjs = (fn, req) => { var m; return () => m ? m.exports : (m = { exports: {} }, fn.call(m.exports, m.exports, m, req), m.exports); };\n";
+const HELPER_SPREAD: &str = "var __hasOwn = Object.prototype.hasOwnProperty;\nvar __propIsEnum = Object.prototype.propertyIsEnumerable;\nvar __defNormal = (obj, key, value) => key in obj ? Object.defineProperty(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;\nvar __spreadValues = (a, b) => { for (var prop in b || (b = {})) if (__hasOwn.call(b, prop)) __defNormal(a, prop, b[prop]); if (Object.getOwnPropertySymbols) for (var prop of Object.getOwnPropertySymbols(b)) { if (__propIsEnum.call(b, prop)) __defNormal(a, prop, b[prop]); } return a; };\nvar __spreadProps = (a, b) => { for (var key of Reflect.ownKeys(b)) Object.defineProperty(a, key, Object.getOwnPropertyDescriptor(b, key)); return a; };\nvar __objRest = (source, exclude) => { var target = {}; for (var prop in source) if (__hasOwn.call(source, prop) && exclude.indexOf(prop) < 0) target[prop] = source[prop]; if (source != null && Object.getOwnPropertySymbols) for (var prop of Object.getOwnPropertySymbols(source)) { if (exclude.indexOf(prop) < 0 && __propIsEnum.call(source, prop)) target[prop] = source[prop]; } return target; };\n";
 const HELPER_TO_DEFAULT: &str = "var __toDefault = (e, node) => e && !node && e.__esModule ? e.default : e;\n";
 const HELPER_TO_NS: &str = "var __toNs = (e, node) => { if (!node && e && e.__esModule) return e; var t = Object.create(null, { [Symbol.toStringTag]: { value: \"Module\" } }); if (e && (typeof e == \"object\" || typeof e == \"function\")) for (let k of new Set(e.__esModule ? [...Object.keys(e), \"__esModule\"] : Object.keys(e))) if (k != \"default\") Object.defineProperty(t, k, { get: () => e[k], enumerable: true }); return Object.defineProperty(t, \"default\", { value: e, enumerable: true }); };\n";
 const HELPER_REQ: &str = "var __req = (f, url) => { var r; var load = () => r || (r = __createRequire(url)); return Object.assign((id) => f(id, load()), { cache: Object.create(null), extensions: Object.create(null), resolve: (...a) => load().resolve(...a), main: void 0 }); };\n";
@@ -3226,6 +3229,9 @@ impl Bundler<'_> {
         }
         if self.helpers.std_decorators {
             out.push_str(HELPER_STD_DECORATORS);
+        }
+        if self.helpers.spread {
+            out.push_str(HELPER_SPREAD);
         }
         if self.code.values().any(|c| matches!(c, Code::Wrapped { require_cases: Some(_), .. })) {
             out.push_str(match format {

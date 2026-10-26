@@ -39,7 +39,8 @@ First release.
 - `--banner`, `--footer`, `--drop:console`, `--drop:debugger`, `--packages=external`, `--resolve-extensions`,
   `--preserve-symlinks`, `--pure`, `--metafile`, `--entry-names`, `--chunk-names`, `--out-extension`, `--legal-comments`, `--inject`, `--jsx-dev`, `--tsconfig-raw`; an unknown option is an error.
 - `--target=es2015` to `es2025`: `**`, `?.`, `??`, logical assignment, numeric separators, optional `catch` and trailing commas
-  are rewritten for targets that lack them; what cannot be rewritten stops the build and is named.
+  and object spread and rest (in declarations, parameters and `for of`) are rewritten for targets that lack them; what cannot be
+  rewritten stops the build and is named.
 - `import.meta.env` with `MODE`, `DEV`, `PROD`, `SSR`, `BASE_URL` and the `VITE_` variables of `.env` files (`--mode`, `--env-dir`,
   `--env-prefix`, `--no-env-files`).
 - Dynamic imports with a variable in the path (`import(`./locales/${name}.js`)`), with the rules of Rollup's plugin for them.
