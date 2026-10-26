@@ -38,6 +38,7 @@ First release.
   one file with `--format iife`).
 - `import.meta.env` with `MODE`, `DEV`, `PROD`, `SSR`, `BASE_URL` and the `VITE_` variables of `.env` files (`--mode`, `--env-dir`,
   `--env-prefix`, `--no-env-files`).
+- Dynamic imports with a variable in the path (`import(`./locales/${name}.js`)`), with the rules of Rollup's plugin for them.
 - `import.meta.glob`, and workers (`new Worker(new URL(...))`, `?worker`, `?sharedworker`, with `&inline` and `&url`).
 - Builds for linux (x64 and arm64, glibc and musl), macOS (arm64 and x64) and Windows (x64). The unit tests that use fake
   Unix paths run on Unix only; each release build bundles and runs a program with the binary it made.

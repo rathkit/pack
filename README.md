@@ -41,6 +41,12 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   the built files (and their style sheets) in place, runs plugins' `transformIndexHtml` with the built files as `bundle`
   and the entry chunk, and copies `public/`. `<script type="module" src>` tags
   and `<link rel="stylesheet" href>` tags that point at files of the project are built, and the page points at the built files; links to other sites are left as written. The images, icons and media a page names (`<img src>`, `<link rel="icon">`, `<video poster>`, `url()` in `<style>`) are copied under a name with a hash; a file in `public/` stays where it is, and one that is nowhere stays as written (`srcset` and `style=""` attributes are not read). With ES modules (the default) a page's scripts and sheets are separate files and scripts that share code share a file. With `--format iife` everything is one file that the page loads once (the other script and sheet tags are removed). `--format cjs` is an error: a browser cannot load CommonJS.
+- Imports of a path with a variable, `import(\`./locales/${name}.js\`)` or `import('./locales/' + name + '.js')`, as
+  `@rollup/plugin-dynamic-import-vars` reads them: the path starts with `./` or `../`, a variable stands for one name (never
+  crosses a `/`), and the extension is written out after the last variable. Each file that fits becomes an `import()` that the
+  chosen path picks among (an unknown path rejects with "Unknown variable dynamic import"), so code splitting makes a file of
+  each. Anything else is left as written, with a warning when it looks like it was meant to work; `import(name)` alone and
+  package names are left quietly. A file added to a folder starts a build again when watching.
 - `import.meta.env`, as Vite makes it: `MODE` (`production` for a build, `development` for `serve`, or `--mode`), `DEV`, `PROD`
   (`--mode development` or `production` decides; any other mode follows the command), `SSR` (false) and `BASE_URL` (`/`, or
   `--public-path`), and the variables of `.env`, `.env.local`, `.env.[mode]` and `.env.[mode].local` in the project folder (or

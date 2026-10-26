@@ -1,0 +1,7 @@
+template a a
+template b b
+concatenation b
+two directories c
+not in the folder error: Unknown variable dynamic import: ./mods/missing.js
+a name does not cross a / error: Unknown variable dynamic import: ./mods/sub/c.js
+quoted import is text: true

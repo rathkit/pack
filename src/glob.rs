@@ -191,6 +191,69 @@ fn walk(fs: &dyn FileSystem, dir: &Path, rel: &mut Vec<String>, globs: &[Glob], 
     }
 }
 
+/// The files that a list of patterns reaches (a `!` pattern takes files out), as absolute paths, found from `base_dir` or, for a pattern
+/// that starts with `/`, from the project `root`.
+fn expand(patterns: &[String], base_dir: &Path, root: &Path, fs: &dyn FileSystem, dirs: &mut Vec<PathBuf>) -> Result<Vec<PathBuf>, String> {
+        let mut positive: Vec<(PathBuf, Glob)> = Vec::new();
+        let mut negative: Vec<(PathBuf, Glob)> = Vec::new();
+        for pattern in patterns {
+            let (negated, text) = match pattern.strip_prefix('!') {
+                Some(rest) => (true, rest),
+                None => (false, pattern.as_str()),
+            };
+            let from = if text.starts_with('/') {
+                root.to_path_buf()
+            } else if text.starts_with("./") || text.starts_with("../") {
+                base_dir.to_path_buf()
+            } else {
+                return Err(format!("the pattern \"{pattern}\" must start with ./, ../ or /"));
+            };
+            let target = if text.starts_with('/') { text.trim_start_matches('/').to_string() } else { text.to_string() };
+            // `..` segments move the directory, so the glob only sees names.
+            let mut dir = from;
+            let mut rest = target.as_str();
+            loop {
+                if let Some(r) = rest.strip_prefix("../") {
+                    dir.pop();
+                    rest = r;
+                } else if let Some(r) = rest.strip_prefix("./") {
+                    rest = r;
+                } else {
+                    break;
+                }
+            }
+            for glob in Glob::compile(rest) {
+                if negated { negative.push((dir.clone(), glob)) } else { positive.push((dir.clone(), glob)) }
+            }
+        }
+        // Every file the positive patterns reach, as an absolute path.
+        let mut files: Vec<PathBuf> = Vec::new();
+        for (dir, glob) in &positive {
+            let prefix = glob.prefix();
+            // A pattern with no wildcard names one file.
+            let (start, skip) = if prefix.len() == glob.segments.len() { (dir.join(prefix[..prefix.len().saturating_sub(1)].join("/")), prefix.len().saturating_sub(1)) } else { (dir.join(prefix.join("/")), prefix.len()) };
+            let mut found = Vec::new();
+            let mut rel: Vec<String> = Vec::new();
+            let shifted = Glob { segments: glob.segments[skip..].to_vec() };
+            walk(fs, &start, &mut rel, std::slice::from_ref(&shifted), 64, &mut found, dirs);
+            for name in found {
+                let path = start.join(name);
+                if !files.contains(&path) {
+                    files.push(path);
+                }
+            }
+        }
+        files.retain(|f| {
+            !negative.iter().any(|(dir, glob)| {
+                let Ok(rel) = f.strip_prefix(dir) else { return false };
+                let names: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+                let names: Vec<&str> = names.iter().map(String::as_str).collect();
+                glob.is_match(&names)
+            })
+        });
+        Ok(files)
+}
+
 /// What a call asks for.
 #[derive(Default)]
 struct Options {
@@ -498,63 +561,7 @@ pub fn rewrite(source: &str, module: &Path, root: &Path, fs: &dyn FileSystem, di
             Some(b) => normalize(&module_dir.join(b)),
             None => module_dir.to_path_buf(),
         };
-        let mut positive: Vec<(PathBuf, Glob)> = Vec::new();
-        let mut negative: Vec<(PathBuf, Glob)> = Vec::new();
-        for pattern in &patterns {
-            let (negated, text) = match pattern.strip_prefix('!') {
-                Some(rest) => (true, rest),
-                None => (false, pattern.as_str()),
-            };
-            let from = if text.starts_with('/') {
-                root.to_path_buf()
-            } else if text.starts_with("./") || text.starts_with("../") {
-                base_dir.clone()
-            } else {
-                return Err(fail(format!("the pattern \"{pattern}\" must start with ./, ../ or /")));
-            };
-            let target = if text.starts_with('/') { text.trim_start_matches('/').to_string() } else { text.to_string() };
-            // `..` segments move the directory, so the glob only sees names.
-            let mut dir = from;
-            let mut rest = target.as_str();
-            loop {
-                if let Some(r) = rest.strip_prefix("../") {
-                    dir.pop();
-                    rest = r;
-                } else if let Some(r) = rest.strip_prefix("./") {
-                    rest = r;
-                } else {
-                    break;
-                }
-            }
-            for glob in Glob::compile(rest) {
-                if negated { negative.push((dir.clone(), glob)) } else { positive.push((dir.clone(), glob)) }
-            }
-        }
-        // Every file the positive patterns reach, as an absolute path.
-        let mut files: Vec<PathBuf> = Vec::new();
-        for (dir, glob) in &positive {
-            let prefix = glob.prefix();
-            // A pattern with no wildcard names one file.
-            let (start, skip) = if prefix.len() == glob.segments.len() { (dir.join(prefix[..prefix.len().saturating_sub(1)].join("/")), prefix.len().saturating_sub(1)) } else { (dir.join(prefix.join("/")), prefix.len()) };
-            let mut found = Vec::new();
-            let mut rel: Vec<String> = Vec::new();
-            let shifted = Glob { segments: glob.segments[skip..].to_vec() };
-            walk(fs, &start, &mut rel, std::slice::from_ref(&shifted), 64, &mut found, dirs);
-            for name in found {
-                let path = start.join(name);
-                if !files.contains(&path) {
-                    files.push(path);
-                }
-            }
-        }
-        files.retain(|f| {
-            !negative.iter().any(|(dir, glob)| {
-                let Ok(rel) = f.strip_prefix(dir) else { return false };
-                let names: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
-                let names: Vec<&str> = names.iter().map(String::as_str).collect();
-                glob.is_match(&names)
-            })
-        });
+        let mut files = expand(&patterns, &base_dir, root, fs, dirs).map_err(&fail)?;
         files.retain(|f| f != module);
         files.sort();
         // The object.
@@ -601,6 +608,397 @@ pub fn rewrite(source: &str, module: &Path, root: &Path, fs: &dyn FileSystem, di
     Ok(Some(out))
 }
 
+// ---- `import(\`./dir/${name}.js\`)` ---------------------------------------------------------------------------------------------------
+
+/// A quick look that finds no `import(` whose argument is a template literal with a `${`, or a string followed by `+`: most files, and
+/// every big one. A `true` is only a maybe (it may be text in a string or a comment); the full scan decides.
+fn may_have_variable_import(source: &str) -> bool {
+    let bytes = source.as_bytes();
+    let mut from = 0;
+    while let Some(at) = source[from..].find("import") {
+        let start = from + at;
+        from = start + 6;
+        let mut i = start + 6;
+        while bytes.get(i).is_some_and(|b| b.is_ascii_whitespace()) {
+            i += 1;
+        }
+        if bytes.get(i) != Some(&b'(') {
+            continue;
+        }
+        i += 1;
+        while bytes.get(i).is_some_and(|b| b.is_ascii_whitespace()) {
+            i += 1;
+        }
+        match bytes.get(i) {
+            // A template literal that has a `${` before it ends.
+            Some(b'`') => {
+                let rest = &source[i + 1..];
+                let end = rest.find('`').unwrap_or(rest.len());
+                if rest[..end].contains("${") {
+                    return true;
+                }
+            }
+            // A string that is followed by a `+`.
+            Some(&q @ (b'"' | b'\'')) => {
+                let rest = &bytes[i + 1..];
+                if let Some(close) = rest.iter().take(400).position(|&b| b == q) {
+                    if rest[close + 1..].iter().find(|b| !b.is_ascii_whitespace()) == Some(&b'+') {
+                        return true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// What a scan of JavaScript text is inside of: the text of a template literal, or the code of one of its `${ }` (with the `{` it holds).
+enum Frame {
+    Text,
+    Code(u32),
+}
+
+/// Skips a comment or a string at `i` (a quote or a slash) and returns where it ends; `None` when `i` is neither.
+fn skip_literal(bytes: &[u8], i: usize) -> Option<usize> {
+    match bytes[i] {
+        b'/' if bytes.get(i + 1) == Some(&b'/') => Some(bytes[i..].iter().position(|&b| b == b'\n').map_or(bytes.len(), |n| i + n)),
+        b'/' if bytes.get(i + 1) == Some(&b'*') => Some(find(&bytes[i + 2..], b"*/").map_or(bytes.len(), |n| i + n + 4)),
+        q @ (b'"' | b'\'') => {
+            let mut j = i + 1;
+            while j < bytes.len() && bytes[j] != q && bytes[j] != b'\n' {
+                if bytes[j] == b'\\' {
+                    j += 1;
+                }
+                j += 1;
+            }
+            Some(j + 1)
+        }
+        _ => None,
+    }
+}
+
+/// Steps one byte of a scan: the frames of template literals are kept, and strings and comments are skipped. Returns the next position
+/// and whether the byte at `i` is code (not text of a template, not inside a comment or string).
+fn step(bytes: &[u8], i: usize, frames: &mut Vec<Frame>) -> (usize, bool) {
+    match frames.last_mut() {
+        Some(Frame::Text) => match bytes[i] {
+            b'\\' => (i + 2, false),
+            b'`' => {
+                frames.pop();
+                (i + 1, false)
+            }
+            b'$' if bytes.get(i + 1) == Some(&b'{') => {
+                frames.push(Frame::Code(0));
+                (i + 2, false)
+            }
+            _ => (i + 1, false),
+        },
+        top => {
+            if let Some(next) = skip_literal(bytes, i) {
+                return (next, false);
+            }
+            match bytes[i] {
+                b'`' => {
+                    frames.push(Frame::Text);
+                    (i + 1, false)
+                }
+                b'{' => {
+                    if let Some(Frame::Code(depth)) = top {
+                        *depth += 1;
+                    }
+                    (i + 1, true)
+                }
+                b'}' => {
+                    match top {
+                        Some(Frame::Code(0)) => {
+                            // The end of a `${ }`: the template text goes on.
+                            frames.pop();
+                            return (i + 1, false);
+                        }
+                        Some(Frame::Code(depth)) => *depth -= 1,
+                        _ => {}
+                    }
+                    (i + 1, true)
+                }
+                _ => (i + 1, true),
+            }
+        }
+    }
+}
+
+/// Where `import(` is a call in `source`: code, not a string, comment or template text, and not `x.import(` or `myimport(`. The place is the
+/// position of the word `import`.
+fn import_calls(source: &str) -> Vec<usize> {
+    let bytes = source.as_bytes();
+    let mut found = Vec::new();
+    let mut frames: Vec<Frame> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let (next, code) = step(bytes, i, &mut frames);
+        if code
+            && bytes[i..].starts_with(b"import")
+            && !(i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || matches!(bytes[i - 1], b'_' | b'$' | b'.')))
+            && !bytes.get(i + 6).is_some_and(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'$'))
+            && bytes[i + 6..].iter().find(|b| !b.is_ascii_whitespace()) == Some(&b'(')
+        {
+            found.push(i);
+            i += 6;
+            continue;
+        }
+        i = next;
+    }
+    found
+}
+
+/// The `)` that closes a call whose arguments start at `i`, when there is one argument; `None` for none or several.
+fn argument_end(source: &str, mut i: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut frames: Vec<Frame> = Vec::new();
+    let mut depth = 0u32;
+    while i < bytes.len() {
+        let (next, code) = step(bytes, i, &mut frames);
+        // Only code at the top level, not inside a template's `${ }`, counts its brackets.
+        if code && frames.is_empty() {
+            match bytes[i] {
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => {
+                    if depth == 0 {
+                        return (bytes[i] == b')').then_some(i);
+                    }
+                    depth -= 1;
+                }
+                b',' if depth == 0 => return None,
+                _ => {}
+            }
+        }
+        i = next;
+    }
+    None
+}
+
+/// One piece of the argument of `import(...)`: text that is there as written, or an expression that is not.
+#[derive(Debug, PartialEq, Clone)]
+enum Part {
+    Text(String),
+    Value,
+}
+
+/// The pieces of `\`./a/${x}.js\``, or of `'./a/' + x + '.js'`; `None` for any other expression (and when there is nothing to vary).
+fn argument_parts(arg: &str) -> Option<Vec<Part>> {
+    let arg = arg.trim();
+    let bytes = arg.as_bytes();
+    if bytes.first() == Some(&b'`') {
+        let mut parts = Vec::new();
+        let mut text = String::new();
+        let mut i = 1;
+        let mut closed = false;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'\\' => {
+                    // The escapes of a path are rare; one that is here makes the text uncertain.
+                    return None;
+                }
+                b'`' => {
+                    closed = i == bytes.len() - 1;
+                    break;
+                }
+                b'$' if bytes.get(i + 1) == Some(&b'{') => {
+                    if !text.is_empty() {
+                        parts.push(Part::Text(std::mem::take(&mut text)));
+                    }
+                    // The expression ends at the `}` that closes it; strings and other templates inside are followed.
+                    let mut depth = 0;
+                    let mut j = i + 2;
+                    while j < bytes.len() {
+                        match bytes[j] {
+                            b'{' => depth += 1,
+                            b'}' if depth == 0 => break,
+                            b'}' => depth -= 1,
+                            b'`' => return None,
+                            q @ (b'"' | b'\'') => {
+                                j += 1;
+                                while j < bytes.len() && bytes[j] != q {
+                                    if bytes[j] == b'\\' {
+                                        j += 1;
+                                    }
+                                    j += 1;
+                                }
+                            }
+                            _ => {}
+                        }
+                        j += 1;
+                    }
+                    if j >= bytes.len() {
+                        return None;
+                    }
+                    parts.push(Part::Value);
+                    i = j + 1;
+                    continue;
+                }
+                _ => {
+                    let ch = arg[i..].chars().next()?;
+                    text.push(ch);
+                    i += ch.len_utf8();
+                    continue;
+                }
+            }
+        }
+        if !closed {
+            return None;
+        }
+        if !text.is_empty() {
+            parts.push(Part::Text(text));
+        }
+        return parts.iter().any(|p| *p == Part::Value).then_some(parts);
+    }
+    // `'./a/' + x + '.js'`: split at the `+` that are outside brackets and strings.
+    let mut pieces: Vec<&str> = Vec::new();
+    let (mut depth, mut start, mut i) = (0i32, 0usize, 0usize);
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b'`' => return None,
+            q @ (b'"' | b'\'') => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != q {
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            b'+' if depth == 0 => {
+                pieces.push(&arg[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    pieces.push(&arg[start..]);
+    if pieces.len() < 2 {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for piece in pieces {
+        let piece = piece.trim();
+        let b = piece.as_bytes();
+        let quoted = b.len() >= 2 && matches!(b[0], b'"' | b'\'') && b[b.len() - 1] == b[0] && !piece[1..piece.len() - 1].contains(['\\', b[0] as char]);
+        parts.push(if quoted { Part::Text(piece[1..piece.len() - 1].to_string()) } else { Part::Value });
+    }
+    parts.iter().any(|p| *p == Part::Value).then_some(parts)
+}
+
+/// Why a pattern from the pieces cannot be turned into files; the one-segment glob when it can.
+fn dynamic_pattern(parts: &[Part]) -> Result<String, String> {
+    let first = match parts.first() {
+        Some(Part::Text(t)) => t,
+        _ => return Err("the path must start with ./ or ../ as text".into()),
+    };
+    if !(first.starts_with("./") || first.starts_with("../")) {
+        // Not a relative path: a package name or an address, which this does not try to look for.
+        return Err(String::new());
+    }
+    let mut pattern = String::new();
+    for part in parts {
+        match part {
+            Part::Text(t) => {
+                if t.contains(['*', '?', '[', ']', '{', '}', '!']) {
+                    return Err("the text of the path has a character a pattern uses (* ? [ ] { } !)".into());
+                }
+                pattern.push_str(t);
+            }
+            // One name in a path: what a variable stands for does not cross a `/`.
+            Part::Value => {
+                if pattern.ends_with('*') {
+                    return Err("two variables next to each other".into());
+                }
+                pattern.push('*');
+            }
+        }
+    }
+    let tail = pattern.rsplit('*').next().unwrap_or("");
+    if !tail.contains('.') || tail.contains('/') || tail.ends_with('.') {
+        return Err("the file extension must be written out in the path (`.js` after the last variable) so that the files can be told".into());
+    }
+    if pattern.starts_with("*") {
+        return Err("the path must start with ./ or ../".into());
+    }
+    Ok(pattern)
+}
+
+/// Each `import(\`./dir/${name}.js\`)` whose path can be known (it starts with ./ or ../, a variable stands for one name, and the extension is
+/// written out) becomes a call of a function that has an `import()` of each file the pattern reaches, and chooses by the path:
+/// the same rules as `@rollup/plugin-dynamic-import-vars`. What does not fit is left as it is; `warnings` says why, for a relative path.
+pub fn rewrite_dynamic_imports(source: &str, module: &Path, root: &Path, fs: &dyn FileSystem, dirs: &mut Vec<PathBuf>, warnings: &mut Vec<String>) -> Option<String> {
+    if !may_have_variable_import(source) {
+        return None;
+    }
+    let calls = import_calls(source);
+    if calls.is_empty() {
+        return None;
+    }
+    let module_dir = module.parent().unwrap_or(Path::new("/"));
+    let mut edits: Vec<(usize, String)> = Vec::new();
+    let mut helpers = String::new();
+    let mut counter = 0;
+    for start in calls {
+        let open = start + source[start..].find('(')?;
+        // One argument: it ends at the `)` that closes the call.
+        let Some(end) = argument_end(source, open + 1) else { continue };
+        let argument = &source[open + 1..end];
+        let Some(parts) = argument_parts(argument) else { continue };
+        let pattern = match dynamic_pattern(&parts) {
+            Ok(p) => p,
+            Err(why) => {
+                if !why.is_empty() {
+                    warnings.push(format!("import({}) is left as it is: {why}", argument.trim()));
+                }
+                continue;
+            }
+        };
+        let files = match expand(std::slice::from_ref(&pattern), module_dir, root, fs, dirs) {
+            Ok(files) => files.into_iter().filter(|f| f != module).collect::<Vec<_>>(),
+            Err(why) => {
+                warnings.push(format!("import({}) is left as it is: {why}", argument.trim()));
+                continue;
+            }
+        };
+        if files.is_empty() {
+            warnings.push(format!("import({}) is left as it is: no file matches {pattern}", argument.trim()));
+            continue;
+        }
+        if files.len() > 2000 {
+            warnings.push(format!("import({}) is left as it is: {} files match {pattern}", argument.trim(), files.len()));
+            continue;
+        }
+        let name = format!("__rkDynamicImport{counter}");
+        counter += 1;
+        let table: Vec<String> = files.iter().map(|f| {
+            let key = relative_from(module_dir, f);
+            format!("{}: () => import({})", quote(&key), quote(&key))
+        }).collect();
+        helpers.push_str(&format!(
+            "\nfunction {name}(path) {{ var table = {{ {} }}; var load = table[path]; return load ? load() : Promise.reject(new Error(\"Unknown variable dynamic import: \" + path)); }}",
+            table.join(", ")
+        ));
+        edits.push((start, name));
+    }
+    if edits.is_empty() {
+        return None;
+    }
+    // `import` becomes the helper's name, last edit first so the places stay true.
+    let mut out = source.to_string();
+    for (start, name) in edits.into_iter().rev() {
+        out.replace_range(start..start + "import".len(), &name);
+    }
+    out.push_str(&helpers);
+    out.push('\n');
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -639,6 +1037,38 @@ mod tests {
     fn finds_calls_outside_strings() {
         let source = "// import.meta.glob('x')\nconst a = 'import.meta.glob(1)'; import.meta.glob('./a.js');";
         assert_eq!(calls(source).len(), 1);
+    }
+
+    #[test]
+    fn import_calls_are_found_in_code_only() {
+        let src = "import('./a.js'); x.import('./b.js'); myimport('c'); // import('d')\nconst s = \"import('e')\"; const t = `text import('f') ${ import('g') } more`; /* import('h') */ import ( './i.js' );";
+        let found: Vec<&str> = import_calls(src).into_iter().map(|i| src[i..].split(')').next().unwrap()).collect();
+        assert_eq!(found, ["import('./a.js'", "import('g'", "import ( './i.js' "]);
+    }
+
+    #[test]
+    fn the_argument_ends_at_its_closing_paren() {
+        for (call, argument) in [("import(`./a/${x}.js`)", "`./a/${x}.js`"), ("import('./a' + f(1, 2) + '.js')", "'./a' + f(1, 2) + '.js'"), ("import(`./a/${ `${y}` }.js`)", "`./a/${ `${y}` }.js`"), ("import(a ? 'x' : \"y)\")", "a ? 'x' : \"y)\"")] {
+            let end = argument_end(call, 7).unwrap();
+            assert_eq!(&call[7..end], argument, "{call}");
+        }
+        assert_eq!(argument_end("import('a', { with: { type: 'json' } })", 7), None, "a second argument");
+    }
+
+    #[test]
+    fn what_a_variable_import_can_be() {
+        let pattern = |arg: &str| argument_parts(arg).ok_or_else(|| "no parts".to_string()).and_then(|p| dynamic_pattern(&p));
+        assert_eq!(pattern("`./mods/${n}.js`"), Ok("./mods/*.js".to_string()));
+        assert_eq!(pattern("'./mods/' + n + '.js'"), Ok("./mods/*.js".to_string()));
+        assert_eq!(pattern("`../x/${a}/${b}.json`"), Ok("../x/*/*.json".to_string()));
+        assert_eq!(pattern("`./mods/${n}`").unwrap_err().contains("extension"), true);
+        assert_eq!(pattern("`./mods/${a}${b}.js`").unwrap_err().contains("next to each other"), true);
+        assert_eq!(pattern("`./mods/*/${n}.js`").unwrap_err().contains("character a pattern uses"), true);
+        // Not paths of this kind: left alone without a word.
+        assert_eq!(dynamic_pattern(&argument_parts("`pkg/${n}.js`").unwrap()), Err(String::new()));
+        assert_eq!(argument_parts("n"), None);
+        assert_eq!(argument_parts("`./static.js`"), None);
+        assert_eq!(argument_parts("'./a' + '.js'"), None);
     }
 
     #[test]

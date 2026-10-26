@@ -617,6 +617,18 @@ impl Context<'_> {
                     (None, Some(bytes)) => String::from_utf8_lossy(&bytes).into_owned(),
                     (None, None) => self.resolver.read_to_string(path).map_err(|e| error(format!("Cannot read file: {e}"), None))?,
                 };
+                // `import(\`./dir/${name}.js\`)` becomes a choice among imports of the files that fit.
+                if text.contains("import(") || text.contains("import (") {
+                    let mut dirs = Vec::new();
+                    let mut warnings = Vec::new();
+                    let rewritten = crate::glob::rewrite_dynamic_imports(&text, path, self.cwd, self.resolver.file_system(), &mut dirs, &mut warnings);
+                    self.state.0.lock().unwrap().watch_dirs.extend(dirs);
+                    diagnostics.extend(warnings.into_iter().map(|message| Diagnostic { severity: Severity::Warning, message, file: Some(path.to_path_buf()), pos: None }));
+                    if let Some(rewritten) = rewritten {
+                        text = rewritten;
+                        used_glob = true;
+                    }
+                }
                 // `import.meta.glob(...)` becomes the imports of the files it names.
                 if text.contains("import.meta.glob") {
                     let mut dirs = Vec::new();
