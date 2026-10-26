@@ -29,6 +29,8 @@ pub struct Purity<'a> {
     pub semantic: &'a Semantic,
     /// With `--define`: branches that never run do not count.
     pub defines: Option<&'a crate::define::Defines>,
+    /// With `--pure`: calls of these names (`styled.div`) are free of effects, as if each carried `/* @__PURE__ */`.
+    pub pure_calls: &'a [String],
 }
 
 impl Purity<'_> {
@@ -129,6 +131,12 @@ impl Purity<'_> {
             NodeKind::Sequence(items) => ast.list(items).iter().all(|&e| self.expr_is_pure(e)),
             // A call the author marked as free of effects: only evaluating its arguments can matter.
             NodeKind::Call { args, .. } | NodeKind::New { args, .. } => self.is_marked_pure(id) && ast.list(args).iter().all(|&a| self.expr_is_pure(a)),
+            // A tagged template of a name given to --pure (`styled.div`...``): free of effects when what is in it is too.
+            NodeKind::TaggedTemplate { tag, quasi } => {
+                !self.pure_calls.is_empty()
+                    && self.callee_name(tag).is_some_and(|n| self.pure_calls.iter().any(|p| *p == n))
+                    && matches!(ast[quasi].kind, NodeKind::Template { exprs, .. } if ast.list(exprs).iter().all(|&e| self.expr_is_pure(e)))
+            }
             _ => false,
         }
     }
@@ -136,11 +144,33 @@ impl Purity<'_> {
     /// Whether a `/* @__PURE__ */` or `/* #__PURE__ */` comment comes right before the expression
     /// (with only blanks and opening parentheses between).
     fn is_marked_pure(&self, id: NodeId) -> bool {
+        if !self.pure_calls.is_empty() {
+            if let NodeKind::Call { callee, .. } | NodeKind::New { callee, .. } = self.ast[id].kind {
+                if let Some(name) = self.callee_name(callee) {
+                    if self.pure_calls.iter().any(|p| *p == name) {
+                        return true;
+                    }
+                }
+            }
+        }
         let start = self.ast[id].span.start as usize;
         let before = self.source.get(..start).unwrap_or("").trim_end_matches(|c: char| c.is_whitespace() || c == '(');
         let Some(body) = before.strip_suffix("*/") else { return false };
         let Some(open) = body.rfind("/*") else { return false };
         matches!(body[open + 2..].trim(), "@__PURE__" | "#__PURE__")
+    }
+
+    /// `a.b.c` for a callee that is a name or a chain of property reads on one.
+    fn callee_name(&self, callee: NodeId) -> Option<String> {
+        let ast = self.ast;
+        match ast[callee].kind {
+            NodeKind::Ident(n) => Some(ast.atom(n).to_string()),
+            NodeKind::Member { object, prop } if !ast[callee].has(flags::COMPUTED) && !ast[callee].has(flags::OPTIONAL) => match ast[prop].kind {
+                NodeKind::PropName(p) => Some(format!("{}.{}", self.callee_name(object)?, ast.atom(p))),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     fn member_is_pure(&self, member: NodeId) -> bool {
@@ -193,7 +223,7 @@ mod tests {
     fn pure(src: &str) -> bool {
         let parsed = parse(src, ParseOptions::new(true)).unwrap_or_else(|e| panic!("{}: {src}", e.message));
         let NodeKind::Program(body) = parsed.ast[parsed.ast.root].kind else { unreachable!() };
-        let analysis = Purity { source: src, ast: &parsed.ast, semantic: &parsed.semantic, defines: None };
+        let analysis = Purity { source: src, ast: &parsed.ast, semantic: &parsed.semantic, defines: None, pure_calls: &[] };
         analysis.statement_is_pure(parsed.ast.list(body)[0])
     }
 

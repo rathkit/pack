@@ -305,3 +305,22 @@ fn the_metafile_lists_inputs_outputs_and_what_connects_them() {
     assert!(outputs.get("main.css").unwrap().get("inputs").unwrap().get("s.css").is_some());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_call_given_to_pure_is_removed_when_unused() {
+    if Command::new("node").arg("--version").output().is_err() {
+        return;
+    }
+    let dir = scratch("pure");
+    let write = |name: &str, text: &str| std::fs::write(dir.join(name), text).unwrap();
+    write("lib.js", "export const styled = { div: (s) => { console.log('styled.div ran'); return s; } };\nexport function make(x) { console.log('make ran'); return x; }\n");
+    write(
+        "main.js",
+        "import { styled, make } from './lib.js';\nconst A = styled.div`unused`;\nconst B = make(1);\nconst C = make(effect());\nconst D = make(2);\nconsole.log('used', D);\nfunction effect() { console.log('effect ran'); return 2; }\n",
+    );
+    // Nothing is pure by default: every call runs.
+    assert_eq!(build_and_run(&dir, &[], &[]), "styled.div ran\nmake ran\neffect ran\nmake ran\nmake ran\nused 2");
+    // A name, and a chain of names, given to --pure: unused calls of them go; one whose arguments have effects stays whole; a used one stays.
+    assert_eq!(build_and_run(&dir, &["--pure:styled.div", "--pure", "make"], &[]), "effect ran\nmake ran\nmake ran\nused 2");
+    let _ = std::fs::remove_dir_all(&dir);
+}

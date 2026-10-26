@@ -641,6 +641,15 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
                 public_path_given = true;
             }
             "--preserve-symlinks" => options.resolve.preserve_symlinks = true,
+            // --pure:NAME: calls of NAME (a name, or a chain such as styled.div) are free of effects, so an unused one is removed.
+            arg if arg == "--pure" || arg.starts_with("--pure:") => {
+                let name = if arg == "--pure" { it.next().cloned().unwrap_or_default() } else { arg["--pure:".len()..].to_string() };
+                if name.is_empty() {
+                    eprintln!("error: --pure needs a name");
+                    return Done::Exit(ExitCode::from(2));
+                }
+                options.pure_calls.push(name);
+            }
             arg if arg == "--metafile" || arg.starts_with("--metafile=") => {
                 metafile = if arg == "--metafile" { it.next().cloned() } else { Some(arg["--metafile=".len()..].to_string()) };
             }

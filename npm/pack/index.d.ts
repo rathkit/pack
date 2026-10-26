@@ -38,6 +38,8 @@ export interface Options {
   footer?: string | { js?: string; css?: string };
   /** Remove every `console.*(...)` call, and every `debugger` statement. */
   drop?: Array<'console' | 'debugger'>;
+  /** Names whose calls have no effects (`'styled.div'`), as if each carried a `@__PURE__` comment: an unused call is removed, if what it is given has no effects either. */
+  pure?: string[];
   /** `external` leaves every package import out of the output (paths and aliases are still bundled). Default `bundle`. */
   packages?: 'external' | 'bundle';
   /** The extensions tried for an import without one, with or without the dot. Default `.tsx .ts .jsx .js .mjs .cjs .mts .cts .json`. */

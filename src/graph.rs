@@ -152,6 +152,8 @@ pub struct Graph {
     pub modules: Vec<Module>,
     pub entries: Vec<ModuleId>,
     pub diagnostics: Vec<Diagnostic>,
+    /// `--pure`: names whose calls are free of effects.
+    pub pure_calls: Vec<String>,
     /// Directories read for `import.meta.glob`: a file added to one changes the build.
     pub watch_dirs: Vec<PathBuf>,
 }
@@ -185,6 +187,8 @@ pub struct GraphOptions {
     pub public_path: String,
     /// `--define`: expressions replaced by constants.
     pub defines: crate::define::Defines,
+    /// `--pure`: names whose calls are free of effects (`styled.div`), as if each carried `/* @__PURE__ */`.
+    pub pure_calls: Vec<String>,
     /// Specifiers left out of the bundle: exact names, or a prefix ending in `/*`.
     pub external: Vec<String>,
     /// Treat Node's built-in modules (`fs`, `node:path`, ...) as external.
@@ -206,7 +210,7 @@ pub type WorkerBuilder = dyn Fn(&Path) -> Result<Vec<u8>, String> + Send + Sync;
 
 impl Default for GraphOptions {
     fn default() -> Self {
-        GraphOptions { plugins: None, resolve: ResolveOptions::default(), jsx: JsxOptions::default(), decorator_metadata: false, experimental_decorators: false, strict_null_checks: false, loaders: Vec::new(), asset_names: "[name]-[hash]".to_string(), public_path: "./".to_string(), defines: Default::default(), external: Vec::new(), node_builtins: true, packages_external: false, threads: 0, cache: None, federation: None, worker_builder: None }
+        GraphOptions { plugins: None, resolve: ResolveOptions::default(), jsx: JsxOptions::default(), decorator_metadata: false, experimental_decorators: false, strict_null_checks: false, loaders: Vec::new(), asset_names: "[name]-[hash]".to_string(), public_path: "./".to_string(), defines: Default::default(), pure_calls: Vec::new(), external: Vec::new(), node_builtins: true, packages_external: false, threads: 0, cache: None, federation: None, worker_builder: None }
     }
 }
 
@@ -280,6 +284,7 @@ pub fn build_with_fs(fs: Box<dyn FileSystem>, cwd: &Path, entries: &[String], op
     graph.decorator_metadata = options.decorator_metadata;
     graph.experimental_decorators = options.experimental_decorators;
     graph.defines = options.defines.clone();
+    graph.pure_calls = options.pure_calls.clone();
     graph
 }
 
@@ -929,7 +934,7 @@ fn finish(shared: Shared, entry_slots: &[usize]) -> Graph {
     // Thread timing also shuffles diagnostics; sort them so the output is stable.
     diagnostics.sort_by(|a, b| (&a.file, a.pos, &a.message).cmp(&(&b.file, b.pos, &b.message)));
     diagnostics.dedup_by(|a, b| a.file == b.file && a.pos == b.pos && a.message == b.message);
-    Graph { jsx: JsxOptions::default(), decorator_metadata: false, experimental_decorators: false, defines: Default::default(), modules: result, entries, diagnostics, watch_dirs: { watch_dirs.sort(); watch_dirs.dedup(); watch_dirs } }
+    Graph { jsx: JsxOptions::default(), decorator_metadata: false, experimental_decorators: false, defines: Default::default(), modules: result, entries, diagnostics, pure_calls: Vec::new(), watch_dirs: { watch_dirs.sort(); watch_dirs.dedup(); watch_dirs } }
 }
 
 const NODE_BUILTINS: &[&str] = &[

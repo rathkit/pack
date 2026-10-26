@@ -41,7 +41,8 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   `--footer`, put around every file of that kind (source maps are moved to match; a banner goes before a `#!` line too, so a
   script that needs one should put it in the banner); `--drop:console` (every `console.*(...)` call of the global `console`
   becomes `(void 0)`, arguments included) and `--drop:debugger`; `--packages=external` (every package import is left out of the
-  bundle: a name that is not a path, and not made into one by an alias); `--resolve-extensions=.ts,.js`; `--preserve-symlinks`; `--metafile=FILE` (JSON in the shape of esbuild's metafile: every
+  bundle: a name that is not a path, and not made into one by an alias); `--resolve-extensions=.ts,.js`; `--pure:NAME` (calls of a name, or of a chain such as `styled.div`, and tagged templates of it, are free of effects, so an unused one
+  is removed when what it is given has no effects either); `--preserve-symlinks`; `--metafile=FILE` (JSON in the shape of esbuild's metafile: every
   module with what it imports, every file written with the modules in it, what it imports and exports and its entry point;
   `bytesInOutput` is an estimate, the modules' original sizes scaled to the file's size).
   A word that starts with a dash and is not an option is an error, not a file.

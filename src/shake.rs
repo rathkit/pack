@@ -313,7 +313,7 @@ fn build_parts(graph: &Graph, id: ModuleId, enums: Option<(&EnumTable, &Linked)>
     use crate::ast::NodeKind;
     let (ast, semantic) = (&parsed.ast, &parsed.semantic);
     let defines = Some(&graph.defines).filter(|d| !d.is_empty());
-    let purity = Purity { source: &module.source, ast, semantic, defines };
+    let purity = Purity { source: &module.source, ast, semantic, defines, pure_calls: &graph.pure_calls };
     let root = semantic.root_scope();
     let NodeKind::Program(body) = ast[ast.root].kind else { return ModuleShake::default() };
     let mut parts = Vec::new();
