@@ -9,6 +9,10 @@ use super::*;
 use crate::ast::{AssignOp, BinOp};
 use crate::target::Feature;
 
+fn ast_index(node: NodeId) -> u32 {
+    node.index() as u32
+}
+
 fn text(s: &str) -> Piece {
     Piece::Text(s.to_string())
 }
@@ -28,6 +32,8 @@ pub(super) struct FnCtx {
     kind: AsyncKind,
     /// Inside an async function that was rewritten and is a method, so `super.x` is read through its `__superGet`.
     super_ok: bool,
+    /// The rewritten function whose generator declares the temporaries of the `super` writes in this one (a plain arrow shares its parent's).
+    owner: u32,
 }
 
 const SUPER_ACCESSORS: &str = " const __superGet = (k) => super[k]; const __superSet = (k, v) => super[k] = v; ";
@@ -62,14 +68,11 @@ impl Scanner<'_, '_> {
             _ => AsyncKind::Native,
         };
         let parent = self.async_ctx.last().copied().unwrap_or_default();
-        let super_ok = if f & flags::ARROW != 0 {
-            parent.super_ok
-        } else if kind != AsyncKind::Native {
-            self.contains_super(body)
-        } else {
-            self.lowers(Feature::AsyncFunction) && self.needs_super_accessor(body)
-        };
-        FnCtx { kind, super_ok }
+        let arrow = f & flags::ARROW != 0;
+        // An arrow whose `super` the method around it does not provide gets accessors of its own (see `lower_async`).
+        let super_ok = if arrow { parent.super_ok || kind != AsyncKind::Native && self.contains_super(body) } else { kind != AsyncKind::Native && self.contains_super(body) };
+        let owner = if arrow && kind == AsyncKind::Native { parent.owner } else { node.index() as u32 };
+        FnCtx { kind, super_ok, owner }
     }
 
     fn await_pieces(&mut self, inner: Vec<Piece>) -> Vec<Piece> {
@@ -178,11 +181,6 @@ impl Scanner<'_, '_> {
             }
             NodeKind::Function { params, body, .. } => {
                 let flags = ast[node].flags;
-                if !self.async_lowered(flags) && flags & crate::ast::flags::ARROW == 0 && self.lowers(Feature::AsyncFunction) && matches!(ast[body].kind, NodeKind::Block(_)) && self.needs_super_accessor(body) {
-                    // An async arrow in a method that is not async: the method hands its `super` to the arrow.
-                    let at = ast[body].span.start + 1;
-                    self.edits.push(Edit { start: at, end: at, pieces: vec![text(SUPER_ACCESSORS)], shorthand: None, transparent: false });
-                }
                 if self.async_lowered(flags) && !self.skip.contains(&node) {
                     // A method's `async` comes before its key; the method has already handled it (see below).
                     let at = ast[node].span.start;
@@ -826,11 +824,9 @@ impl Scanner<'_, '_> {
         let generator = ast[function].flags & crate::ast::flags::GENERATOR != 0;
         let arrow = ast[function].has(crate::ast::flags::ARROW);
         let uses_super = self.contains_super(body);
-        // An arrow reads `super` through the accessor of the method around it, which only a rewritten async method has.
-        if uses_super && arrow && !self.async_ctx.last().is_some_and(|c| c.super_ok) {
-            self.lower_error(Feature::AsyncFunction, function);
-            return;
-        }
+        // An arrow reads `super` through the accessors of the method around it; one that has none (a plain method, a field) gets
+        // accessors made where the arrow is, which is where `super` means what it should.
+        let wrap_super = uses_super && arrow && !self.async_ctx.last().is_some_and(|c| c.super_ok);
         if generator {
             self.bundler.helpers.async_gen = true;
         } else {
@@ -846,7 +842,9 @@ impl Scanner<'_, '_> {
             let header = self.source_between(async_at, ast[function].span.end);
             header[..header.find('(')?].find('*').map(|j| async_at + j as u32)
         });
-        self.edits.push(Edit { start: async_at, end: async_at + 5 + after as u32, pieces: Vec::new(), shorthand: None, transparent: false });
+        let prefix = if wrap_super { vec![text("((__superGet, __superSet) => ")] } else { Vec::new() };
+        let suffix = if wrap_super { ")((k) => super[k], (k, v) => super[k] = v)" } else { "" };
+        self.edits.push(Edit { start: async_at, end: async_at + 5 + after as u32, pieces: prefix, shorthand: None, transparent: false });
         if let (true, Some(star)) = (generator, star) {
             self.edits.push(Edit { start: star, end: star + 1, pieces: Vec::new(), shorthand: None, transparent: false });
         }
@@ -855,30 +853,60 @@ impl Scanner<'_, '_> {
         let driver = if generator { "__asyncGenerator" } else { "__async" };
         let open = format!("{driver}(this, {arguments}, function* () ");
         let accessor = if uses_super && !arrow { SUPER_ACCESSORS.trim_start() } else { "" };
+        // The temporaries of the writes to `super` properties, declared in the generator so each call has its own.
+        let sites = self.count_super_sites(body);
+        let owner = ast_index(function);
+        let declare = if sites == 0 { String::new() } else { format!("var {}; ", (0..sites * 2).map(|i| format!("__sk{owner}_{i}")).collect::<Vec<_>>().join(", ")) };
         if matches!(ast[body].kind, NodeKind::Block(_)) {
             self.edits.push(Edit { start: bs, end: bs, pieces: vec![text(&format!("{{ {accessor}return {open}"))], shorthand: None, transparent: false });
+            if !declare.is_empty() {
+                let NodeKind::Block(list) = ast[body].kind else { return };
+                let mut at = bs + 1;
+                for &statement in ast.list(list) {
+                    match ast[statement].kind {
+                        NodeKind::ExprStmt(_) if ast[statement].flags & crate::ast::flags::DIRECTIVE != 0 => at = ast[statement].span.end,
+                        _ => break,
+                    }
+                }
+                self.edits.push(Edit { start: at, end: at, pieces: vec![text(&format!(" {declare}"))], shorthand: None, transparent: false });
+            }
             // Replacing the closing brace, rather than adding after it, keeps the edit inside a method that is moved elsewhere.
-            self.edits.push(Edit { start: be - 1, end: be, pieces: vec![text("} ); }")], shorthand: None, transparent: false });
+            self.edits.push(Edit { start: be - 1, end: be, pieces: vec![text(&format!("}} ); }}{suffix}"))], shorthand: None, transparent: false });
         } else {
-            self.edits.push(Edit { start: bs, end: bs, pieces: vec![text(&format!("{open}{{ return "))], shorthand: None, transparent: false });
-            self.edits.push(Edit { start: be, end: be, pieces: vec![text("; })")], shorthand: None, transparent: false });
+            self.edits.push(Edit { start: bs, end: bs, pieces: vec![text(&format!("{open}{{ {declare}return "))], shorthand: None, transparent: false });
+            self.edits.push(Edit { start: be, end: be, pieces: vec![text(&format!("; }}){suffix}"))], shorthand: None, transparent: false });
         }
     }
 
-    /// Whether an async arrow that gets rewritten reads `super` somewhere in this function (not in a function of its own).
-    fn needs_super_accessor(&self, node: NodeId) -> bool {
+    /// How many writes to a `super` property in this function need temporaries (not counting a function of its own or an arrow that is rewritten).
+    fn count_super_sites(&self, node: NodeId) -> usize {
         let ast = self.ast;
-        if let NodeKind::Function { body, .. } = ast[node].kind {
-            if !ast[node].has(crate::ast::flags::ARROW) {
-                return false;
+        let mut count = 0;
+        let mut children = Vec::new();
+        ast.for_each_child(node, |c| children.push(c));
+        for c in children {
+            if let NodeKind::Function { .. } = ast[c].kind {
+                if !ast[c].has(crate::ast::flags::ARROW) || self.async_lowered(ast[c].flags) {
+                    continue;
+                }
             }
-            if self.async_lowered(ast[node].flags) && self.contains_super(body) {
-                return true;
-            }
+            count += self.super_site_needs_temps(c) as usize + self.count_super_sites(c);
         }
-        let mut found = false;
-        ast.for_each_child(node, |c| found = found || self.needs_super_accessor(c));
-        found
+        count
+    }
+
+    fn super_site_needs_temps(&self, node: NodeId) -> bool {
+        let ast = self.ast;
+        let super_member = |n: NodeId| matches!(ast[n].kind, NodeKind::Member { object, .. } if matches!(ast[object].kind, NodeKind::Super));
+        match ast[node].kind {
+            NodeKind::Assign { op, target, .. } if super_member(target) => match op {
+                AssignOp::Assign => false,
+                AssignOp::Op(BinOp::LogAnd | BinOp::LogOr | BinOp::Nullish) => true,
+                AssignOp::Op(_) => ast[target].has(crate::ast::flags::COMPUTED),
+            },
+            NodeKind::Update { arg, .. } if super_member(arg) => ast[arg].has(crate::ast::flags::COMPUTED) || !ast[node].has(crate::ast::flags::PREFIX),
+            _ => false,
+        }
     }
 
     /// Whether `super` is used in the function (not in a function of its own, but in an arrow it is).
@@ -905,48 +933,55 @@ impl Scanner<'_, '_> {
         };
         match ast[node].kind {
             NodeKind::Assign { op, target, value } if super_member(target) => {
-                let op_text = match op {
-                    AssignOp::Assign => None,
-                    AssignOp::Op(BinOp::LogAnd | BinOp::LogOr | BinOp::Nullish | BinOp::Exp) => {
-                        self.lower_error(Feature::AsyncFunction, node);
-                        return;
-                    }
-                    AssignOp::Op(op) => Some(op.as_str()),
-                };
-                if op_text.is_some() && ast[target].has(crate::ast::flags::COMPUTED) {
-                    self.lower_error(Feature::AsyncFunction, node);
-                    return;
-                }
                 self.skip.insert(target);
-                let key = self.super_key(target);
+                let needs = self.super_site_needs_temps(node);
+                let computed = ast[target].has(crate::ast::flags::COMPUTED);
+                let (t1, t2) = if needs { self.site_temps() } else { (String::new(), String::new()) };
+                // The key: written once, or kept in a temporary for the second use.
+                let (decl, key): (Vec<Piece>, Vec<Piece>) = if computed && op != AssignOp::Assign {
+                    let (ps, pe) = self.span(match ast[target].kind {
+                        NodeKind::Member { prop, .. } => prop,
+                        _ => target,
+                    });
+                    (vec![text(&format!("{t1} = ")), Piece::Range(ps, pe), text(", ")], vec![text(&t1)])
+                } else {
+                    (Vec::new(), self.super_key(target))
+                };
                 let (vs, ve) = self.span(value);
-                let mut pieces = vec![text("__superSet(")];
-                pieces.extend(key.clone());
-                pieces.push(text(", "));
-                if let Some(op_text) = op_text {
-                    pieces.push(text("__superGet("));
-                    pieces.extend(key);
-                    pieces.push(text(&format!(") {op_text} ")));
-                }
-                pieces.extend([text("("), Piece::Range(vs, ve), text("))")]);
+                let v = vec![text("("), Piece::Range(vs, ve), text(")")];
+                let get = [vec![text("__superGet(")], key.clone(), vec![text(")")]].concat();
+                let set = |value: Vec<Piece>| [vec![text("__superSet(")], key.clone(), vec![text(", ")], value, vec![text(")")]].concat();
+                let body = match op {
+                    AssignOp::Assign => set(v),
+                    AssignOp::Op(BinOp::Exp) if self.lowers(Feature::Exponent) => set([vec![text("Math.pow(")], get, vec![text(", ")], v, vec![text(")")]].concat()),
+                    AssignOp::Op(BinOp::LogOr) => [vec![text(&format!("({t2} = "))], get.clone(), vec![text(&format!(") ? {t2} : "))], set(v)].concat(),
+                    AssignOp::Op(BinOp::LogAnd) => [vec![text(&format!("({t2} = "))], get.clone(), vec![text(") ? ")], set(v), vec![text(&format!(" : {t2}"))]].concat(),
+                    AssignOp::Op(BinOp::Nullish) => [vec![text(&format!("({t2} = "))], get.clone(), vec![text(&format!(") != null ? {t2} : "))], set(v)].concat(),
+                    AssignOp::Op(op) => set([get, vec![text(&format!(" {} ", op.as_str()))], v].concat()),
+                };
                 let (s, e) = self.span(node);
-                self.edits.push(Edit { start: s, end: e, pieces, shorthand: None, transparent: false });
+                self.edits.push(Edit { start: s, end: e, pieces: [vec![text("(")], decl, body, vec![text(")")]].concat(), shorthand: None, transparent: false });
             }
             NodeKind::Update { op, arg } if super_member(arg) => {
-                if ast[arg].has(crate::ast::flags::COMPUTED) {
-                    self.lower_error(Feature::AsyncFunction, node);
-                    return;
-                }
                 self.skip.insert(arg);
-                let key: String = self.super_key(arg).iter().map(|p| if let Piece::Text(t) = p { t.clone() } else { String::new() }).collect();
-                let sign = if op == crate::ast::UpdateOp::Inc { "+" } else { "-" };
-                let text_out = if ast[node].has(crate::ast::flags::PREFIX) {
-                    format!("__superSet({key}, +__superGet({key}) {sign} 1)")
+                let (t1, t2) = if self.super_site_needs_temps(node) { self.site_temps() } else { (String::new(), String::new()) };
+                let computed = ast[arg].has(crate::ast::flags::COMPUTED);
+                let (decl, key): (Vec<Piece>, Vec<Piece>) = if computed {
+                    let NodeKind::Member { prop, .. } = ast[arg].kind else { return };
+                    let (ps, pe) = self.span(prop);
+                    (vec![text(&format!("{t1} = ")), Piece::Range(ps, pe), text(", ")], vec![text(&t1)])
                 } else {
-                    format!("((__t) => (__superSet({key}, __t {sign} 1), __t))(+__superGet({key}))")
+                    (Vec::new(), self.super_key(arg))
+                };
+                let sign = if op == crate::ast::UpdateOp::Inc { "+" } else { "-" };
+                let k: Vec<Piece> = key;
+                let pieces = if ast[node].has(crate::ast::flags::PREFIX) {
+                    [vec![text("(")], decl, vec![text("__superSet(")], k.clone(), vec![text(", +__superGet(")], k, vec![text(&format!(") {sign} 1))"))]].concat()
+                } else {
+                    [vec![text("(")], decl, vec![text(&format!("{t2} = +__superGet("))], k.clone(), vec![text("), __superSet(")], k, vec![text(&format!(", {t2} {sign} 1), {t2})"))]].concat()
                 };
                 let (s, e) = self.span(node);
-                self.edits.push(Edit { start: s, end: e, pieces: vec![text(&text_out)], shorthand: None, transparent: false });
+                self.edits.push(Edit { start: s, end: e, pieces, shorthand: None, transparent: false });
             }
             NodeKind::Call { callee, args } if super_member(callee) => {
                 self.skip.insert(callee);
@@ -967,6 +1002,15 @@ impl Scanner<'_, '_> {
             }
             _ => {}
         }
+    }
+
+    /// The next two temporaries of the rewritten function that owns the code being scanned.
+    fn site_temps(&mut self) -> (String, String) {
+        let owner = self.async_ctx.last().map_or(0, |c| c.owner);
+        let next = self.site_next.entry(owner).or_insert(0);
+        let names = (format!("__sk{owner}_{}", *next), format!("__sk{owner}_{}", *next + 1));
+        *next += 2;
+        names
     }
 
     /// The property of a `super.name` or `super[expression]`, as an expression.

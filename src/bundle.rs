@@ -1953,7 +1953,7 @@ impl<'a> Bundler<'a> {
             self.code.insert(id, Code::Wrapped { edits: Vec::new(), json: true, require_cases: None });
             return;
         };
-        let mut scanner = Scanner { bundler: self, module, places: None, private_scopes: Vec::new(), private_refs: HashMap::new(), chain_members: HashSet::new(), ast: &parsed.ast, semantic: &parsed.semantic, edits: Vec::new(), shorthand: HashSet::new(), skip: HashSet::new(), written: HashSet::new(), fn_depth: 0, async_ctx: Vec::new(), has_tla: false, needs_require: false, top_decl: None, in_wrapper: false, name_hint: None, shared_names: None };
+        let mut scanner = Scanner { bundler: self, module, places: None, private_scopes: Vec::new(), private_refs: HashMap::new(), chain_members: HashSet::new(), ast: &parsed.ast, semantic: &parsed.semantic, edits: Vec::new(), shorthand: HashSet::new(), skip: HashSet::new(), written: HashSet::new(), fn_depth: 0, async_ctx: Vec::new(), site_next: HashMap::new(), has_tla: false, needs_require: false, top_decl: None, in_wrapper: false, name_hint: None, shared_names: None };
         let code = if module.kind == ModuleKind::Esm { scanner.scan_esm(id) } else { scanner.scan_wrapped(id) };
         self.code.insert(id, code);
     }
@@ -2024,6 +2024,8 @@ struct Scanner<'b, 'a> {
     fn_depth: u32,
     /// For each function the walk is inside, how its `await`s are written once the target lacks async functions.
     async_ctx: Vec<lower::FnCtx>,
+    /// How many of the temporaries for `super` writes each rewritten function has handed out.
+    site_next: HashMap<u32, u32>,
     has_tla: bool,
     /// A CommonJS module mentions `require` other than as a direct call of a literal.
     needs_require: bool,
