@@ -652,6 +652,11 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
                 }
                 options.resolve.main_fields.extend(it.next().cloned());
             }
+            // A word that starts with a dash and is not an option is a mistake (a typo, or an option this program does not have): it is not a file.
+            arg if arg.starts_with('-') && arg.len() > 1 => {
+                eprintln!("error: unknown option {arg} (the options are listed in the README)");
+                return Done::Exit(ExitCode::from(2));
+            }
             _ => entries.push(arg.clone()),
         }
     }

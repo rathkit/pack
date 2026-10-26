@@ -150,3 +150,17 @@ fn the_dev_server_serves_and_tells_pages_about_changes() {
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "the dev server misbehaves:\n{text}\n{}", String::from_utf8_lossy(&output.stderr));
 }
+
+#[test]
+fn an_unknown_option_is_an_error_and_not_a_file_name() {
+    let run = |args: &[&str]| std::process::Command::new(env!("CARGO_BIN_EXE_rkp")).args(args).output().expect("rkp starts");
+    for args in [&["bundle", "main.js", "--target", "es2015"][..], &["serve", "main.js", "--nope"][..], &["bundle", "-x", "main.js"][..]] {
+        let out = run(args);
+        let text = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {text}");
+        assert!(text.contains("unknown option"), "{args:?}: {text}");
+    }
+    // The forms with the value attached are options, not mistakes.
+    let out = run(&["bundle", "--define:A=1", "--sourcemap=inline", "--loader:.txt=text", "missing.js", "--outfile", "/dev/null"]);
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("unknown option"));
+}
