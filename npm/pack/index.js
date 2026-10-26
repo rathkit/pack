@@ -2,7 +2,7 @@
 // The programmatic side of Rathkit Pack: the same program as the `rkp` command, started with options in place of flags.
 // It has no dependencies and starts no process but the program itself (and nothing at install time).
 const { spawn, spawnSync } = require('node:child_process');
-const { existsSync, mkdtempSync, rmSync, writeFileSync } = require('node:fs');
+const { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require('node:fs');
 const { dirname, join, resolve } = require('node:path');
 const { tmpdir } = require('node:os');
 
@@ -50,7 +50,7 @@ class BuildError extends Error {
   }
 }
 
-const KEYS = new Set(['entries', 'cwd', 'env', 'signal', 'outfile', 'outdir', 'format', 'globalName', 'globals', 'minify', 'keepNames', 'sourcemap', 'sourcesContent', 'splitting', 'treeShaking', 'platform', 'external', 'conditions', 'mainFields', 'alias', 'define', 'loader', 'assetNames', 'publicPath', 'jsx', 'jsxImportSource', 'jsxFactory', 'jsxFragment', 'decoratorMetadata', 'experimentalDecorators', 'strictNullChecks', 'tsconfig', 'config', 'mode', 'envDir', 'envPrefix', 'envFiles', 'banner', 'footer', 'drop', 'packages', 'resolveExtensions', 'preserveSymlinks', 'federation', 'originalPaths', 'corsOrigins', 'port', 'host']);
+const KEYS = new Set(['entries', 'cwd', 'env', 'signal', 'outfile', 'outdir', 'format', 'globalName', 'globals', 'minify', 'keepNames', 'sourcemap', 'sourcesContent', 'splitting', 'treeShaking', 'platform', 'external', 'conditions', 'mainFields', 'alias', 'define', 'loader', 'assetNames', 'publicPath', 'jsx', 'jsxImportSource', 'jsxFactory', 'jsxFragment', 'decoratorMetadata', 'experimentalDecorators', 'strictNullChecks', 'tsconfig', 'config', 'mode', 'envDir', 'envPrefix', 'envFiles', 'banner', 'footer', 'drop', 'packages', 'resolveExtensions', 'preserveSymlinks', 'metafile', 'federation', 'originalPaths', 'corsOrigins', 'port', 'host']);
 
 /** The command line for options. A key that is not an option is an error, so a typo is not ignored. */
 function toArgs(options, cleanups) {
@@ -108,6 +108,7 @@ function toArgs(options, cleanups) {
   add('--packages', options.packages);
   if (options.resolveExtensions) args.push('--resolve-extensions', options.resolveExtensions.join(','));
   if (options.preserveSymlinks) args.push('--preserve-symlinks');
+  if (options.metafile) args.push(`--metafile=${resolve(options.cwd ?? process.cwd(), options.metafile)}`);
   add('--mode', options.mode);
   add('--env-dir', options.envDir);
   each('--env-prefix', [].concat(options.envPrefix ?? []));
@@ -175,6 +176,8 @@ async function build(options = {}) {
     if (!result.ok) throw new BuildError(result);
     // A single output file is not listed by the program; the page and style sheets beside it are.
     if (options.outfile) result.files.unshift(resolve(options.cwd ?? process.cwd(), options.outfile));
+    // The metafile is read back, so a program can use it without opening the file.
+    if (options.metafile) result.metafile = JSON.parse(readFileSync(resolve(options.cwd ?? process.cwd(), options.metafile), 'utf8'));
     return result;
   } finally {
     cleanups.forEach((c) => c());

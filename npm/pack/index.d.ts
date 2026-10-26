@@ -44,6 +44,8 @@ export interface Options {
   resolveExtensions?: string[];
   /** Keep a symbolic link's own path instead of the real file's. */
   preserveSymlinks?: boolean;
+  /** Write what went into the build and what came out, as JSON in the shape of esbuild's metafile, to this file (the result has it too). */
+  metafile?: string;
   /** Specifiers left out of the output: exact names, or a prefix ending in `/*`. */
   external?: string[];
   /** Conditions of `exports` and `imports` maps, besides the usual ones. */
@@ -90,11 +92,19 @@ export interface Options {
   host?: string;
 }
 
+/** What went into a build and what came out: the shape of esbuild's metafile. `bytesInOutput` is an estimate (the original sizes, scaled to the file's size). */
+export interface Metafile {
+  inputs: Record<string, { bytes: number; imports: Array<{ path: string; kind: string; external?: boolean }>; format?: 'esm' | 'cjs' }>;
+  outputs: Record<string, { bytes: number; inputs: Record<string, { bytesInOutput: number }>; imports: Array<{ path: string; kind: string; external?: boolean }>; exports: string[]; entryPoint?: string }>;
+}
+
 export interface BuildResult {
   ok: true;
   status: 0;
   /** The files written: the `outfile`, the files of `outdir`, pages. */
   files: string[];
+  /** The metafile, when `metafile` was asked for. */
+  metafile?: Metafile;
   warnings: string[];
   errors: string[];
   stdout: string;

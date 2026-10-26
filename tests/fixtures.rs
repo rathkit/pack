@@ -271,3 +271,37 @@ fn packages_external_resolve_extensions_and_symlinks() {
     assert!(text_of_bundle.contains("from \"dep\"") && !text_of_bundle.contains("dep-value"), "{text_of_bundle}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_metafile_lists_inputs_outputs_and_what_connects_them() {
+    use rathkit_pack::json::Json;
+    let dir = scratch("metafile");
+    std::fs::create_dir_all(dir.join("lib")).unwrap();
+    let write = |name: &str, text: &str| std::fs::write(dir.join(name), text).unwrap();
+    write("main.js", "import './s.css';\nimport { a } from './lib/a.js';\nexport const load = () => import('./lazy.js');\nconsole.log(a);\n");
+    write("lib/a.js", "export const a = 1;\n");
+    write("lazy.js", "export const l = 'lazy';\n");
+    write("s.css", "p { color: red }\n");
+    let built = Command::new(env!("CARGO_BIN_EXE_rkp")).current_dir(&dir).args(["bundle", "main.js", "--outdir", "out", "--splitting", "--metafile=meta/build.json"]).output().expect("rkp starts");
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    let meta = Json::parse(&std::fs::read_to_string(dir.join("meta/build.json")).unwrap()).unwrap();
+    let inputs = meta.get("inputs").unwrap();
+    for name in ["main.js", "lib/a.js", "lazy.js", "s.css"] {
+        assert!(inputs.get(name).is_some(), "input {name}");
+    }
+    let imports: Vec<String> = inputs.get("main.js").unwrap().get("imports").and_then(Json::as_array).unwrap().iter().map(|i| format!("{}:{}", i.get("path").and_then(Json::as_str).unwrap(), i.get("kind").and_then(Json::as_str).unwrap())).collect();
+    assert_eq!(imports, ["s.css:import-statement", "lib/a.js:import-statement", "lazy.js:dynamic-import"]);
+    let outputs = meta.get("outputs").unwrap();
+    let main = outputs.get("main.js").expect("the entry file");
+    assert_eq!(main.get("entryPoint").and_then(Json::as_str), Some("main.js"));
+    assert_eq!(main.get("bytes").and_then(Json::as_f64), Some(std::fs::metadata(dir.join("out/main.js")).unwrap().len() as f64));
+    assert!(main.get("inputs").unwrap().get("lib/a.js").is_some());
+    let lazy = match outputs {
+        Json::Object(fields) => fields.iter().find(|(k, _)| k.starts_with("lazy-")).map(|(_, v)| v),
+        _ => None,
+    };
+    assert!(lazy.is_some_and(|l| l.get("inputs").unwrap().get("lazy.js").is_some()), "the lazy file holds lazy.js");
+    assert!(main.get("imports").and_then(Json::as_array).unwrap().iter().any(|i| i.get("kind").and_then(Json::as_str) == Some("dynamic-import")));
+    assert!(outputs.get("main.css").unwrap().get("inputs").unwrap().get("s.css").is_some());
+    let _ = std::fs::remove_dir_all(&dir);
+}

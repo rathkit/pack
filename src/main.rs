@@ -547,6 +547,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     let mut env_prefixes: Vec<String> = Vec::new();
     let mut env_files = true;
     let mut public_path_given = false;
+    let mut metafile: Option<String> = None;
     let mut bundle_options = rathkit_pack::bundle::Options::default();
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -640,6 +641,9 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
                 public_path_given = true;
             }
             "--preserve-symlinks" => options.resolve.preserve_symlinks = true,
+            arg if arg == "--metafile" || arg.starts_with("--metafile=") => {
+                metafile = if arg == "--metafile" { it.next().cloned() } else { Some(arg["--metafile=".len()..].to_string()) };
+            }
             // --drop:console and --drop:debugger (also --drop console).
             arg if arg == "--drop" || arg.starts_with("--drop:") => {
                 let what = if arg == "--drop" { it.next().cloned().unwrap_or_default() } else { arg["--drop:".len()..].to_string() };
@@ -939,7 +943,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     // Workers are scripts built on their own; the files they read and the files they copy are noted for the build that asked.
     let workers = std::sync::Arc::new(WorkerLog::default());
     options.worker_builder = Some(worker_builder(cwd.clone(), options.clone(), bundle_options.clone(), treeshake, workers.clone(), 0));
-    let job = std::sync::Arc::new(Job { cwd, entries, options, bundle_options, treeshake, outfile, outdir, host: plugin_host, config_file, watch, serve: serve_state, bind: (host_name, port), restart_files, workers, pages });
+    let job = std::sync::Arc::new(Job { cwd, entries, options, bundle_options, treeshake, outfile, outdir, host: plugin_host, config_file, watch, serve: serve_state, bind: (host_name, port), restart_files, workers, pages, metafile });
     if let Some(host) = &job.host {
         // Child compilers of webpack plugins build one entry as a script that sets a global.
         let for_children = job.clone();
@@ -976,6 +980,8 @@ struct Job {
     restart_files: Vec<std::path::PathBuf>,
     workers: std::sync::Arc<WorkerLog>,
     pages: Vec<Page>,
+    /// Where to write what went into the build and what came out, as JSON.
+    metafile: Option<String>,
 }
 
 /// An html page given as an entry: its text, and the scripts in it with the files they come from.
@@ -1389,6 +1395,14 @@ fn run_build(job: &Job) -> Outcome {
         }
         (other, _) => other,
     };
+    if let (Ok(output), Some(file)) = (&result, &job.metafile) {
+        let target = std::path::Path::new(file);
+        let text = rathkit_pack::metafile::build(&graph, output, cwd);
+        if let Err(e) = target.parent().filter(|p| !p.as_os_str().is_empty()).map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(target, text)) {
+            eprintln!("error: {file}: {e}");
+            return outcome;
+        }
+    }
     // The dev server keeps the build in memory instead of writing it.
     if let Some(state) = &job.serve {
         match result {

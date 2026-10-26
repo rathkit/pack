@@ -18,6 +18,7 @@ pub mod json;
 pub mod link;
 pub mod literal;
 pub mod loader;
+pub mod metafile;
 pub mod module;
 pub mod parser;
 pub mod plugins;
