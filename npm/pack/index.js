@@ -50,7 +50,7 @@ class BuildError extends Error {
   }
 }
 
-const KEYS = new Set(['entries', 'cwd', 'env', 'signal', 'outfile', 'outdir', 'format', 'globalName', 'globals', 'minify', 'keepNames', 'sourcemap', 'sourcesContent', 'splitting', 'treeShaking', 'platform', 'external', 'conditions', 'mainFields', 'alias', 'define', 'loader', 'assetNames', 'publicPath', 'jsx', 'jsxImportSource', 'jsxFactory', 'jsxFragment', 'decoratorMetadata', 'experimentalDecorators', 'strictNullChecks', 'tsconfig', 'config', 'mode', 'envDir', 'envPrefix', 'envFiles', 'federation', 'originalPaths', 'corsOrigins', 'port', 'host']);
+const KEYS = new Set(['entries', 'cwd', 'env', 'signal', 'outfile', 'outdir', 'format', 'globalName', 'globals', 'minify', 'keepNames', 'sourcemap', 'sourcesContent', 'splitting', 'treeShaking', 'platform', 'external', 'conditions', 'mainFields', 'alias', 'define', 'loader', 'assetNames', 'publicPath', 'jsx', 'jsxImportSource', 'jsxFactory', 'jsxFragment', 'decoratorMetadata', 'experimentalDecorators', 'strictNullChecks', 'tsconfig', 'config', 'mode', 'envDir', 'envPrefix', 'envFiles', 'banner', 'footer', 'drop', 'packages', 'resolveExtensions', 'preserveSymlinks', 'federation', 'originalPaths', 'corsOrigins', 'port', 'host']);
 
 /** The command line for options. A key that is not an option is an error, so a typo is not ignored. */
 function toArgs(options, cleanups) {
@@ -99,6 +99,15 @@ function toArgs(options, cleanups) {
   else add('--tsconfig', options.tsconfig);
   if (options.config === false) args.push('--no-config');
   else add('--config', options.config);
+  // A text for scripts, or one for each kind of file.
+  for (const [flag, value] of [['--banner', options.banner], ['--footer', options.footer]]) {
+    if (typeof value === 'string') args.push(`${flag}:js=${value}`);
+    else for (const [kind, text] of Object.entries(value ?? {})) args.push(`${flag}:${kind}=${text}`);
+  }
+  each('--drop', options.drop);
+  add('--packages', options.packages);
+  if (options.resolveExtensions) args.push('--resolve-extensions', options.resolveExtensions.join(','));
+  if (options.preserveSymlinks) args.push('--preserve-symlinks');
   add('--mode', options.mode);
   add('--env-dir', options.envDir);
   each('--env-prefix', [].concat(options.envPrefix ?? []));

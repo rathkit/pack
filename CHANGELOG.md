@@ -36,6 +36,8 @@ First release.
 - Pages: `rkp bundle index.html --outdir dist` builds the module scripts and linked style sheets a page names, copies the
   images and media it names and `public/`, rewrites the page, and runs plugins' `transformIndexHtml` on it (ES modules, or
   one file with `--format iife`).
+- `--banner`, `--footer`, `--drop:console`, `--drop:debugger`, `--packages=external`, `--resolve-extensions`,
+  `--preserve-symlinks`; an unknown option is an error.
 - `import.meta.env` with `MODE`, `DEV`, `PROD`, `SSR`, `BASE_URL` and the `VITE_` variables of `.env` files (`--mode`, `--env-dir`,
   `--env-prefix`, `--no-env-files`).
 - Dynamic imports with a variable in the path (`import(`./locales/${name}.js`)`), with the rules of Rollup's plugin for them.

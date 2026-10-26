@@ -141,6 +141,11 @@ pub struct Alias {
 }
 
 impl Alias {
+    /// Whether the alias applies to the specifier.
+    pub fn matches(&self, specifier: &str) -> bool {
+        self.capture(specifier).is_some()
+    }
+
     /// What the specifier leaves over after the pattern, if the pattern matches it.
     fn capture<'s>(&self, specifier: &'s str) -> Option<&'s str> {
         match self.pattern.split_once('*') {

@@ -639,6 +639,60 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
                 options.public_path = it.next().cloned().unwrap_or_default();
                 public_path_given = true;
             }
+            "--preserve-symlinks" => options.resolve.preserve_symlinks = true,
+            // --drop:console and --drop:debugger (also --drop console).
+            arg if arg == "--drop" || arg.starts_with("--drop:") => {
+                let what = if arg == "--drop" { it.next().cloned().unwrap_or_default() } else { arg["--drop:".len()..].to_string() };
+                match what.as_str() {
+                    "console" => bundle_options.drop_console = true,
+                    "debugger" => bundle_options.drop_debugger = true,
+                    other => {
+                        eprintln!("error: --drop is console or debugger, not '{other}'");
+                        return Done::Exit(ExitCode::from(2));
+                    }
+                }
+            }
+            // Text before and after the code of every file: --banner:js=TEXT, --banner:css=TEXT, --banner=TEXT (script), and the same for --footer.
+            arg if arg == "--banner" || arg == "--footer" || arg.starts_with("--banner:") || arg.starts_with("--footer:") || arg.starts_with("--banner=") || arg.starts_with("--footer=") => {
+                let banner = arg.starts_with("--banner");
+                let rest = &arg[8..];
+                let (kind, value) = match rest.split_once('=') {
+                    Some((kind, value)) => (kind.trim_start_matches(':'), value.to_string()),
+                    None => (rest.trim_start_matches(':'), it.next().cloned().unwrap_or_default()),
+                };
+                let slot = match (banner, kind) {
+                    (true, "" | "js") => &mut bundle_options.banner_js,
+                    (true, "css") => &mut bundle_options.banner_css,
+                    (false, "" | "js") => &mut bundle_options.footer_js,
+                    (false, "css") => &mut bundle_options.footer_css,
+                    _ => {
+                        eprintln!("error: {} is for js or css files, not '{kind}'", &arg[..8]);
+                        return Done::Exit(ExitCode::from(2));
+                    }
+                };
+                *slot = Some(value);
+            }
+            // esbuild's spelling: --packages=external leaves every package out, --packages=bundle (the default) puts them in.
+            arg if arg == "--packages" || arg.starts_with("--packages=") => {
+                let value = if arg == "--packages" { it.next().cloned().unwrap_or_default() } else { arg["--packages=".len()..].to_string() };
+                match value.as_str() {
+                    "external" => options.packages_external = true,
+                    "bundle" => options.packages_external = false,
+                    other => {
+                        eprintln!("error: --packages is external or bundle, not '{other}'");
+                        return Done::Exit(ExitCode::from(2));
+                    }
+                }
+            }
+            arg if arg == "--resolve-extensions" || arg.starts_with("--resolve-extensions=") => {
+                let value = if arg == "--resolve-extensions" { it.next().cloned().unwrap_or_default() } else { arg["--resolve-extensions=".len()..].to_string() };
+                let list: Vec<String> = value.split(',').map(str::trim).filter(|e| !e.is_empty()).map(|e| if e.starts_with('.') { e.to_string() } else { format!(".{e}") }).collect();
+                if list.is_empty() {
+                    eprintln!("error: --resolve-extensions needs a list such as .ts,.js");
+                    return Done::Exit(ExitCode::from(2));
+                }
+                options.resolve.extensions = list;
+            }
             "--env-dir" => env_dir = it.next().cloned(),
             "--env-prefix" => env_prefixes.extend(it.next().cloned()),
             "--no-env-files" => env_files = false,

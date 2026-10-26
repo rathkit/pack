@@ -32,6 +32,18 @@ export interface Options {
   treeShaking?: boolean;
   /** `browser` does not treat Node's built-in modules as external. Default `node`. */
   platform?: 'node' | 'browser';
+  /** Text put before the code of every file: for scripts (a string), or for each kind of file. */
+  banner?: string | { js?: string; css?: string };
+  /** Text put after the code of every file. */
+  footer?: string | { js?: string; css?: string };
+  /** Remove every `console.*(...)` call, and every `debugger` statement. */
+  drop?: Array<'console' | 'debugger'>;
+  /** `external` leaves every package import out of the output (paths and aliases are still bundled). Default `bundle`. */
+  packages?: 'external' | 'bundle';
+  /** The extensions tried for an import without one, with or without the dot. Default `.tsx .ts .jsx .js .mjs .cjs .mts .cts .json`. */
+  resolveExtensions?: string[];
+  /** Keep a symbolic link's own path instead of the real file's. */
+  preserveSymlinks?: boolean;
   /** Specifiers left out of the output: exact names, or a prefix ending in `/*`. */
   external?: string[];
   /** Conditions of `exports` and `imports` maps, besides the usual ones. */

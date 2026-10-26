@@ -208,3 +208,66 @@ fn import_meta_env_has_the_mode_and_the_prefixed_names_of_the_env_files() {
     assert_eq!(build_and_run(&dir, &["--no-env-files"], &[]), "production false true false / undefined undefined undefined undefined undefined 5");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn banner_footer_and_dropped_calls() {
+    if Command::new("node").arg("--version").output().is_err() {
+        return;
+    }
+    let dir = scratch("banner");
+    let write = |name: &str, text: &str| std::fs::write(dir.join(name), text).unwrap();
+    write("s.css", "p { color: red }\n");
+    write("a.js", "import './s.css';\nexport const answer = () => { throw new Error('boom'); };\n");
+    write("main.js", "import { answer } from './a.js';\nconsole.log('dropped');\ndebugger;\nfunction f(console) { return console.log('shadowed'); }\nprocess.stdout.write(f({ log: (m) => m }) + '\\n');\nanswer();\n");
+    let rkp = |args: &[&str]| Command::new(env!("CARGO_BIN_EXE_rkp")).current_dir(&dir).args(["bundle", "main.js"]).args(args).output().expect("rkp starts");
+    for minify in [false, true] {
+        let mut args = vec!["--outfile", "out.mjs", "--sourcemap", "--banner:js=/* one\ntwo */", "--footer:js=// the end", "--banner:css=/* css top */", "--footer:css=/* css end */", "--drop:console", "--drop:debugger"];
+        if minify {
+            args.push("--minify");
+        }
+        let built = rkp(&args);
+        assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+        let js = std::fs::read_to_string(dir.join("out.mjs")).unwrap();
+        assert!(js.starts_with("/* one\ntwo */\n"), "minify={minify}: {js}");
+        assert!(js.contains("// the end\n"), "minify={minify}: {js}");
+        assert!(!js.contains("dropped") && !js.contains("debugger"), "minify={minify}: {js}");
+        let css = std::fs::read_to_string(dir.join("out.css")).unwrap();
+        assert!(css.starts_with("/* css top */\n") && css.contains("/* css end */"), "{css}");
+        // The banner moved every line, and the map says so: the failure is reported at its place in a.js.
+        let run = Command::new("node").current_dir(&dir).args(["--enable-source-maps", "out.mjs"]).output().expect("node starts");
+        let text = String::from_utf8_lossy(&run.stderr);
+        assert!(String::from_utf8_lossy(&run.stdout).starts_with("shadowed"), "{text}");
+        assert!(text.contains("a.js:2"), "minify={minify}: a banner broke the map:\n{text}");
+    }
+    // Only console and debugger can be dropped; a banner is for js or css.
+    assert_eq!(rkp(&["--outfile", "x.mjs", "--drop:everything"]).status.code(), Some(2));
+    assert_eq!(rkp(&["--outfile", "x.mjs", "--banner:html=x"]).status.code(), Some(2));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn packages_external_resolve_extensions_and_symlinks() {
+    if Command::new("node").arg("--version").output().is_err() {
+        return;
+    }
+    let dir = scratch("packages");
+    std::fs::create_dir_all(dir.join("node_modules/dep")).unwrap();
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let write = |name: &str, text: &str| std::fs::write(dir.join(name), text).unwrap();
+    write("node_modules/dep/package.json", "{\"name\":\"dep\",\"main\":\"index.js\"}");
+    write("node_modules/dep/index.js", "module.exports = 'dep-value';\n");
+    write("src/aliased.js", "export default 'aliased';\n");
+    write("noext.mjs", "export const x = 'by-extension';\n");
+    write("main.js", "import dep from 'dep';\nimport aliased from '@src/aliased.js';\nimport { x } from './noext';\nconsole.log(dep, aliased, x);\n");
+    let args = ["--alias", "@src=./src", "--resolve-extensions=.mjs,.js"];
+    let bundled = build_and_run(&dir, &args, &[]);
+    assert_eq!(bundled, "dep-value aliased by-extension");
+    let text_of_bundle = std::fs::read_to_string(dir.join("out.mjs")).unwrap();
+    assert!(text_of_bundle.contains("dep-value"), "a package is bundled by default");
+    // External: the package stays an import (and is found at run time, next to the bundle); the alias and the relative path are bundled.
+    let external = build_and_run(&dir, &["--alias", "@src=./src", "--resolve-extensions", ".mjs,.js", "--packages=external", "--preserve-symlinks"], &[]);
+    assert_eq!(external, "dep-value aliased by-extension");
+    let text_of_bundle = std::fs::read_to_string(dir.join("out.mjs")).unwrap();
+    assert!(text_of_bundle.contains("from \"dep\"") && !text_of_bundle.contains("dep-value"), "{text_of_bundle}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

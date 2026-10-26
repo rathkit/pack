@@ -21,6 +21,7 @@
 mod std_decorators;
 
 use std::collections::{HashMap, HashSet};
+use crate::json::Json;
 use std::fmt::Write as _;
 
 use crate::ast::{Ast, List, NodeId, NodeKind, flags};
@@ -208,6 +209,14 @@ pub struct Options {
     pub entry_names: Vec<Option<String>>,
     /// Module federation: `import()` of a remote or a shared package asks the runtime.
     pub federation: Option<std::sync::Arc<crate::federation::Federation>>,
+    /// Text put before and after the code of every script file and every style sheet file.
+    pub banner_js: Option<String>,
+    pub footer_js: Option<String>,
+    pub banner_css: Option<String>,
+    pub footer_css: Option<String>,
+    /// Remove every `console.*(...)` call, and every `debugger` statement.
+    pub drop_console: bool,
+    pub drop_debugger: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -224,7 +233,7 @@ pub enum SourceMapMode {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { splitting: false, format: Format::Esm, global_name: None, globals: Vec::new(), original_paths: false, minify: crate::minify::Options::default(), sourcemap: SourceMapMode::None, sources_content: true, map_base: None, file_name: None, hot: false, entry_names: Vec::new(), federation: None }
+        Options { splitting: false, format: Format::Esm, global_name: None, globals: Vec::new(), original_paths: false, minify: crate::minify::Options::default(), sourcemap: SourceMapMode::None, sources_content: true, map_base: None, file_name: None, hot: false, entry_names: Vec::new(), federation: None, banner_js: None, footer_js: None, banner_css: None, footer_css: None, drop_console: false, drop_debugger: false }
     }
 }
 
@@ -331,6 +340,8 @@ struct Bundler<'a> {
     alias_values: Vec<(ModuleId, Key, Vec<Piece>)>,
     original_paths: bool,
     hot: bool,
+    drop_console: bool,
+    drop_debugger: bool,
     entry_names: Vec<Option<String>>,
     federation: Option<std::sync::Arc<crate::federation::Federation>>,
     /// Module federation: chunks whose code reads shared packages and remotes wait for the runtime to have loaded them
@@ -434,6 +445,8 @@ impl<'a> Bundler<'a> {
             alias_values: Vec::new(),
             original_paths: false,
             hot: false,
+            drop_console: false,
+            drop_debugger: false,
             entry_names: Vec::new(),
             federation: None,
             ready_calls: HashMap::new(),
@@ -458,6 +471,8 @@ impl<'a> Bundler<'a> {
         self.original_paths = options.original_paths;
         self.entry_names = options.entry_names.clone();
         self.hot = options.hot;
+        self.drop_console = options.drop_console;
+        self.drop_debugger = options.drop_debugger;
         self.federation = options.federation.clone();
         self.format = options.format;
         self.splitting = options.splitting && options.format == Format::Esm;
@@ -810,12 +825,20 @@ impl<'a> Bundler<'a> {
                     body.push('\n');
                 }
                 let mut out = String::new();
+                if let Some(banner) = &options.banner_css {
+                    out.push_str(banner);
+                    out.push('\n');
+                }
                 for h in hoisted {
                     out.push_str(&h);
                     out.push('\n');
                 }
                 let body_at = out.len();
                 out.push_str(&body);
+                if let Some(footer) = &options.footer_css {
+                    out.push_str(footer);
+                    out.push('\n');
+                }
                 let stem = chunk.file.rsplit_once('.').map_or(chunk.file.as_str(), |(s, _)| s);
                 let name = format!("{stem}.css");
                 let mut map = None;
@@ -881,6 +904,7 @@ impl<'a> Bundler<'a> {
         let file = self.plan.chunks[c].file.clone();
         if !self.mapping {
             let code = if settings.any() { crate::minify::minify_chunk(&raw, &layout, settings, None).map_err(fail)? } else { raw };
+            let code = wrap_text(code, options.banner_js.as_deref(), options.footer_js.as_deref());
             return Ok(OutputFile { name: file, code, map: None, data: None, original: None });
         }
         let tagging = std::time::Instant::now();
@@ -901,10 +925,15 @@ impl<'a> Bundler<'a> {
             (text, anchors)
         };
         let mapping = std::time::Instant::now();
-        let map = self.build_map(&file, &code, &anchors, &spans, marks, options);
+        let mut map = self.build_map(&file, &code, &anchors, &spans, marks, options);
         if timing {
             eprintln!("  build map: {:.1} ms", mapping.elapsed().as_secs_f64() * 1000.0);
         }
+        // A banner comes before everything the map knows of: its lines move every mapping down.
+        if let Some(banner) = options.banner_js.as_deref() {
+            map = shift_map_lines(&map, banner.matches('\n').count() + 1);
+        }
+        code = wrap_text(code, options.banner_js.as_deref(), options.footer_js.as_deref());
         let map_name = format!("{file}.map");
         let mut map_file = None;
         match options.sourcemap {
@@ -2261,6 +2290,19 @@ impl<'a> Scanner<'_, 'a> {
                     }
                 }
             }
+            // `--drop:console`: a call of a method of the global `console` is not made.
+            NodeKind::Call { callee, .. }
+                if self.bundler.drop_console
+                    && matches!(ast[callee].kind, NodeKind::Member { object, .. } if matches!(ast[object].kind, NodeKind::Ident(n) if ast.atom(n) == "console") && self.semantic.symbol_of(object).is_none()) =>
+            {
+                self.push(node, vec![Piece::Text("(void 0)".into())]);
+                return;
+            }
+            // `--drop:debugger`
+            NodeKind::Debugger if self.bundler.drop_debugger => {
+                self.push(node, vec![Piece::Text(";".into())]);
+                return;
+            }
             NodeKind::Call { callee, args } => {
                 // `require.resolve("x")` becomes the path it resolved to.
                 if let NodeKind::Member { object, prop } = ast[callee].kind {
@@ -2571,6 +2613,40 @@ fn base64(data: &[u8]) -> String {
 fn is_identifier_name(text: &str) -> bool {
     let mut chars = text.chars();
     chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$') && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+}
+
+/// `code` with a banner before it and a footer after it, each on lines of their own.
+fn wrap_text(code: String, banner: Option<&str>, footer: Option<&str>) -> String {
+    if banner.is_none() && footer.is_none() {
+        return code;
+    }
+    let mut out = String::with_capacity(code.len() + banner.map_or(0, str::len) + footer.map_or(0, str::len) + 2);
+    if let Some(banner) = banner {
+        out.push_str(banner);
+        out.push('\n');
+    }
+    out.push_str(&code);
+    if let Some(footer) = footer {
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(footer);
+        out.push('\n');
+    }
+    out
+}
+
+/// A source map whose generated lines start `lines` lower: an empty line of mappings for each.
+fn shift_map_lines(map: &str, lines: usize) -> String {
+    let Ok(Json::Object(mut fields)) = Json::parse(map) else { return map.to_string() };
+    for (key, value) in &mut fields {
+        if key == "mappings" {
+            if let Json::String(text) = value {
+                *text = format!("{}{}", ";".repeat(lines), text);
+            }
+        }
+    }
+    Json::Object(fields).to_string()
 }
 
 fn json_string(text: &str) -> String {

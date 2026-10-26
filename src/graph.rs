@@ -189,6 +189,8 @@ pub struct GraphOptions {
     pub external: Vec<String>,
     /// Treat Node's built-in modules (`fs`, `node:path`, ...) as external.
     pub node_builtins: bool,
+    /// Leave every package import (a name that is not a path, nor made into one by an alias) out of the bundle.
+    pub packages_external: bool,
     /// Worker threads; 0 means one per core.
     pub threads: usize,
     /// Modules of the previous build to reuse when their files have not changed.
@@ -204,7 +206,7 @@ pub type WorkerBuilder = dyn Fn(&Path) -> Result<Vec<u8>, String> + Send + Sync;
 
 impl Default for GraphOptions {
     fn default() -> Self {
-        GraphOptions { plugins: None, resolve: ResolveOptions::default(), jsx: JsxOptions::default(), decorator_metadata: false, experimental_decorators: false, strict_null_checks: false, loaders: Vec::new(), asset_names: "[name]-[hash]".to_string(), public_path: "./".to_string(), defines: Default::default(), external: Vec::new(), node_builtins: true, threads: 0, cache: None, federation: None, worker_builder: None }
+        GraphOptions { plugins: None, resolve: ResolveOptions::default(), jsx: JsxOptions::default(), decorator_metadata: false, experimental_decorators: false, strict_null_checks: false, loaders: Vec::new(), asset_names: "[name]-[hash]".to_string(), public_path: "./".to_string(), defines: Default::default(), external: Vec::new(), node_builtins: true, packages_external: false, threads: 0, cache: None, federation: None, worker_builder: None }
     }
 }
 
@@ -831,6 +833,9 @@ impl Context<'_> {
         if self.options.node_builtins && is_node_builtin(specifier) {
             return true;
         }
+        if self.options.packages_external && is_package_name(specifier) && !self.options.resolve.alias.iter().any(|a| a.matches(specifier)) {
+            return true;
+        }
         self.options.external.iter().any(|e| match e.strip_suffix("/*") {
             Some(prefix) => specifier.starts_with(prefix) && specifier[prefix.len()..].starts_with('/'),
             None => e == specifier,
@@ -949,6 +954,13 @@ pub fn absolute(cwd: &Path, path: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests;
+
+/// A name of a package (`react`, `@scope/pkg/sub`), not a path (`./a`, `/a`, `C:\a`), an address or a `#` import of the package itself.
+fn is_package_name(specifier: &str) -> bool {
+    let first = specifier.chars().next();
+    let path_like = matches!(first, Some('.' | '/' | '#' | '\\')) || specifier.as_bytes().get(1) == Some(&b':') || specifier.contains("://") || specifier.starts_with("data:") || specifier.starts_with('\0');
+    !specifier.is_empty() && !path_like
+}
 
 /// A module name with a query (`/a/logo.svg?raw`): the file, and the query without the `?`.
 fn split_query(path: &Path) -> (PathBuf, String) {

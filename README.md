@@ -37,6 +37,12 @@ rkp bundle src/main.ts --outfile dist/app.mjs
 - Resolves like Node does (`exports`/`imports` maps with conditions, `node_modules`, `main`
   fields, `sideEffects`) plus the usual bundler extras: `tsconfig.json` `paths` and
   `baseUrl`, `.js` that means `.ts`, `--alias`.
+- Options in the style of esbuild's: `--banner:js=TEXT` / `--banner:css=TEXT` (`--banner=TEXT` is for scripts) and the same for
+  `--footer`, put around every file of that kind (source maps are moved to match; a banner goes before a `#!` line too, so a
+  script that needs one should put it in the banner); `--drop:console` (every `console.*(...)` call of the global `console`
+  becomes `(void 0)`, arguments included) and `--drop:debugger`; `--packages=external` (every package import is left out of the
+  bundle: a name that is not a path, and not made into one by an alias); `--resolve-extensions=.ts,.js`; `--preserve-symlinks`.
+  A word that starts with a dash and is not an option is an error, not a file.
 - Pages: `rkp bundle index.html --outdir dist` builds the module scripts the page points at, writes the page again with
   the built files (and their style sheets) in place, runs plugins' `transformIndexHtml` with the built files as `bundle`
   and the entry chunk, and copies `public/`. `<script type="module" src>` tags

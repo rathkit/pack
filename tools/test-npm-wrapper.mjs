@@ -83,6 +83,12 @@ check(existsSync('dist/one.mjs.map'), 'a source map was asked for');
 const ran = spawnSync(process.execPath, ['dist/one.mjs'], { encoding: 'utf8' });
 check(ran.stdout.trim() === '42 a note', 'the output printed ' + JSON.stringify(ran.stdout));
 
+// Options of other kinds: text around the files, dropped calls, packages left out, extensions to try.
+const wrapped = await build({ entries: 'api-main.js', outfile: 'dist/wrapped.mjs', define: { __ANSWER__: '1' }, loader: { '.txt': 'text' }, banner: { js: '// top', css: '/* top */' }, footer: '// bottom', drop: ['console'], packages: 'external', resolveExtensions: ['.js', 'mjs'], preserveSymlinks: true });
+const wrappedText = readFileSync('dist/wrapped.mjs', 'utf8');
+check(wrapped.ok && wrappedText.startsWith('// top\\n') && wrappedText.includes('// bottom') && !wrappedText.includes('console.log'), 'banner, footer and drop ' + wrappedText);
+check(readFileSync('dist/wrapped.css', 'utf8').startsWith('/* top */'), 'the css banner');
+
 // A page, with a folder of output.
 const page = await build({ entries: 'index.html', outdir: 'dist/page' });
 check(page.files.some((f) => f.endsWith('index.html')), 'page files ' + JSON.stringify(page.files));
@@ -125,6 +131,9 @@ if (api.status !== 0 || api.stdout.trim() !== 'api ok') fail(`the API: ${api.std
 const tsc = join(root, 'bench', 'node_modules', 'typescript', 'bin', 'tsc');
 if (existsSync(tsc)) {
   writeFileSync(join(project, 'use.mts'), `import { build, serve, type Options, BuildError } from '@rathkit/pack';
+const typed: Options = { entries: 'a.js', banner: { css: 'x' }, footer: 'y', drop: ['console', 'debugger'], packages: 'external', resolveExtensions: ['.ts'], preserveSymlinks: true, envDir: '.', envPrefix: ['A_'], envFiles: false };
+// @ts-expect-error only console and debugger can be dropped
+await build({ entries: 'a.js', drop: ['alert'] });
 const options: Options = { entries: ['a.js'], outdir: 'dist', minify: { whitespace: true }, define: { A: '1' }, loader: { '.svg': 'dataurl' }, federation: { name: 'x' } };
 const result = await build(options);
 const files: string[] = result.files;
@@ -134,7 +143,7 @@ await build({ entries: 'a.js', outfiel: 'x' });
 await build({ entries: 'a.js', loader: { '.x': 'nope' } });
 const server = await serve({ entries: 'a.js' });
 const address: string = server.url;
-void [files, address, BuildError];
+void [files, address, BuildError, typed];
 `);
   const t = run(process.execPath, [tsc, '--noEmit', '--strict', '--module', 'nodenext', '--moduleResolution', 'nodenext', '--target', 'es2022', '--skipLibCheck', 'false', 'use.mts'], { cwd: project });
   if (t.status !== 0) fail(`the types: ${t.stdout}${t.stderr}`);
