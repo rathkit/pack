@@ -176,6 +176,7 @@ mod tests {
     use crate::resolve::MemFs;
 
     #[test]
+    #[cfg(unix)] // in-memory files at /p/...: not absolute paths on Windows
     fn reads_options_with_comments_and_extends() {
         let fs = MemFs::new()
             .with("/p/tsconfig.base.json", r#"{ "compilerOptions": { "jsx": "react-jsx", "baseUrl": "./src", "paths": { "@a/*": ["a/*"] } } }"#)
@@ -191,6 +192,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // in-memory files at /p/...: not absolute paths on Windows
     fn paths_without_base_url_are_relative_to_the_file() {
         let fs = MemFs::new().with("/p/sub/tsconfig.json", r#"{ "compilerOptions": { "paths": { "~/*": ["./lib/*"] } } }"#);
         let config = TsConfig::find(&fs, Path::new("/p/sub")).unwrap();

@@ -98,6 +98,7 @@ fn side_effects_false_drops_modules_imported_only_for_effects() {
 }
 
 #[test]
+#[cfg(unix)] // in-memory files at /p/...: not absolute paths on Windows
 fn barrel_files_only_pull_in_what_is_used() {
     let r = run(&[
         ("main.js", "import { a } from 'lib'; a();"),

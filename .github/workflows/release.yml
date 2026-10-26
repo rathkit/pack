@@ -84,6 +84,15 @@ jobs:
           cp LICENSE README.md "$name/"
           if [ "$RUNNER_OS" = Windows ]; then cp "$out/rkp.exe" "$name/"; else cp "$out/rkp" "$name/"; fi
           "$name/rkp" --version
+          # The binary of this platform builds a program and the program runs (on Windows too, where the unit tests that use fake Unix paths are skipped).
+          mkdir smoke && cd smoke
+          printf 'import { x } from "./dep.js";\nconsole.log("smoke", x);\n' > main.js
+          printf 'export const x = 40 + 2;\n' > dep.js
+          "../$name/rkp" bundle main.js --outfile out.mjs
+          test "$(node out.mjs)" = "smoke 42"
+          "../$name/rkp" bundle main.js --outfile min.mjs --minify --sourcemap
+          test "$(node min.mjs)" = "smoke 42"
+          cd ..
           tar -czf "$name.tar.gz" "$name"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

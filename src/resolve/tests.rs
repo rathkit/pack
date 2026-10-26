@@ -9,6 +9,7 @@ fn resolve(r: &Resolver, from: &str, spec: &str) -> Result<String, ResolveError>
 }
 
 #[test]
+#[cfg(unix)] // in-memory files at /p/...: not absolute paths on Windows
 fn relative_files_and_extensions() {
     let r = resolver(MemFs::new().with("/p/a.js", "").with("/p/b/index.js", "").with("/p/c.json", "{}").with("/p/d.x.js", ""));
     assert_eq!(resolve(&r, "/p", "./a").unwrap(), "/p/a.js");
@@ -23,6 +24,7 @@ fn relative_files_and_extensions() {
 }
 
 #[test]
+#[cfg(unix)] // in-memory files at /p/...: not absolute paths on Windows
 fn a_file_wins_over_a_directory_of_the_same_name() {
     let r = resolver(MemFs::new().with("/p/a.js", "").with("/p/a/index.js", ""));
     assert_eq!(resolve(&r, "/p", "./a").unwrap(), "/p/a.js");
@@ -30,6 +32,7 @@ fn a_file_wins_over_a_directory_of_the_same_name() {
 }
 
 #[test]
+#[cfg(unix)] // in-memory files at /p/...: not absolute paths on Windows
 fn directory_entry_from_main_fields() {
     let r = resolver(
         MemFs::new()
@@ -43,6 +46,7 @@ fn directory_entry_from_main_fields() {
 }
 
 #[test]
+#[cfg(unix)] // in-memory files at /p/...: not absolute paths on Windows
 fn bare_specifiers_walk_up_node_modules() {
     let r = resolver(
         MemFs::new()
@@ -74,6 +78,7 @@ fn exports_fs(exports: &str) -> Resolver {
 }
 
 #[test]
+#[cfg(unix)] // in-memory files at /p/...: not absolute paths on Windows
 fn exports_string_and_conditions() {
     let r = exports_fs(r#""./index.js""#);
     assert_eq!(resolve(&r, "/p", "pkg").unwrap(), "/p/node_modules/pkg/index.js");
@@ -86,6 +91,7 @@ fn exports_string_and_conditions() {
 }
 
 #[test]
+#[cfg(unix)] // in-memory files at /p/...: not absolute paths on Windows
 fn condition_order_is_the_file_order() {
     let r = exports_fs(r#"{"default": "./index.js", "import": "./esm.mjs"}"#);
     assert_eq!(resolve(&r, "/p", "pkg").unwrap(), "/p/node_modules/pkg/index.js", "default came first");
@@ -96,6 +102,7 @@ fn condition_order_is_the_file_order() {
 }
 
 #[test]
+#[cfg(unix)] // in-memory files at /p/...: not absolute paths on Windows
 fn nested_conditions_and_arrays() {
     let r = exports_fs(r#"{"node": {"import": "./esm.mjs"}, "import": {"types": "./nope.d.ts", "default": "./index.js"}}"#);
     assert_eq!(resolve(&r, "/p", "pkg").unwrap(), "/p/node_modules/pkg/index.js", "an unmatched inner condition falls through");
@@ -104,6 +111,7 @@ fn nested_conditions_and_arrays() {
 }
 
 #[test]
+#[cfg(unix)] // in-memory files at /p/...: not absolute paths on Windows
 fn subpaths_patterns_and_null() {
     let r = exports_fs(r#"{".": "./index.js", "./lib/*": "./lib/*.js", "./lib/b": null, "./internal/*": null, "./feature": {"import": "./esm.mjs"}}"#);
     assert_eq!(resolve(&r, "/p", "pkg/lib/a").unwrap(), "/p/node_modules/pkg/lib/a.js");
@@ -114,6 +122,7 @@ fn subpaths_patterns_and_null() {
 }
 
 #[test]
+#[cfg(unix)] // in-memory files at /p/...: not absolute paths on Windows
 fn the_longest_pattern_prefix_wins() {
     let r = exports_fs(r#"{"./*": "./index.js", "./lib/*": "./lib/*.js"}"#);
     assert_eq!(resolve(&r, "/p", "pkg/lib/a").unwrap(), "/p/node_modules/pkg/lib/a.js");
@@ -137,6 +146,7 @@ fn exports_hide_files_even_when_they_exist() {
 }
 
 #[test]
+#[cfg(unix)] // in-memory files at /p/...: not absolute paths on Windows
 fn package_imports() {
     let r = resolver(
         MemFs::new()
@@ -153,6 +163,7 @@ fn package_imports() {
 }
 
 #[test]
+#[cfg(unix)] // in-memory files at /p/...: not absolute paths on Windows
 fn a_package_can_import_itself() {
     let r = resolver(
         MemFs::new()
@@ -235,6 +246,7 @@ fn a_package_json_that_does_not_parse_does_not_block_resolution() {
 }
 
 #[test]
+#[cfg(unix)] // in-memory files at /p/...: not absolute paths on Windows
 fn aliases_and_base_url() {
     let fs = MemFs::new()
         .with("/p/src/lib/util.ts", "")
@@ -264,6 +276,7 @@ fn aliases_and_base_url() {
 }
 
 #[test]
+#[cfg(unix)] // in-memory files at /p/...: not absolute paths on Windows
 fn typescript_extension_aliases() {
     let r = resolver(MemFs::new().with("/p/a.ts", "").with("/p/b.tsx", "").with("/p/c.js", "").with("/p/c.ts", "").with("/p/d.mts", ""));
     assert_eq!(resolve(&r, "/p", "./a.js").unwrap(), "/p/a.ts", "a.js that does not exist is a.ts");

@@ -23,6 +23,7 @@ fn project() -> MemFs {
 }
 
 #[test]
+#[cfg(unix)] // in-memory files at /p/...: not absolute paths on Windows
 fn modules_are_numbered_depth_first_from_the_entry() {
     let graph = build(project(), &["main.js"], 1);
     assert!(!graph.has_errors(), "{:?}", graph.diagnostics);
@@ -43,6 +44,7 @@ fn the_graph_is_the_same_for_any_thread_count() {
 }
 
 #[test]
+#[cfg(unix)] // in-memory files at /p/...: not absolute paths on Windows
 fn cycles_and_shared_dependencies_load_once() {
     let fs = MemFs::new()
         .with("/p/a.js", "import './b.js'; export const a = 1;")
@@ -87,6 +89,7 @@ fn package_type_decides_ambiguous_files() {
 }
 
 #[test]
+#[cfg(unix)] // in-memory files at /p/...: not absolute paths on Windows
 fn errors_are_collected_not_fatal() {
     let fs = MemFs::new()
         .with("/p/main.js", "import './broken.js'; import './missing.js'; import './ok.js'; import './style.xyz'; try { require('./optional') } catch {}")
