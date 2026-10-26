@@ -368,7 +368,7 @@ impl Scanner<'_, '_> {
                     if self.uses_super(value) {
                         self.lower_error_message(m, format!("a private method that uses super cannot be rewritten for the target {target} yet"));
                     }
-                    let mut item = vec![text(&format!("{function} = {}function{}", if value_flags & crate::ast::flags::ASYNC != 0 && !(self.lowers(Feature::AsyncFunction) && value_flags & crate::ast::flags::GENERATOR == 0) { "async " } else { "" }, if value_flags & crate::ast::flags::GENERATOR != 0 { "*" } else { "" })), Piece::Range(vs, ve)];
+                    let mut item = vec![text(&format!("{function} = {}function{}", if value_flags & crate::ast::flags::ASYNC != 0 && !self.async_lowered(value_flags) { "async " } else { "" }, if value_flags & crate::ast::flags::GENERATOR != 0 && !(value_flags & crate::ast::flags::ASYNC != 0 && self.async_lowered(value_flags)) { "*" } else { "" })), Piece::Range(vs, ve)];
                     item.insert(0, text(""));
                     group1.push(item);
                     if !added_brands.contains(&info.brand) {

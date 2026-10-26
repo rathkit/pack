@@ -344,6 +344,8 @@ struct Helpers {
     /// `__publicField`, `__privateGet` and the others: class fields and private members written for an older target.
     class_private: bool,
     async_fn: bool,
+    for_await: bool,
+    async_gen: bool,
 }
 
 struct Bundler<'a> {
@@ -1951,7 +1953,7 @@ impl<'a> Bundler<'a> {
             self.code.insert(id, Code::Wrapped { edits: Vec::new(), json: true, require_cases: None });
             return;
         };
-        let mut scanner = Scanner { bundler: self, module, places: None, private_scopes: Vec::new(), private_refs: HashMap::new(), chain_members: HashSet::new(), ast: &parsed.ast, semantic: &parsed.semantic, edits: Vec::new(), shorthand: HashSet::new(), skip: HashSet::new(), written: HashSet::new(), fn_depth: 0, has_tla: false, needs_require: false, top_decl: None, in_wrapper: false, name_hint: None, shared_names: None };
+        let mut scanner = Scanner { bundler: self, module, places: None, private_scopes: Vec::new(), private_refs: HashMap::new(), chain_members: HashSet::new(), ast: &parsed.ast, semantic: &parsed.semantic, edits: Vec::new(), shorthand: HashSet::new(), skip: HashSet::new(), written: HashSet::new(), fn_depth: 0, async_ctx: Vec::new(), has_tla: false, needs_require: false, top_decl: None, in_wrapper: false, name_hint: None, shared_names: None };
         let code = if module.kind == ModuleKind::Esm { scanner.scan_esm(id) } else { scanner.scan_wrapped(id) };
         self.code.insert(id, code);
     }
@@ -2020,6 +2022,8 @@ struct Scanner<'b, 'a> {
     written: HashSet<NodeId>,
     /// How many functions the walk is inside.
     fn_depth: u32,
+    /// For each function the walk is inside, how its `await`s are written once the target lacks async functions.
+    async_ctx: Vec<lower::FnCtx>,
     has_tla: bool,
     /// A CommonJS module mentions `require` other than as a direct call of a literal.
     needs_require: bool,
@@ -2631,8 +2635,15 @@ impl<'a> Scanner<'_, 'a> {
         let mut children = Vec::new();
         ast.for_each_child(node, |c| children.push(c));
         self.fn_depth += is_function as u32;
+        if is_function {
+            let ctx = self.fn_ctx(node);
+            self.async_ctx.push(ctx);
+        }
         for child in children {
             self.walk_in(child, wrapped, bound);
+        }
+        if is_function {
+            self.async_ctx.pop();
         }
         self.fn_depth -= is_function as u32;
         if is_function {
@@ -2908,6 +2919,8 @@ fn json_string(text: &str) -> String {
 
 const HELPER_CJS: &str = "var __cjs = (fn, req) => { var m; return () => m ? m.exports : (m = { exports: {} }, fn.call(m.exports, m.exports, m, req), m.exports); };\n";
 const HELPER_ASYNC: &str = "var __async = (__this, __arguments, generator) => new Promise((resolve, reject) => { var fulfilled = (value) => { try { step(generator.next(value)); } catch (e) { reject(e); } }; var rejected = (value) => { try { step(generator.throw(value)); } catch (e) { reject(e); } }; var step = (x) => x.done ? resolve(x.value) : Promise.resolve(x.value).then(fulfilled, rejected); step((generator = generator.apply(__this, __arguments)).next()); });\n";
+const HELPER_FOR_AWAIT: &str = "var __forAwait = (obj) => { var method = obj[Symbol.asyncIterator]; if (method != null) return method.call(obj); var it = obj[Symbol.iterator](); var wrap = (k) => (v) => { var r = it[k](v); return Promise.resolve(r.value).then((value) => ({ value, done: r.done })); }; return { next: wrap('next'), return: it.return && wrap('return') }; };\n";
+const HELPER_ASYNC_GEN: &str = "var __await = function (v) { this.v = v; };\nvar __asyncGenerator = (__this, __arguments, fn) => { var gen = fn.apply(__this, __arguments), queue = [], busy = false, it = {}; var next = () => { if (busy || !queue.length) return; busy = true; var job = queue.shift(); step(job.k, job.v, job); }; var settle = (job, ok, v) => { busy = false; ok ? job.yes(v) : job.no(v); next(); }; var step = (k, v, job) => { var r; try { r = gen[k](v); } catch (e) { return settle(job, false, e); } var value = r.value; if (!r.done && value instanceof __await) Promise.resolve(value.v).then((x) => step('next', x, job), (e) => step('throw', e, job)); else Promise.resolve(value).then((x) => settle(job, true, { value: x, done: r.done }), (e) => r.done ? settle(job, false, e) : step('throw', e, job)); }; var method = (k) => it[k] = (v) => new Promise((yes, no) => { queue.push({ k, v, yes, no }); next(); }); method('next'); method('throw'); method('return'); it[Symbol.asyncIterator] = () => it; it[Symbol.toStringTag] = 'AsyncGenerator'; return it; };\nvar __yieldStar = function* (value) { var it = __forAwait(value), k = 'next', v, r, finished = false; try { for (;;) { try { r = yield new __await(it[k](v)); } catch (e) { finished = true; throw e; } if (r.done) { finished = true; return r.value; } try { v = yield r.value; k = 'next'; } catch (e) { if (!it.throw) throw e; k = 'throw'; v = e; } } } finally { if (!finished && it.return) yield new __await(it.return()); } };\n";
 const HELPER_SPREAD: &str = "var __hasOwn = Object.prototype.hasOwnProperty;\nvar __propIsEnum = Object.prototype.propertyIsEnumerable;\nvar __defNormal = (obj, key, value) => key in obj ? Object.defineProperty(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;\nvar __spreadValues = (a, b) => { for (var prop in b || (b = {})) if (__hasOwn.call(b, prop)) __defNormal(a, prop, b[prop]); if (Object.getOwnPropertySymbols) for (var prop of Object.getOwnPropertySymbols(b)) { if (__propIsEnum.call(b, prop)) __defNormal(a, prop, b[prop]); } return a; };\nvar __spreadProps = (a, b) => { for (var key of Reflect.ownKeys(b)) Object.defineProperty(a, key, Object.getOwnPropertyDescriptor(b, key)); return a; };\nvar __objRest = (source, exclude) => { var target = {}; for (var prop in source) if (__hasOwn.call(source, prop) && exclude.indexOf(prop) < 0) target[prop] = source[prop]; if (source != null && Object.getOwnPropertySymbols) for (var prop of Object.getOwnPropertySymbols(source)) { if (exclude.indexOf(prop) < 0 && __propIsEnum.call(source, prop)) target[prop] = source[prop]; } return target; };\n";
 const HELPER_CLASS_PRIVATE: &str = "var __typeError = (msg) => { throw TypeError(msg); };\nvar __defNormalProp = (obj, key, value) => key in obj ? Object.defineProperty(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;\nvar __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== \"symbol\" ? key + \"\" : key, value);\nvar __accessCheck = (obj, member, msg) => member.has(obj) || __typeError(\"Cannot \" + msg);\nvar __privateGet = (obj, member, getter) => (__accessCheck(obj, member, \"read from private field\"), getter ? getter.call(obj) : member.get(obj));\nvar __privateAdd = (obj, member, value) => member.has(obj) ? __typeError(\"Cannot add the same private member more than once\") : member instanceof WeakSet ? member.add(obj) : member.set(obj, value);\nvar __privateSet = (obj, member, value, setter) => (__accessCheck(obj, member, \"write to private field\"), setter ? setter.call(obj, value) : member.set(obj, value), value);\nvar __privateMethod = (obj, member, method) => (__accessCheck(obj, member, \"access private method\"), method);\nvar __privateWrapper = (obj, member, setter, getter) => ({ set _(value) { __privateSet(obj, member, value, setter); }, get _() { return __privateGet(obj, member, getter); } });\nvar __privateIn = (member, obj) => Object(obj) !== obj ? __typeError('Cannot use the \"in\" operator on this value') : member.has(obj);\n";
 const HELPER_TO_DEFAULT: &str = "var __toDefault = (e, node) => e && !node && e.__esModule ? e.default : e;\n";
@@ -3250,6 +3263,12 @@ impl Bundler<'_> {
         }
         if self.helpers.async_fn {
             out.push_str(HELPER_ASYNC);
+        }
+        if self.helpers.for_await || self.helpers.async_gen {
+            out.push_str(HELPER_FOR_AWAIT);
+        }
+        if self.helpers.async_gen {
+            out.push_str(HELPER_ASYNC_GEN);
         }
         if self.code.values().any(|c| matches!(c, Code::Wrapped { require_cases: Some(_), .. })) {
             out.push_str(match format {

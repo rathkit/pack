@@ -13,6 +13,23 @@ fn text(s: &str) -> Piece {
     Piece::Text(s.to_string())
 }
 
+/// How the `await`s of a function are written. Some target lacks async functions (`Yield`: the function becomes a generator run by
+/// `__async`), or async generators (`Gen`: `await` is `yield new __await(...)`), or neither (`Native`: an `await` stays one).
+#[derive(Clone, Copy, Default, PartialEq)]
+pub(super) enum AsyncKind {
+    #[default]
+    Native,
+    Yield,
+    Gen,
+}
+
+#[derive(Clone, Copy, Default)]
+pub(super) struct FnCtx {
+    kind: AsyncKind,
+    /// Inside an async function that was rewritten and is a method, so `super.x` is read through its `__superGet`.
+    super_ok: bool,
+}
+
 /// One link of a chain such as `a?.b[c](d)`, after the first expression.
 struct Link {
     node: NodeId,
@@ -26,6 +43,40 @@ struct Link {
 }
 
 impl Scanner<'_, '_> {
+    /// Whether an async function or async generator with these flags is rewritten (it is not an `async` any more).
+    pub(super) fn async_lowered(&self, flags: u8) -> bool {
+        use crate::ast::flags;
+        flags & flags::ASYNC != 0 && self.lowers(if flags & flags::GENERATOR != 0 { Feature::AsyncIteration } else { Feature::AsyncFunction })
+    }
+
+    pub(super) fn fn_ctx(&self, node: NodeId) -> FnCtx {
+        use crate::ast::flags;
+        let ast = self.ast;
+        let NodeKind::Function { body, .. } = ast[node].kind else { return FnCtx::default() };
+        let f = ast[node].flags;
+        let kind = match (self.async_lowered(f), f & flags::GENERATOR != 0) {
+            (true, true) => AsyncKind::Gen,
+            (true, false) => AsyncKind::Yield,
+            _ => AsyncKind::Native,
+        };
+        let parent = self.async_ctx.last().copied().unwrap_or_default();
+        let super_ok = if f & flags::ARROW != 0 { parent.super_ok } else { kind != AsyncKind::Native && self.contains_super(body) };
+        FnCtx { kind, super_ok }
+    }
+
+    fn await_pieces(&mut self, inner: Vec<Piece>) -> Vec<Piece> {
+        let kind = self.async_ctx.last().map(|c| c.kind).unwrap_or_default();
+        let (open, close) = match kind {
+            AsyncKind::Native => ("(await ", ")"),
+            AsyncKind::Yield => ("(yield ", ")"),
+            AsyncKind::Gen => ("(yield new __await(", "))"),
+        };
+        if kind == AsyncKind::Gen {
+            self.bundler.helpers.async_gen = true;
+        }
+        [vec![text(open)], inner, vec![text(close)]].concat()
+    }
+
     pub(super) fn lowers(&self, feature: Feature) -> bool {
         !self.bundler.target.supports(feature)
     }
@@ -75,6 +126,9 @@ impl Scanner<'_, '_> {
 
     pub(super) fn lower(&mut self, node: NodeId) {
         let ast = self.ast;
+        if self.async_ctx.last().is_some_and(|c| c.super_ok) {
+            self.lower_super(node);
+        }
         match ast[node].kind {
             NodeKind::Binary { op: BinOp::Exp, left, right } if self.lowers(Feature::Exponent) => self.lower_exponent(node, left, right),
             NodeKind::Assign { op: AssignOp::Op(BinOp::Exp), target, value } if self.lowers(Feature::Exponent) => self.lower_exponent_assignment(node, target, value),
@@ -116,19 +170,13 @@ impl Scanner<'_, '_> {
             }
             NodeKind::Function { params, body, .. } => {
                 let flags = ast[node].flags;
-                if flags & crate::ast::flags::ASYNC != 0 {
-                    if flags & crate::ast::flags::GENERATOR != 0 {
-                        if self.lowers(Feature::AsyncIteration) {
-                            self.lower_error(Feature::AsyncIteration, node);
-                        }
-                    } else if self.lowers(Feature::AsyncFunction) && !self.skip.contains(&node) {
-                        // A method's `async` comes before its key; the method has already handled it (see below).
-                        let at = ast[node].span.start;
-                        if self.source_between(at, at + 5) == "async" {
-                            self.lower_async(node, at);
-                        } else {
-                            self.lower_error(Feature::AsyncFunction, node);
-                        }
+                if self.async_lowered(flags) && !self.skip.contains(&node) {
+                    // A method's `async` comes before its key; the method has already handled it (see below).
+                    let at = ast[node].span.start;
+                    if self.source_between(at, at + 5) == "async" {
+                        self.lower_async(node, at, None);
+                    } else {
+                        self.lower_error(Feature::AsyncFunction, node);
                     }
                 }
                 if self.lowers(Feature::ObjectRest) {
@@ -145,22 +193,35 @@ impl Scanner<'_, '_> {
                     }
                 }
             }
-            NodeKind::ClassMethod { key, value, .. } if self.lowers(Feature::AsyncFunction) && self.is_async_method(value) => self.lower_async_method(node, key, value),
-            NodeKind::Property { key, value, kind: crate::ast::PropKind::Method } if self.lowers(Feature::AsyncFunction) && self.is_async_method(value) => self.lower_async_method(node, key, value),
-            NodeKind::Await(_) if self.fn_depth > 0 && self.lowers(Feature::AsyncFunction) => {
+            NodeKind::ClassMethod { key, value, .. } if self.is_async_method(value) => self.lower_async_method(node, key, value),
+            NodeKind::Property { key, value, kind: crate::ast::PropKind::Method } if self.is_async_method(value) => self.lower_async_method(node, key, value),
+            NodeKind::Await(arg) if self.fn_depth > 0 && self.async_ctx.last().is_some_and(|c| c.kind != AsyncKind::Native) => {
                 let (start, end) = self.span(node);
-                self.edits.push(Edit { start, end: start + 5, pieces: vec![text("(yield")], shorthand: None, transparent: false });
-                self.edits.push(Edit { start: end, end, pieces: vec![text(")")], shorthand: None, transparent: false });
+                let (a, b) = self.span(arg);
+                let pieces = self.await_pieces(vec![Piece::Range(a, b)]);
+                self.edits.push(Edit { start, end, pieces, shorthand: None, transparent: false });
+            }
+            NodeKind::Yield(Some(arg)) if ast[node].flags & crate::ast::flags::DELEGATE != 0 && self.async_ctx.last().is_some_and(|c| c.kind == AsyncKind::Gen) => {
+                self.bundler.helpers.async_gen = true;
+                let (a, b) = self.span(arg);
+                self.edits.push(Edit { start: a, end: a, pieces: vec![text("__yieldStar(")], shorthand: None, transparent: false });
+                self.edits.push(Edit { start: b, end: b, pieces: vec![text(")")], shorthand: None, transparent: false });
             }
             // Not rewritten yet: stop instead of writing what the target cannot run.
             NodeKind::Object(props) if self.lowers(Feature::ObjectSpread) && ast.list(props).iter().any(|&p| matches!(ast[p].kind, NodeKind::Spread(_))) => self.lower_object_spread(node, props),
             // A pattern with `...rest` is rewritten where its parent does it (a declaration, a parameter, a `for of`); anywhere else it is refused.
             NodeKind::VarDeclarator { target, init: Some(init) } if self.has_object_rest(target) && self.lowers(Feature::ObjectRest) => self.lower_rest_declarator(node, target, init),
+            NodeKind::ForOf { left, right, body } if ast[node].flags & crate::ast::flags::AWAIT != 0 && self.lowers(Feature::AsyncIteration) => {
+                if self.fn_depth == 0 {
+                    self.lower_error(Feature::TopLevelAwait, node);
+                } else {
+                    self.lower_for_await(node, left, right, body);
+                }
+            }
             NodeKind::ForOf { left, body, .. } if self.lowers(Feature::ObjectRest) && self.for_of_rest(left).is_some() => self.lower_rest_for_of(node, left, body),
             NodeKind::ObjectPattern(_) if self.has_object_rest(node) && self.lowers(Feature::ObjectRest) && !self.skip.contains(&node) => self.lower_error(Feature::ObjectRest, node),
             // Fields, private members and static blocks are rewritten with the class that has them.
             NodeKind::Class { .. } if self.lowers(Feature::ClassField) && self.class_needs_lowering(node) => self.lower_class(node),
-            NodeKind::ForOf { .. } if ast[node].flags & crate::ast::flags::AWAIT != 0 && self.lowers(Feature::AsyncIteration) => self.lower_error(Feature::AsyncIteration, node),
             NodeKind::Await(_) if self.fn_depth == 0 && self.lowers(Feature::TopLevelAwait) => self.lower_error(Feature::TopLevelAwait, node),
             _ => {}
         }
@@ -708,8 +769,7 @@ impl Scanner<'_, '_> {
     }
 
     fn is_async_method(&self, value: NodeId) -> bool {
-        let ast = self.ast;
-        matches!(ast[value].kind, NodeKind::Function { .. }) && ast[value].flags & crate::ast::flags::ASYNC != 0 && ast[value].flags & crate::ast::flags::GENERATOR == 0
+        matches!(self.ast[value].kind, NodeKind::Function { .. }) && self.async_lowered(self.ast[value].flags)
     }
 
     /// `async name() {}` in a class or an object: the keyword is somewhere before the key.
@@ -725,28 +785,50 @@ impl Scanner<'_, '_> {
             self.lower_error(Feature::AsyncFunction, value);
             return;
         };
+        let star = region[i + 5..].find('*').map(|j| from + (i + 5 + j) as u32);
         self.skip.insert(value);
-        self.lower_async(value, from + i as u32);
+        self.lower_async(value, from + i as u32, star);
     }
 
-    /// An async function becomes a plain one that runs a generator through `__async`, each `await` a `yield`.
-    fn lower_async(&mut self, function: NodeId, async_at: u32) {
+    /// An async function becomes a plain one that runs a generator through `__async` (or `__asyncGenerator`), each `await` a `yield`.
+    /// `star` is where the `*` of a method is (a function's is looked for after its keyword).
+    fn lower_async(&mut self, function: NodeId, async_at: u32, star: Option<u32>) {
         let ast = self.ast;
         let NodeKind::Function { body, .. } = ast[function].kind else { return };
-        if self.contains_super(body) {
+        let generator = ast[function].flags & crate::ast::flags::GENERATOR != 0;
+        let arrow = ast[function].has(crate::ast::flags::ARROW);
+        let uses_super = self.contains_super(body);
+        // An arrow reads `super` through the accessor of the method around it, which only a rewritten async method has.
+        if uses_super && arrow && !self.async_ctx.last().is_some_and(|c| c.super_ok) {
             self.lower_error(Feature::AsyncFunction, function);
             return;
         }
-        self.bundler.helpers.async_fn = true;
+        if generator {
+            self.bundler.helpers.async_gen = true;
+        } else {
+            self.bundler.helpers.async_fn = true;
+        }
         // `async` and the space after it.
-        let after = self.source_between(async_at + 5, ast[function].span.end).len() - self.source_between(async_at + 5, ast[function].span.end).trim_start().len();
+        let rest = self.source_between(async_at + 5, ast[function].span.end);
+        let after = rest.len() - rest.trim_start().len();
+        let star = star.or_else(|| {
+            if !generator {
+                return None;
+            }
+            let header = self.source_between(async_at, ast[function].span.end);
+            header[..header.find('(')?].find('*').map(|j| async_at + j as u32)
+        });
         self.edits.push(Edit { start: async_at, end: async_at + 5 + after as u32, pieces: Vec::new(), shorthand: None, transparent: false });
+        if let (true, Some(star)) = (generator, star) {
+            self.edits.push(Edit { start: star, end: star + 1, pieces: Vec::new(), shorthand: None, transparent: false });
+        }
         let (bs, be) = self.span(body);
-        let arrow = ast[function].has(crate::ast::flags::ARROW);
         let arguments = if !arrow || self.source_between(bs, be).contains("arguments") { "arguments" } else { "null" };
-        let open = format!("__async(this, {arguments}, function* () ");
+        let driver = if generator { "__asyncGenerator" } else { "__async" };
+        let open = format!("{driver}(this, {arguments}, function* () ");
+        let accessor = if uses_super && !arrow { "const __superGet = (k) => super[k]; " } else { "" };
         if matches!(ast[body].kind, NodeKind::Block(_)) {
-            self.edits.push(Edit { start: bs, end: bs, pieces: vec![text(&format!("{{ return {open}"))], shorthand: None, transparent: false });
+            self.edits.push(Edit { start: bs, end: bs, pieces: vec![text(&format!("{{ {accessor}return {open}"))], shorthand: None, transparent: false });
             // Replacing the closing brace, rather than adding after it, keeps the edit inside a method that is moved elsewhere.
             self.edits.push(Edit { start: be - 1, end: be, pieces: vec![text("} ); }")], shorthand: None, transparent: false });
         } else {
@@ -767,5 +849,98 @@ impl Scanner<'_, '_> {
         let mut found = false;
         ast.for_each_child(node, |c| found = found || self.contains_super(c));
         found
+    }
+
+    /// `super.x` and `super.x(...)` inside a rewritten async method: the generator that runs it is no method, so they go through
+    /// `__superGet`, which the method defines. Writing to a `super` property is refused.
+    fn lower_super(&mut self, node: NodeId) {
+        let ast = self.ast;
+        let super_member = |n: NodeId| match ast[n].kind {
+            NodeKind::Member { object, .. } if matches!(ast[object].kind, NodeKind::Super) => true,
+            _ => false,
+        };
+        match ast[node].kind {
+            NodeKind::Assign { target, .. } if super_member(target) => {
+                self.skip.insert(target);
+                self.lower_error(Feature::AsyncFunction, node);
+            }
+            NodeKind::Update { arg, .. } if super_member(arg) => {
+                self.skip.insert(arg);
+                self.lower_error(Feature::AsyncFunction, node);
+            }
+            NodeKind::Call { callee, args } if super_member(callee) => {
+                self.skip.insert(callee);
+                let key = self.super_key(callee);
+                let (cs, ce) = self.span(callee);
+                self.edits.push(Edit { start: cs, end: ce, pieces: [vec![text("__superGet(")], key, vec![text(").call")]].concat(), shorthand: None, transparent: false });
+                let end = ast[node].span.end;
+                if let Some(open) = self.source_between(ce, end).find('(') {
+                    let at = ce + open as u32 + 1;
+                    let sep = if ast.list(args).is_empty() { "this" } else { "this, " };
+                    self.edits.push(Edit { start: at, end: at, pieces: vec![text(sep)], shorthand: None, transparent: false });
+                }
+            }
+            NodeKind::Member { .. } if super_member(node) && !self.skip.contains(&node) => {
+                let key = self.super_key(node);
+                let (s, e) = self.span(node);
+                self.edits.push(Edit { start: s, end: e, pieces: [vec![text("__superGet(")], key, vec![text(")")]].concat(), shorthand: None, transparent: false });
+            }
+            _ => {}
+        }
+    }
+
+    /// The property of a `super.name` or `super[expression]`, as an expression.
+    fn super_key(&self, member: NodeId) -> Vec<Piece> {
+        let ast = self.ast;
+        let NodeKind::Member { prop, .. } = ast[member].kind else { return Vec::new() };
+        match ast[prop].kind {
+            NodeKind::PropName(a) | NodeKind::Ident(a) if !ast[member].has(crate::ast::flags::COMPUTED) => vec![Piece::Text(json_string(ast.atom(a)))],
+            _ => {
+                let (s, e) = self.span(prop);
+                vec![Piece::Range(s, e)]
+            }
+        }
+    }
+
+    /// `for await (left of right) body` as a loop over the iterator's `next()`, each result waited for, that closes the iterator when the
+    /// loop is left early or throws. The names are `var`s of the function, so concurrent calls do not share them.
+    fn lower_for_await(&mut self, node: NodeId, left: NodeId, right: NodeId, body: NodeId) {
+        let ast = self.ast;
+        let (start, end) = self.span(node);
+        // A label would end up on the `try`, which `continue label` cannot name.
+        let before = self.source_between(0, start).trim_end();
+        if let Some(head) = before.strip_suffix(':') {
+            let word = head.trim_end().rsplit(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$')).next().unwrap_or("");
+            if !word.is_empty() && word != "default" && !word.starts_with(|c: char| c.is_ascii_digit()) {
+                self.lower_error_message(node, format!("a labeled for await cannot be rewritten for the target {} yet", self.bundler.target.name()));
+                return;
+            }
+        }
+        let n = self.bundler.temp_count;
+        self.bundler.temp_count += 1;
+        let (it, more, value, err, e) = (format!("__rkIt{n}"), format!("__rkMore{n}"), format!("__rkVal{n}"), format!("__rkErr{n}"), format!("__rkE{n}"));
+        self.bundler.helpers.for_await = true;
+        let (rs, re) = self.span(right);
+        let (ls, le) = self.span(left);
+        let next = self.await_pieces(vec![text(&format!("{it}.next()"))]);
+        let close = self.await_pieces(vec![text(&format!("{value}.call({it})"))]);
+        let mut pieces = vec![text(&format!("try {{ for (var {it} = __forAwait(")), Piece::Range(rs, re), text(&format!("), {more}, {value}, {err}; {more} = !({value} = "))];
+        pieces.extend(next);
+        pieces.push(text(&format!(").done; {more} = false) {{ ")));
+        if matches!(ast[left].kind, NodeKind::VarDecl { .. }) {
+            pieces.extend([Piece::Range(ls, le), text(&format!(" = {value}.value; "))]);
+        } else {
+            pieces.extend([text("("), Piece::Range(ls, le), text(&format!(" = {value}.value); "))]);
+        }
+        let (bs, be) = self.span(body);
+        if matches!(ast[body].kind, NodeKind::Block(_)) {
+            pieces.push(Piece::Range(bs + 1, be - 1));
+        } else {
+            pieces.push(Piece::Range(bs, be));
+        }
+        pieces.push(text(&format!(" }} }} catch ({e}) {{ {err} = [{e}]; }} finally {{ try {{ {more} && ({value} = {it}.return) && ")));
+        pieces.extend(close);
+        pieces.push(text(&format!("; }} finally {{ if ({err}) throw {err}[0]; }} }}")));
+        self.edits.push(Edit { start, end, pieces, shorthand: None, transparent: false });
     }
 }
