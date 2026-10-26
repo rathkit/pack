@@ -26,11 +26,11 @@ struct Link {
 }
 
 impl Scanner<'_, '_> {
-    fn lowers(&self, feature: Feature) -> bool {
+    pub(super) fn lowers(&self, feature: Feature) -> bool {
         !self.bundler.target.supports(feature)
     }
 
-    fn lower_error_message(&mut self, node: NodeId, message: String) {
+    pub(super) fn lower_error_message(&mut self, node: NodeId, message: String) {
         self.bundler.errors.push(Diagnostic { severity: crate::graph::Severity::Error, message, file: Some(self.module.path.clone()), pos: Some(self.ast[node].span.start) });
     }
 
@@ -43,19 +43,19 @@ impl Scanner<'_, '_> {
     }
 
     /// A new temporary: a name for a `var` that the file's top declares.
-    fn temp(&mut self) -> String {
+    pub(super) fn temp(&mut self) -> String {
         let name = format!("__rk{}", self.bundler.temp_count);
         self.bundler.temp_count += 1;
         self.bundler.temps.push((self.module.id, name.clone()));
         name
     }
 
-    fn source_between(&self, from: u32, to: u32) -> &str {
+    pub(super) fn source_between(&self, from: u32, to: u32) -> &str {
         self.module.source.get(from as usize..to as usize).unwrap_or("")
     }
 
     /// An expression that is safe to write twice: a name or `this`.
-    fn is_plain(&self, node: NodeId) -> bool {
+    pub(super) fn is_plain(&self, node: NodeId) -> bool {
         matches!(self.ast[node].kind, NodeKind::Ident(_) | NodeKind::This | NodeKind::Super)
     }
 
@@ -80,7 +80,7 @@ impl Scanner<'_, '_> {
             NodeKind::Assign { op: AssignOp::Op(BinOp::Exp), target, value } if self.lowers(Feature::Exponent) => self.lower_exponent_assignment(node, target, value),
             NodeKind::Binary { op: BinOp::Nullish, left, right } if self.lowers(Feature::NullishCoalescing) => self.lower_nullish(node, left, right),
             NodeKind::Assign { op: AssignOp::Op(op @ (BinOp::LogAnd | BinOp::LogOr | BinOp::Nullish)), target, value } if self.lowers(Feature::LogicalAssignment) => self.lower_logical_assignment(node, op, target, value),
-            NodeKind::Chain(inner) if self.lowers(Feature::OptionalChain) && !self.skip.contains(&node) => {
+            NodeKind::Chain(inner) if (self.lowers(Feature::OptionalChain) || self.chain_has_private(inner)) && !self.skip.contains(&node) => {
                 let pieces = self.lower_chain(inner, false);
                 self.push(node, pieces);
             }
@@ -142,13 +142,8 @@ impl Scanner<'_, '_> {
             NodeKind::VarDeclarator { target, init: Some(init) } if self.has_object_rest(target) && self.lowers(Feature::ObjectRest) => self.lower_rest_declarator(node, target, init),
             NodeKind::ForOf { left, body, .. } if self.lowers(Feature::ObjectRest) && self.for_of_rest(left).is_some() => self.lower_rest_for_of(node, left, body),
             NodeKind::ObjectPattern(_) if self.has_object_rest(node) && self.lowers(Feature::ObjectRest) && !self.skip.contains(&node) => self.lower_error(Feature::ObjectRest, node),
-            NodeKind::ClassField { key, .. } if self.lowers(Feature::ClassField) || (self.lowers(Feature::ClassPrivate) && matches!(ast[key].kind, NodeKind::PrivateName(_))) => {
-                let feature = if matches!(ast[key].kind, NodeKind::PrivateName(_)) { Feature::ClassPrivate } else { Feature::ClassField };
-                self.lower_error(feature, node);
-            }
-            NodeKind::ClassMethod { key, .. } if self.lowers(Feature::ClassPrivate) && matches!(ast[key].kind, NodeKind::PrivateName(_)) => self.lower_error(Feature::ClassPrivate, node),
-            NodeKind::StaticBlock(_) if self.lowers(Feature::ClassStaticBlock) => self.lower_error(Feature::ClassStaticBlock, node),
-            NodeKind::Binary { op: BinOp::In, left, .. } if self.lowers(Feature::ClassPrivate) && matches!(ast[left].kind, NodeKind::PrivateName(_)) => self.lower_error(Feature::ClassPrivate, node),
+            // Fields, private members and static blocks are rewritten with the class that has them.
+            NodeKind::Class { .. } if self.lowers(Feature::ClassField) && self.class_needs_lowering(node) => self.lower_class(node),
             NodeKind::ForOf { .. } if ast[node].flags & crate::ast::flags::AWAIT != 0 && self.lowers(Feature::AsyncIteration) => self.lower_error(Feature::AsyncIteration, node),
             NodeKind::Await(_) if self.fn_depth == 0 && self.lowers(Feature::TopLevelAwait) => self.lower_error(Feature::TopLevelAwait, node),
             _ => {}
@@ -194,6 +189,15 @@ impl Scanner<'_, '_> {
     fn assignment_target(&mut self, target: NodeId) -> Option<(Vec<Piece>, Vec<Piece>)> {
         let ast = self.ast;
         match ast[target].kind {
+            NodeKind::Member { object, prop } if ast[target].flags & crate::ast::flags::OPTIONAL == 0 && matches!(ast[prop].kind, NodeKind::PrivateName(_)) => {
+                let info = self.private_of_member(target)?;
+                let t = self.temp();
+                let (os, oe) = self.span(object);
+                let mut first = vec![text(&format!("({t} = "))];
+                first.extend(self.private_wrapper_call(&info, vec![Piece::Range(os, oe)]));
+                first.push(text(")._"));
+                Some((first, vec![text(&format!("{t}._"))]))
+            }
             NodeKind::Member { object, prop } if ast[target].flags & crate::ast::flags::OPTIONAL == 0 => {
                 let (os, oe) = self.span(object);
                 let (first_object, again_object) = if self.is_plain(object) {
@@ -216,9 +220,6 @@ impl Scanner<'_, '_> {
                     }
                     Some((first, again))
                 } else {
-                    if matches!(ast[prop].kind, NodeKind::PrivateName(_)) {
-                        return None;
-                    }
                     let (ps, pe) = self.span(prop);
                     let (mut first, mut again) = (first_object, again_object);
                     first.extend([text("."), Piece::Range(ps, pe)]);
@@ -369,6 +370,7 @@ impl Scanner<'_, '_> {
         let mut current: Vec<Piece> = vec![Piece::Range(bs, be)];
         let mut current_plain = self.is_plain(base);
         let mut this_value: Option<Vec<Piece>> = if matches!(ast[base].kind, NodeKind::Super) { Some(vec![text("this")]) } else { None };
+        let mut last_private = false;
         for (i, link) in links.iter().enumerate() {
             let next_is_optional_call = links.get(i + 1).is_some_and(|l| l.call && l.optional);
             if link.optional {
@@ -384,11 +386,36 @@ impl Scanner<'_, '_> {
                     current_plain = true;
                 }
             }
+            if !link.call {
+                if let Some(info) = self.private_ref(link.node).cloned() {
+                    // A private member: read through the helper, and a call after it keeps `this` with `.call`.
+                    let next_is_call = links.get(i + 1).is_some_and(|l| l.call);
+                    let mut object = current;
+                    let mut this_text = None;
+                    if next_is_call {
+                        if current_plain {
+                            this_text = Some(object.clone());
+                        } else {
+                            let t = self.temp();
+                            let mut captured = vec![text(&format!("({t} = ("))];
+                            captured.extend(object);
+                            captured.push(text("))"));
+                            object = captured;
+                            this_text = Some(vec![text(&t)]);
+                        }
+                    }
+                    current = self.private_read(&info, object);
+                    current_plain = false;
+                    this_value = this_text;
+                    last_private = true;
+                    continue;
+                }
+            }
             if link.call {
                 let mut next = Vec::new();
                 match this_value.take() {
                     // A call of a method keeps `this` through `.call` when the callee has been put in a name.
-                    Some(this) if link.optional => {
+                    Some(this) if link.optional || last_private => {
                         next.extend(current);
                         next.push(text(".call("));
                         next.extend(this);
@@ -406,7 +433,9 @@ impl Scanner<'_, '_> {
                 current = next;
                 current_plain = false;
                 this_value = None;
+                last_private = false;
             } else {
+                last_private = false;
                 // A member: its object is the `this` of a call that follows with `?.`, so it must be evaluated once.
                 let mut object = current;
                 let mut this_text = None;

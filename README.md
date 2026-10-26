@@ -77,10 +77,11 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   (a value used twice goes in a temporary `var` declared once at the top of the file), numeric separators, `catch` without a
   binding, a trailing comma in a call or parameter list, and object spread (`__spreadValues` and `__spreadProps`, which keep getters
   and methods) and object rest (`__objRest`) in a declaration, a function parameter (also of an arrow with an expression body)
-  or a `for of`. `es2015` is the lowest target. Anything the target cannot have and this
+  or a `for of`, and class fields, private members (`#x`, private methods and accessors, `#x in o`) and static blocks
+  (`__publicField`, and a `WeakMap` or `WeakSet` per private name, as esbuild does). `es2015` is the lowest target. Anything the target cannot have and this
   cannot rewrite stops the build with a message that names it and the target, never passes through: BigInt literals and top-level
-  await can never be rewritten, and async functions, async iteration, class fields, private members and static blocks are not
-  rewritten yet, nor is object rest anywhere else (nested in another pattern, in an assignment, in `catch`), or a `__proto__`
+  await can never be rewritten, and async functions and async iteration are not rewritten yet, nor are decorators together with
+  class fields, `super` in a private method or a static initializer, a tagged template on a private member, or object rest anywhere else (nested in another pattern, in an assignment, in `catch`), or a `__proto__`
   property after a spread. Regular expression syntax and library functions are not looked at, and engine targets such
   as `chrome80` are not supported. Checked by running programs as written and rewritten for every target in plain, minified,
   CommonJS and IIFE form, and by parsing each result as the language of its target (`tools/run-target.mjs`).

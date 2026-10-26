@@ -512,6 +512,10 @@ fn what_a_target_cannot_have_stops_the_build_and_is_named() {
         ("const [x, { ...r }] = y; export { x, r };", "es2017", "object rest in a pattern ({ a, ...rest }) is not available in the target es2017"),
         ("let a, r; ({ a, ...r } = y); export { a, r };", "es2017", "object rest in a pattern"),
         ("try {} catch ({ a, ...r }) {}", "es2017", "object rest in a pattern"),
+        ("const x = 1; class A { y = x; constructor(x) { this.z = x; } } export { A };", "es2021", "a parameter of the constructor would hide"),
+        ("class B { static m() {} } export class A extends B { static f = super.m(); }", "es2021", "a static field that uses super cannot be rewritten"),
+        ("class B { m() {} } export class A extends B { #p() { return super.m(); } }", "es2021", "a private method that uses super cannot be rewritten"),
+        ("export class A { #t(s) { return s; } r() { return this.#t`hi`; } }", "es2021", "a tagged template of a private member cannot be rewritten"),
     ] {
         let (code, stderr) = rkp(source, target);
         assert_eq!(code, Some(1), "{source}: {stderr}");

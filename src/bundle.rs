@@ -19,6 +19,7 @@
 //! becomes strict when the output is an ES module.
 
 mod lower;
+mod lower_class;
 mod std_decorators;
 
 use std::collections::{HashMap, HashSet};
@@ -340,6 +341,8 @@ struct Helpers {
     path_shim: bool,
     /// `__spreadValues`, `__spreadProps` and `__objRest`: object spread and rest written for an older target.
     spread: bool,
+    /// `__publicField`, `__privateGet` and the others: class fields and private members written for an older target.
+    class_private: bool,
 }
 
 struct Bundler<'a> {
@@ -1947,7 +1950,7 @@ impl<'a> Bundler<'a> {
             self.code.insert(id, Code::Wrapped { edits: Vec::new(), json: true, require_cases: None });
             return;
         };
-        let mut scanner = Scanner { bundler: self, module, places: None, ast: &parsed.ast, semantic: &parsed.semantic, edits: Vec::new(), shorthand: HashSet::new(), skip: HashSet::new(), written: HashSet::new(), fn_depth: 0, has_tla: false, needs_require: false, top_decl: None, in_wrapper: false, name_hint: None, shared_names: None };
+        let mut scanner = Scanner { bundler: self, module, places: None, private_scopes: Vec::new(), private_refs: HashMap::new(), chain_members: HashSet::new(), ast: &parsed.ast, semantic: &parsed.semantic, edits: Vec::new(), shorthand: HashSet::new(), skip: HashSet::new(), written: HashSet::new(), fn_depth: 0, has_tla: false, needs_require: false, top_decl: None, in_wrapper: false, name_hint: None, shared_names: None };
         let code = if module.kind == ModuleKind::Esm { scanner.scan_esm(id) } else { scanner.scan_wrapped(id) };
         self.code.insert(id, code);
     }
@@ -1999,6 +2002,12 @@ struct Scanner<'b, 'a> {
     module: &'a Module,
     /// The module's lines, for the place of a JSX element (`--jsx-dev`), made when first needed.
     places: Option<crate::sourcemap::Positions<'a>>,
+    /// The private names of the classes being rewritten for `--target`, the innermost last.
+    private_scopes: Vec<lower_class::PrivateScope>,
+    /// What each private member node of an optional chain names, for the chain's rewrite.
+    private_refs: HashMap<NodeId, lower_class::Private>,
+    /// Private member nodes already rewritten (or left to a chain), so no other rewrite touches them.
+    chain_members: HashSet<NodeId>,
     ast: &'a Ast,
     semantic: &'a Semantic,
     edits: Vec<Edit>,
@@ -2898,6 +2907,7 @@ fn json_string(text: &str) -> String {
 
 const HELPER_CJS: &str = "var __cjs = (fn, req) => { var m; return () => m ? m.exports : (m = { exports: {} }, fn.call(m.exports, m.exports, m, req), m.exports); };\n";
 const HELPER_SPREAD: &str = "var __hasOwn = Object.prototype.hasOwnProperty;\nvar __propIsEnum = Object.prototype.propertyIsEnumerable;\nvar __defNormal = (obj, key, value) => key in obj ? Object.defineProperty(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;\nvar __spreadValues = (a, b) => { for (var prop in b || (b = {})) if (__hasOwn.call(b, prop)) __defNormal(a, prop, b[prop]); if (Object.getOwnPropertySymbols) for (var prop of Object.getOwnPropertySymbols(b)) { if (__propIsEnum.call(b, prop)) __defNormal(a, prop, b[prop]); } return a; };\nvar __spreadProps = (a, b) => { for (var key of Reflect.ownKeys(b)) Object.defineProperty(a, key, Object.getOwnPropertyDescriptor(b, key)); return a; };\nvar __objRest = (source, exclude) => { var target = {}; for (var prop in source) if (__hasOwn.call(source, prop) && exclude.indexOf(prop) < 0) target[prop] = source[prop]; if (source != null && Object.getOwnPropertySymbols) for (var prop of Object.getOwnPropertySymbols(source)) { if (exclude.indexOf(prop) < 0 && __propIsEnum.call(source, prop)) target[prop] = source[prop]; } return target; };\n";
+const HELPER_CLASS_PRIVATE: &str = "var __typeError = (msg) => { throw TypeError(msg); };\nvar __defNormalProp = (obj, key, value) => key in obj ? Object.defineProperty(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;\nvar __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== \"symbol\" ? key + \"\" : key, value);\nvar __accessCheck = (obj, member, msg) => member.has(obj) || __typeError(\"Cannot \" + msg);\nvar __privateGet = (obj, member, getter) => (__accessCheck(obj, member, \"read from private field\"), getter ? getter.call(obj) : member.get(obj));\nvar __privateAdd = (obj, member, value) => member.has(obj) ? __typeError(\"Cannot add the same private member more than once\") : member instanceof WeakSet ? member.add(obj) : member.set(obj, value);\nvar __privateSet = (obj, member, value, setter) => (__accessCheck(obj, member, \"write to private field\"), setter ? setter.call(obj, value) : member.set(obj, value), value);\nvar __privateMethod = (obj, member, method) => (__accessCheck(obj, member, \"access private method\"), method);\nvar __privateWrapper = (obj, member, setter, getter) => ({ set _(value) { __privateSet(obj, member, value, setter); }, get _() { return __privateGet(obj, member, getter); } });\nvar __privateIn = (member, obj) => Object(obj) !== obj ? __typeError('Cannot use the \"in\" operator on this value') : member.has(obj);\n";
 const HELPER_TO_DEFAULT: &str = "var __toDefault = (e, node) => e && !node && e.__esModule ? e.default : e;\n";
 const HELPER_TO_NS: &str = "var __toNs = (e, node) => { if (!node && e && e.__esModule) return e; var t = Object.create(null, { [Symbol.toStringTag]: { value: \"Module\" } }); if (e && (typeof e == \"object\" || typeof e == \"function\")) for (let k of new Set(e.__esModule ? [...Object.keys(e), \"__esModule\"] : Object.keys(e))) if (k != \"default\") Object.defineProperty(t, k, { get: () => e[k], enumerable: true }); return Object.defineProperty(t, \"default\", { value: e, enumerable: true }); };\n";
 const HELPER_REQ: &str = "var __req = (f, url) => { var r; var load = () => r || (r = __createRequire(url)); return Object.assign((id) => f(id, load()), { cache: Object.create(null), extensions: Object.create(null), resolve: (...a) => load().resolve(...a), main: void 0 }); };\n";
@@ -3232,6 +3242,9 @@ impl Bundler<'_> {
         }
         if self.helpers.spread {
             out.push_str(HELPER_SPREAD);
+        }
+        if self.helpers.class_private {
+            out.push_str(HELPER_CLASS_PRIVATE);
         }
         if self.code.values().any(|c| matches!(c, Code::Wrapped { require_cases: Some(_), .. })) {
             out.push_str(match format {
