@@ -189,6 +189,8 @@ pub struct GraphOptions {
     pub defines: crate::define::Defines,
     /// `--pure`: names whose calls are free of effects (`styled.div`), as if each carried `/* @__PURE__ */`.
     pub pure_calls: Vec<String>,
+    /// `--inject`: files whose exports stand in for the globals of the same names, in every module that uses one.
+    pub inject: Vec<Inject>,
     /// Specifiers left out of the bundle: exact names, or a prefix ending in `/*`.
     pub external: Vec<String>,
     /// Treat Node's built-in modules (`fs`, `node:path`, ...) as external.
@@ -210,7 +212,7 @@ pub type WorkerBuilder = dyn Fn(&Path) -> Result<Vec<u8>, String> + Send + Sync;
 
 impl Default for GraphOptions {
     fn default() -> Self {
-        GraphOptions { plugins: None, resolve: ResolveOptions::default(), jsx: JsxOptions::default(), decorator_metadata: false, experimental_decorators: false, strict_null_checks: false, loaders: Vec::new(), asset_names: "[name]-[hash]".to_string(), public_path: "./".to_string(), defines: Default::default(), pure_calls: Vec::new(), external: Vec::new(), node_builtins: true, packages_external: false, threads: 0, cache: None, federation: None, worker_builder: None }
+        GraphOptions { plugins: None, resolve: ResolveOptions::default(), jsx: JsxOptions::default(), decorator_metadata: false, experimental_decorators: false, strict_null_checks: false, loaders: Vec::new(), asset_names: "[name]-[hash]".to_string(), public_path: "./".to_string(), defines: Default::default(), pure_calls: Vec::new(), inject: Vec::new(), external: Vec::new(), node_builtins: true, packages_external: false, threads: 0, cache: None, federation: None, worker_builder: None }
     }
 }
 
@@ -570,7 +572,7 @@ impl Context<'_> {
         let mut used_glob = false;
         let mut css = None;
         let mut css_requests: Vec<Request> = Vec::new();
-        let source = match loader {
+        let mut source = match loader {
             Some(loader) => {
                 let bytes = match (plugin_bytes.take(), plugin_text.take()) {
                     (Some(bytes), _) => bytes,
@@ -692,7 +694,34 @@ impl Context<'_> {
                 }
                 options.decorator_metadata = self.options.decorator_metadata;
                 options.strict_null_checks = self.options.strict_null_checks;
-                let (parsed, as_module) = parse_file(&source, mode, options).map_err(|e| error(e.message.clone(), Some(e.pos)))?;
+                let (mut parsed, mut as_module) = parse_file(&source, mode, options).map_err(|e| error(e.message.clone(), Some(e.pos)))?;
+                // `--inject`: a global the module uses that a file exports is imported from it, written on the module's first line so no line moves.
+                if !self.options.inject.is_empty() {
+                    let mut wanted: Vec<(&Path, Vec<&str>)> = Vec::new();
+                    for inject in &self.options.inject {
+                        if inject.path == path {
+                            continue;
+                        }
+                        let used: Vec<&str> = inject.names.iter().map(String::as_str).filter(|n| parsed.semantic.unresolved().iter().any(|&id| matches!(parsed.ast.node(id).kind, crate::ast::NodeKind::Ident(a) if parsed.ast.atom(a) == *n))).collect();
+                        if !used.is_empty() {
+                            wanted.push((&inject.path, used));
+                        }
+                    }
+                    if !wanted.is_empty() {
+                        let lines: Vec<String> = wanted
+                            .iter()
+                            .map(|(file, names)| {
+                                let spec = Json::String(file.to_string_lossy().replace('\\', "/")).to_string();
+                                if as_module { format!("import {{ {} }} from {spec};", names.join(", ")) } else { format!("var {{ {} }} = require({spec});", names.join(", ")) }
+                            })
+                            .collect();
+                        let prefix = lines.join(" ");
+                        // A `#!` line stays the first line.
+                        let at = if source.starts_with("#!") { source.find('\n').map_or(source.len(), |n| n + 1) } else { 0 };
+                        source.insert_str(at, &format!("{prefix} "));
+                        (parsed, as_module) = parse_file(&source, mode, options).map_err(|e| error(e.message.clone(), Some(e.pos)))?;
+                    }
+                }
                 let mut record = ModuleRecord::build_with(&parsed, &self.options.jsx, &self.options.defines);
                 record.requests.extend(css_requests);
                 // Whatever needed module rules to parse is an ES module, import or export or not.
@@ -959,6 +988,27 @@ pub fn absolute(cwd: &Path, path: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests;
+
+/// A file given to `--inject` and the names it exports.
+#[derive(Clone, Debug)]
+pub struct Inject {
+    pub path: PathBuf,
+    pub names: Vec<String>,
+}
+
+impl Inject {
+    /// The names `path` exports (not `default`), read from the file.
+    pub fn read(path: &Path) -> Result<Inject, String> {
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let parsed = parse(&text, syntax_for(path)).map_err(|e| format!("{}: {}", path.display(), e.message))?;
+        let record = ModuleRecord::build(&parsed);
+        let names: Vec<String> = record.exports.iter().map(|e| e.exported.clone()).filter(|n| n != "default").collect();
+        if names.is_empty() {
+            return Err(format!("{}: has no named exports to inject", path.display()));
+        }
+        Ok(Inject { path: path.to_path_buf(), names })
+    }
+}
 
 /// A name of a package (`react`, `@scope/pkg/sub`), not a path (`./a`, `/a`, `C:\a`), an address or a `#` import of the package itself.
 fn is_package_name(specifier: &str) -> bool {

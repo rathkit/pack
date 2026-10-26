@@ -132,7 +132,7 @@ if (api.status !== 0 || api.stdout.trim() !== 'api ok') fail(`the API: ${api.std
 const tsc = join(root, 'bench', 'node_modules', 'typescript', 'bin', 'tsc');
 if (existsSync(tsc)) {
   writeFileSync(join(project, 'use.mts'), `import { build, serve, type Options, BuildError } from '@rathkit/pack';
-const typed: Options = { legalComments: 'linked', entryNames: '[name]-[hash]', chunkNames: 'c-[hash]', outExtension: { '.js': '.mjs' }, pure: ['a.b'], metafile: 'meta.json', entries: 'a.js', banner: { css: 'x' }, footer: 'y', drop: ['console', 'debugger'], packages: 'external', resolveExtensions: ['.ts'], preserveSymlinks: true, envDir: '.', envPrefix: ['A_'], envFiles: false };
+const typed: Options = { inject: ['shim.js'], legalComments: 'linked', entryNames: '[name]-[hash]', chunkNames: 'c-[hash]', outExtension: { '.js': '.mjs' }, pure: ['a.b'], metafile: 'meta.json', entries: 'a.js', banner: { css: 'x' }, footer: 'y', drop: ['console', 'debugger'], packages: 'external', resolveExtensions: ['.ts'], preserveSymlinks: true, envDir: '.', envPrefix: ['A_'], envFiles: false };
 // @ts-expect-error only console and debugger can be dropped
 await build({ entries: 'a.js', drop: ['alert'] });
 const options: Options = { entries: ['a.js'], outdir: 'dist', minify: { whitespace: true }, define: { A: '1' }, loader: { '.svg': 'dataurl' }, federation: { name: 'x' } };

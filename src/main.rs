@@ -548,6 +548,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     let mut env_files = true;
     let mut public_path_given = false;
     let mut metafile: Option<String> = None;
+    let mut inject_files: Vec<String> = Vec::new();
     let mut bundle_options = rathkit_pack::bundle::Options::default();
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -641,6 +642,15 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
                 public_path_given = true;
             }
             "--preserve-symlinks" => options.resolve.preserve_symlinks = true,
+            // --inject:FILE: what FILE exports stands in for the globals of those names, in every module that uses one.
+            arg if arg == "--inject" || arg.starts_with("--inject:") => {
+                let file = if arg == "--inject" { it.next().cloned().unwrap_or_default() } else { arg["--inject:".len()..].to_string() };
+                if file.is_empty() {
+                    eprintln!("error: --inject needs a file");
+                    return Done::Exit(ExitCode::from(2));
+                }
+                inject_files.push(file);
+            }
             // What becomes of /*! ... */, @license and @preserve comments when minifying: eof (the default), none, linked, external.
             arg if arg == "--legal-comments" || arg.starts_with("--legal-comments=") => {
                 let value = if arg == "--legal-comments" { it.next().cloned().unwrap_or_default() } else { arg["--legal-comments=".len()..].to_string() };
@@ -782,6 +792,15 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     }
     let cwd = std::env::current_dir().expect("working directory");
     let mut restart_files: Vec<std::path::PathBuf> = Vec::new();
+    for file in &inject_files {
+        match rathkit_pack::graph::Inject::read(&rathkit_pack::graph::absolute(&cwd, file)) {
+            Ok(inject) => options.inject.push(inject),
+            Err(message) => {
+                eprintln!("error: --inject: {message}");
+                return Done::Exit(ExitCode::from(2));
+            }
+        }
+    }
     // A build is `production` and the dev server `development`, unless --mode says otherwise.
     if mode.is_empty() {
         mode = if serve { "development" } else { "production" }.to_string();

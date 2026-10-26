@@ -409,3 +409,26 @@ fn legal_comments_survive_minifying_where_they_are_told_to() {
     assert_eq!(bad.status.code(), Some(2));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn an_injected_export_stands_in_for_the_global_of_its_name() {
+    if Command::new("node").arg("--version").output().is_err() {
+        return;
+    }
+    let dir = scratch("inject");
+    let write = |name: &str, text: &str| std::fs::write(dir.join(name), text).unwrap();
+    write("shim.js", "export const Buffer = { from: (s) => 'shim:' + s };\nexport const Unused = 'not used anywhere';\n");
+    write("esm.js", "console.log(Buffer.from('esm'));\n");
+    write("cjs.js", "console.log(Buffer.from('cjs'));\nmodule.exports = 1;\n");
+    write("local.js", "const Buffer = { from: (s) => 'local:' + s };\nconsole.log(Buffer.from('local'));\n");
+    write("main.js", "import './esm.js';\nimport './local.js';\nrequire('./cjs.js');\n");
+    assert_eq!(build_and_run(&dir, &["--inject:./shim.js"], &[]), "shim:esm\nlocal:local\nshim:cjs");
+    // A program that uses none of the names does not have the file in its bundle.
+    write("main.js", "console.log(typeof process);\n");
+    assert_eq!(build_and_run(&dir, &["--inject", "./shim.js"], &[]), "object");
+    assert!(!std::fs::read_to_string(dir.join("out.mjs")).unwrap().contains("shim:"));
+    // One that uses the global without the option gets Node's own.
+    write("main.js", "console.log(typeof Buffer.from('x'));\n");
+    assert_eq!(build_and_run(&dir, &[], &[]), "object");
+    let _ = std::fs::remove_dir_all(&dir);
+}
