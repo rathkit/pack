@@ -211,9 +211,16 @@ rkp bundle src/main.ts --outfile dist/app.mjs
     stops pages from reloading when a served remote builds again, and `dev.disableHotTypesReload` stops types being read again while
     watching. Settings of how the real plugin is arranged inside webpack or rspack (`runtime`, `implementation`, `async`,
     `virtualRuntimeEntry`, the `treeShaking*` directories, `deleteTypesFolder`) change nothing a program can see and are accepted.
-    What is not carried out is named in a warning on stderr: `bridge.enableBridgeRouter`, `experiments.externalRuntime`, a
-    `compilerInstance` other than `tsc`, `extractThirdParty`, `extractRemoteTypes`, `afterGenerate`, and the `consumeTypes` settings
-    `family`, `runtimePkgs`, `remoteTypesFolder` and `consumeAPITypes`.
+    `generateTypes` also honors `compilerInstance` (`tsc`, or the command of another compiler such as `vue-tsc`, run on a project file
+    written for it), `extractThirdParty` (the declarations of the packages the types import travel in the zip, minus `exclude`),
+    `extractRemoteTypes` (so do the types this application has read of its own remotes) and `afterGenerate` (a function in
+    `rathkit.config.*`, called with the files written; it is run from its source text, so it can use only what it defines). `consumeTypes` also honors
+    `family` (4 or 6), `remoteTypesFolder` (the archive's name when a manifest does not say), and `consumeAPITypes` with `runtimePkgs`
+    (an `index.d.ts` in the types folder that types `loadRemote`). Unlike the real plugin, where `abortOnError` is on by default, a type
+    error or an unreadable remote is a warning unless `abortOnError` is set. `bridge` works as in the real plugin: with
+    `@module-federation/bridge-react` installed and not turned off, `react-router-dom` is read through the bridge's router for the
+    version of React Router the project has (and cannot be shared). The one setting that is named in a warning is `dts.implementation`,
+    since another implementation of the types plugin is not run.
   - `serve` does the same in development: the build is in memory, `remoteEntry.js` and the manifest are served to pages
     of other local dev servers (`--cors-origin ORIGIN` adds other origins), and a change rebuilds the remote and
     reloads the pages of hosts that use it.

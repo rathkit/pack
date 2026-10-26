@@ -196,15 +196,13 @@ scenario('getPublicPath sets where the container loads from, and options that ch
       j.dev = { disableLiveReload: true, disableDynamicRemoteTypeHints: true };
       j.dts = { generateTypes: { deleteTypesFolder: true, compileInChildProcess: true }, consumeTypes: { timeout: 1000, maxRetries: 1, deleteTypesFolder: true } };
       // Behavior this does not carry out: said.
-      j.bridge = { enableBridgeRouter: true };
-      j.dts.generateTypes.extractThirdParty = true;
-      j.dts.consumeTypes.family = 4;
+      j.dts.implementation = 'another-dts-plugin';
     }),
   });
   const entry = readFileSync(join(dist, 'remoteEntry.js'), 'utf8');
   check('the function body is the base address (with a slash added)', entry.includes("return 'https://cdn.example/app'") && entry.includes("p.endsWith('/')"), entry.slice(0, 400));
-  for (const key of ['`bridge.enableBridgeRouter`', '`dts.generateTypes.extractThirdParty`', '`dts.consumeTypes.family`']) check(`a warning names ${key}`, lastStderr.includes(key), lastStderr);
-  for (const key of ['runtime', 'implementation', 'async', 'dev', 'abortOnError', 'timeout', 'deleteTypesFolder', 'compileInChildProcess', 'getPublicPath']) check(`${key} is not warned about`, !lastStderr.includes('`' + key) && !lastStderr.includes('.' + key + '`'), lastStderr);
+  for (const key of ['`dts.implementation`']) check(`a warning names ${key}`, lastStderr.includes(key), lastStderr);
+  for (const key of ['runtime', 'async', 'dev', 'abortOnError', 'timeout', 'deleteTypesFolder', 'compileInChildProcess', 'getPublicPath']) check(`${key} is not warned about`, !lastStderr.includes('`' + key) && !lastStderr.includes('.' + key + '`'), lastStderr);
 });
 
 scenario('dts options: outputDir, generateAPITypes, additionalFilesToCompile, abortOnError, and a remote whose types cannot be read', async () => {
@@ -265,6 +263,123 @@ scenario('dts options: outputDir, generateAPITypes, additionalFilesToCompile, ab
     }),
   });
   check('types are read from the given address', existsSync(join(hostDir, '@mf-types', 'r3', 'compiled-types', 'Button.d.ts')) && !/were not read/.test(lastStderr), lastStderr);
+});
+
+scenario('dts options: compilerInstance, extractThirdParty, extractRemoteTypes, afterGenerate, consumeAPITypes, runtimePkgs, family, remoteTypesFolder', async () => {
+  const tsc = join(bench, 'node_modules', 'typescript', 'bin', 'tsc');
+  if (!existsSync(tsc)) return;
+  // A remote whose exposed module imports a package that has types, and a compiler other than tsc (a script that runs it).
+  const dist = await build('remote-types', {
+    entry: 'src/index.ts',
+    as: 'remote-types-extract',
+    links: false,
+    patch: (dir) => {
+      const modules = join(dir, 'node_modules');
+      mkdirSync(join(modules, 'typed-pkg'), { recursive: true });
+      mkdirSync(join(modules, '.bin'), { recursive: true });
+      symlinkSync(join(bench, 'node_modules', 'typescript'), join(modules, 'typescript'), 'dir');
+      writeFileSync(join(modules, 'typed-pkg', 'package.json'), '{ "name": "typed-pkg", "version": "1.0.0", "types": "index.d.ts" }');
+      writeFileSync(join(modules, 'typed-pkg', 'index.d.ts'), 'export interface Shape { sides: number }\n');
+      writeFileSync(join(modules, '.bin', 'faketsc'), `#!/usr/bin/env node\nrequire('fs').writeFileSync(${JSON.stringify(join(dir, 'compiler-ran.txt'))}, process.argv.slice(2).join(' '));\nrequire(${JSON.stringify(tsc)});\n`, { mode: 0o755 });
+      writeFileSync(join(dir, 'src', 'Button.ts'), "import type { Shape } from 'typed-pkg';\nexport const shape: Shape = { sides: 3 };\n" + readFileSync(join(dir, 'src', 'Button.ts'), 'utf8'));
+      // Types this application has read of a remote of its own.
+      mkdirSync(join(dir, '@mf-types', 'r9', 'compiled-types'), { recursive: true });
+      writeFileSync(join(dir, '@mf-types', 'r9', 'apis.d.ts'), 'export type RemoteKeys = "r9/x";\n');
+      writeFileSync(join(dir, '@mf-types', 'r9', 'compiled-types', 'x.d.ts'), 'export const x: number;\n');
+      withOption('mf.json', (j) => {
+        j.dts = {
+          generateTypes: {
+            compilerInstance: process.platform === 'win32' ? 'tsc' : 'faketsc --pretty false',
+            extractThirdParty: true,
+            extractRemoteTypes: true,
+            afterGenerate: "async ({ zipName, zipTypesPath }) => require('fs').writeFileSync(process.cwd() + '/after.txt', zipName + ':' + require('fs').existsSync(zipTypesPath))",
+          },
+        };
+      })(dir);
+    },
+  });
+  const dir = copies.get('remote-types-extract');
+  if (process.platform !== 'win32') check('a compiler other than tsc is run with the project file', /--pretty false --project .*tsconfig\.mf\.json/.test(existsSync(join(dir, 'compiler-ran.txt')) ? readFileSync(join(dir, 'compiler-ran.txt'), 'utf8') : ''));
+  check('the declarations are still written', existsSync(join(dist, '@mf-types', 'compiled-types', 'Button.d.ts')), lastStderr);
+  check('the declarations of an imported package travel in the zip', existsSync(join(dist, '@mf-types', 'node_modules', 'typed-pkg', 'index.d.ts')) && existsSync(join(dist, '@mf-types', 'node_modules', 'typed-pkg', 'package.json')));
+  check('and so do the types read of the application\'s own remotes', existsSync(join(dist, '@mf-types', 'node_modules', 'r9', 'apis.d.ts')) && existsSync(join(dist, '@mf-types', 'node_modules', 'r9', 'compiled-types', 'x.d.ts')));
+  check('afterGenerate is called with the files written', existsSync(join(dir, 'after.txt')) && readFileSync(join(dir, 'after.txt'), 'utf8') === '@mf-types.zip:true', existsSync(join(dir, 'after.txt')) ? readFileSync(join(dir, 'after.txt'), 'utf8') : 'not called');
+  const without = await build('remote-types', { entry: 'src/index.ts', as: 'remote-types-exclude', links: false, patch: (d) => {
+    cpSync(join(dir, 'node_modules'), join(d, 'node_modules'), { recursive: true, dereference: false, verbatimSymlinks: true });
+    writeFileSync(join(d, 'src', 'Button.ts'), readFileSync(join(dir, 'src', 'Button.ts'), 'utf8'));
+    withOption('mf.json', (j) => (j.dts = { generateTypes: { extractThirdParty: { exclude: ['typed-pkg'] } } }))(d);
+  } });
+  check('exclude leaves a package out', !existsSync(join(without, '@mf-types', 'node_modules', 'typed-pkg')));
+
+  // A host that asks for the API types file, reads over IPv4 only, and finds an archive named by remoteTypesFolder.
+  serve(4996, dist);
+  const plain = await build('remote', { as: 'remote-plain-types' });
+  cpSync(join(dist, '@mf-types.zip'), join(plain, 'custom-types.zip'));
+  serve(4995, plain);
+  const hostDir = copy('host-types', 'host-types-api', false);
+  await build('host-types', {
+    entry: 'src/index.ts',
+    as: 'host-types-api',
+    links: false,
+    patch: withOption('mf.json', (j) => {
+      j.remotes = { r3: 'r3@http://localhost:4996/remoteEntry.js' };
+      j.dts = { consumeTypes: { consumeAPITypes: true, family: 4, runtimePkgs: ['my-runtime'] } };
+    }),
+  });
+  const index = existsSync(join(hostDir, '@mf-types', 'index.d.ts')) ? readFileSync(join(hostDir, '@mf-types', 'index.d.ts'), 'utf8') : '';
+  check('consumeAPITypes writes index.d.ts typing loadRemote', /from '\.\/r3\/apis\.d\.ts'/.test(index) && /declare module "@module-federation\/runtime"/.test(index) && /declare module "my-runtime"/.test(index) && /function loadRemote/.test(index), index);
+  check('over IPv4 the types are read', existsSync(join(hostDir, '@mf-types', 'r3', 'compiled-types', 'Button.d.ts')) && !/were not read/.test(lastStderr), lastStderr);
+  const named = copy('host-types', 'host-types-named', false);
+  await build('host-types', {
+    entry: 'src/index.ts',
+    as: 'host-types-named',
+    links: false,
+    patch: withOption('mf.json', (j) => {
+      j.remotes = { r3: 'r3@http://localhost:4995/remoteEntry.js' };
+      j.dts = { consumeTypes: { remoteTypesFolder: 'custom-types' } };
+    }),
+  });
+  check('remoteTypesFolder names the archive when the manifest does not', existsSync(join(named, '@mf-types', 'r3', 'compiled-types', 'Button.d.ts')), lastStderr);
+});
+
+scenario('the router bridge: react-router-dom is read through bridge-react for the version the project has', async () => {
+  const project = (name, router, bridge) => {
+    const dir = copy('remote', name, false);
+    const modules = join(dir, 'node_modules');
+    const file = (path, text) => {
+      mkdirSync(dirname(join(modules, path)), { recursive: true });
+      writeFileSync(join(modules, path), text);
+    };
+    file('react-router-dom/package.json', JSON.stringify({ name: 'react-router-dom', version: router }));
+    file('react-router-dom/dist/index.js', "export const which = 'REAL-ROUTER';\n");
+    file('@module-federation/bridge-react/dist/router.es.js', 'export {};\n');
+    for (const v of [5, 6, 7]) file(`@module-federation/bridge-react/dist/router-v${v}.es.js`, `import { which } from 'react-router-dom/${v === 5 ? 'index.js' : 'dist/index.js'}';\nexport { which as real };\nexport const bridge = 'BRIDGE-V${v}';\n`);
+    file('react-router-dom/index.js', "export const which = 'REAL-ROUTER';\n");
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'bridged', private: true, dependencies: { 'react-router-dom': router, ...(bridge === undefined ? { '@module-federation/bridge-react': '*' } : {}) } }));
+    writeFileSync(join(dir, 'src', 'index.js'), "import * as router from 'react-router-dom';\nconsole.log('router', router.bridge ?? 'none', router.real ?? router.which);\n");
+    return dir;
+  };
+  const text = async (name, router, bridge) => {
+    project(name, router, bridge);
+    const dist = await build('remote', { as: name, links: false, patch: withOption('mf.json', (j) => { j.exposes = {}; delete j.shared; if (bridge !== undefined) j.bridge = bridge; }) });
+    return readdirSync(dist).filter((f) => f.endsWith('.js')).map((f) => readFileSync(join(dist, f), 'utf8')).join('\n');
+  };
+  for (const [major, version] of [[5, '5.3.4'], [6, '6.22.0'], [7, '7.1.0']]) {
+    const code = await text(`bridge-${major}`, version, { enableBridgeRouter: true });
+    check(`React Router ${major}: the bridge's router is used and reaches the real package`, code.includes(`BRIDGE-V${major}`) && code.includes('REAL-ROUTER'), code.slice(0, 300));
+  }
+  const off = await text('bridge-off', '6.22.0', { enableBridgeRouter: false });
+  check('enableBridgeRouter: false leaves react-router-dom alone', !off.includes('BRIDGE-V') && off.includes('REAL-ROUTER'));
+  const implied = await text('bridge-implied', '6.22.0', undefined);
+  check('with bridge-react among the dependencies it is on without being asked', implied.includes('BRIDGE-V6'));
+  let refused = '';
+  try {
+    project('bridge-shared', '6.22.0', true);
+    await build('remote', { as: 'bridge-shared', links: false, patch: withOption('mf.json', (j) => { j.exposes = {}; j.bridge = { enableBridgeRouter: true }; j.shared = { 'react-router-dom': {} }; }) });
+  } catch (error) {
+    refused = String(error.message);
+  }
+  check('react-router-dom cannot be shared with the bridge', /cannot be shared/.test(refused), refused);
 });
 
 scenario('a host and a remote built by rathkit-pack', async () => {

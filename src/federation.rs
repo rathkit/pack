@@ -23,7 +23,7 @@ use crate::bundle::{ChunkInfo, Output, OutputFile};
 use crate::graph::{Diagnostic, Severity};
 use crate::json::Json;
 use crate::module::RequestKind;
-use crate::resolve::{FileSystem, ResolveKind, ResolveOptions, Resolver};
+use crate::resolve::{Alias, FileSystem, ResolveKind, ResolveOptions, Resolver};
 
 /// Where the modules that exist only in memory live.
 pub const ROOT: &str = "/@rathkit/federation";
@@ -108,6 +108,21 @@ pub struct Dts {
     pub remote_type_urls: Vec<(String, String, String)>,
     /// `dev.disableHotTypesReload`: types are not read again while watching.
     pub hot_types: bool,
+    /// `generateTypes.compilerInstance`: the command that writes the declarations (`tsc`, or `vue-tsc`, `tspc`, ...).
+    pub compiler: String,
+    /// `generateTypes.extractThirdParty`: copy the declarations of the packages the types import into the zip, minus these.
+    pub extract_third_party: Option<Vec<String>>,
+    /// `generateTypes.extractRemoteTypes`: copy the types read of this application's own remotes into the zip.
+    pub extract_remote_types: bool,
+    /// `generateTypes.afterGenerate`: the source of a function called with the files written.
+    pub after_generate: Option<String>,
+    /// `consumeTypes.family`: 4 or 6 to use only that kind of address (0: either).
+    pub family: u8,
+    /// `consumeTypes.remoteTypesFolder`: the archive of a remote is `<this>.zip` beside its entry, when its manifest does not say.
+    pub remote_types_folder: Option<String>,
+    /// `consumeTypes.consumeAPITypes` and `runtimePkgs`: write `index.d.ts` in the types folder, typing `loadRemote`.
+    pub consume_api_types: bool,
+    pub runtime_pkgs: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -131,6 +146,8 @@ pub struct Federation {
     pub dts: Dts,
     /// `dev.disableLiveReload` is not set: pages of hosts reload when this application builds again while serving.
     pub live_reload: bool,
+    /// `bridge`: `Some(true)` the router bridge is on, `Some(false)` it is off, `None` it is on if `@module-federation/bridge-react` is a dependency.
+    pub bridge_router: Option<bool>,
     /// The manifest's file name; `None` writes none.
     pub manifest: Option<String>,
     /// Where the files are served from, when it is known at build time (`auto` is the default).
@@ -184,35 +201,8 @@ impl std::fmt::Debug for Federation {
 /// rspack, such as `runtime`, `implementation`, `async`, `virtualRuntimeEntry` and the `treeShaking*` directories, change nothing a
 /// program can observe here and are accepted without a word.)
 fn warn_unused(options: &Json) {
-    let on = |value: Option<&Json>| matches!(value, Some(Json::Bool(true))) || matches!(value, Some(Json::Object(_)));
-    if on(options.get("bridge").and_then(|b| b.get("enableBridgeRouter"))) {
-        eprintln!("warning: federation option `bridge.enableBridgeRouter` has no effect: the router bridge belongs to the real plugin (use --real-federation-plugin)");
-    }
-    for key in ["externalRuntime", "provideExternalRuntime"] {
-        if on(options.get("experiments").and_then(|e| e.get(key))) {
-            eprintln!("warning: federation option `experiments.{key}` has no effect: the runtime is always part of the build");
-        }
-    }
-    let Some(dts) = options.get("dts") else { return };
-    for key in ["extraOptions", "implementation", "excludeChunk"] {
-        if dts.get(key).is_some() {
-            eprintln!("warning: federation option `dts.{key}` has no effect");
-        }
-    }
-    let generate = dts.get("generateTypes");
-    for key in ["extractThirdParty", "extractRemoteTypes", "afterGenerate"] {
-        if generate.is_some_and(|g| g.get(key).is_some_and(|v| !matches!(v, Json::Bool(false)))) {
-            eprintln!("warning: federation option `dts.generateTypes.{key}` has no effect");
-        }
-    }
-    if let Some(compiler) = generate.and_then(|g| g.get("compilerInstance")).and_then(Json::as_str).filter(|c| *c != "tsc") {
-        eprintln!("warning: federation option `dts.generateTypes.compilerInstance` is {compiler:?}; types are written with the typescript package");
-    }
-    let consume = dts.get("consumeTypes");
-    for key in ["family", "runtimePkgs", "remoteTypesFolder", "consumeAPITypes"] {
-        if consume.is_some_and(|c| c.get(key).is_some_and(|v| !matches!(v, Json::Bool(false)))) {
-            eprintln!("warning: federation option `dts.consumeTypes.{key}` has no effect");
-        }
+    if options.get("dts").and_then(|d| d.get("implementation")).is_some_and(|v| v.as_str().is_some_and(|s| !s.is_empty())) {
+        eprintln!("warning: federation option `dts.implementation` has no effect: another implementation of the types plugin is not run");
     }
 }
 
@@ -491,6 +481,24 @@ impl Federation {
                     .collect(),
                 _ => Vec::new(),
             },
+            compiler: text("compilerInstance", section("generateTypes")).unwrap_or_else(|| "tsc".to_string()),
+            extract_third_party: match section("generateTypes").and_then(|c| c.get("extractThirdParty")) {
+                Some(Json::Bool(true)) => Some(Vec::new()),
+                Some(object @ Json::Object(_)) => Some(match object.get("exclude") {
+                    Some(Json::Array(list)) => list.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
+                    _ => Vec::new(),
+                }),
+                _ => None,
+            },
+            extract_remote_types: section("generateTypes").and_then(|c| c.get("extractRemoteTypes")).and_then(Json::as_bool).unwrap_or(false),
+            after_generate: section("generateTypes").and_then(|c| c.get("afterGenerate")).and_then(Json::as_str).map(String::from),
+            family: section("consumeTypes").and_then(|c| c.get("family")).and_then(Json::as_f64).map_or(0, |f| f as u8),
+            remote_types_folder: text("remoteTypesFolder", section("consumeTypes")),
+            consume_api_types: section("consumeTypes").and_then(|c| c.get("consumeAPITypes")).and_then(Json::as_bool).unwrap_or(false),
+            runtime_pkgs: match section("consumeTypes").and_then(|c| c.get("runtimePkgs")) {
+                Some(Json::Array(list)) => list.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
+                _ => Vec::new(),
+            },
             hot_types: !matches!(options.get("dev"), Some(d) if d.get("disableHotTypesReload").and_then(Json::as_bool) == Some(true)),
         };
         let live_reload = !matches!(options.get("dev"), Some(d) if d.get("disableLiveReload").and_then(Json::as_bool) == Some(true));
@@ -507,6 +515,11 @@ impl Federation {
             runtime_plugins,
             dts,
             live_reload,
+            bridge_router: match options.get("bridge") {
+                Some(b) if b.get("enableBridgeRouter").and_then(Json::as_bool) == Some(true) => Some(true),
+                Some(b) if b.get("enableBridgeRouter").and_then(Json::as_bool) == Some(false) || b.get("disableAlias").and_then(Json::as_bool) == Some(true) => Some(false),
+                _ => None,
+            },
             manifest,
             public_path: options.get("publicPath").and_then(Json::as_str).filter(|p| *p != "auto").map(String::from),
             public_path_code: options.get("getPublicPath").and_then(Json::as_str).map(String::from),
@@ -935,7 +948,66 @@ impl Federation {
     /// Builds the module graph with the federation modules in it. What the application imports from
     /// remotes and shared packages is only known once the graph exists, and the modules that load
     /// them are written from that, so the graph is built again until nothing new turns up.
+    /// The aliases of the router bridge (`@module-federation/bridge-react`): `react-router-dom` is read through the bridge's router for
+    /// the version of React Router the project has, and the bridge's own imports of the real package go to it. As the real plugin does it,
+    /// only when the bridge's router file is installed, and an alias the project set itself wins.
+    fn bridge_aliases(&self, existing: &[Alias]) -> Result<Vec<Alias>, String> {
+        let modules = self.cwd.join("node_modules");
+        let bridge = modules.join("@module-federation").join("bridge-react").join("dist");
+        let dependencies = std::fs::read_to_string(self.cwd.join("package.json")).ok().and_then(|t| Json::parse(&t).ok());
+        let has_dependency = |name: &str| ["dependencies", "devDependencies"].iter().any(|k| dependencies.as_ref().and_then(|d| d.get(k)).and_then(|d| d.get(name)).is_some());
+        let enabled = self.bridge_router.unwrap_or_else(|| has_dependency("@module-federation/bridge-react"));
+        let alias = |pattern: &str, to: PathBuf| Alias { pattern: pattern.to_string(), replacements: vec![to.to_string_lossy().into_owned()], exact_only: true };
+        if !enabled {
+            // Without the router, the package is read from its base entry.
+            let base = bridge.join("base.es.js");
+            return Ok(if has_dependency("@module-federation/bridge-react") && base.is_file() { vec![alias("@module-federation/bridge-react", base)] } else { Vec::new() });
+        }
+        if !bridge.join("router.es.js").is_file() {
+            return Ok(Vec::new());
+        }
+        if self.shared.iter().any(|s| s.key == "react-router-dom") {
+            return Err("react-router-dom cannot be shared when the router bridge is used".to_string());
+        }
+        let own = existing.iter().find(|a| a.pattern == "react-router-dom" || a.pattern == "react-router-dom$").and_then(|a| a.replacements.first()).map(PathBuf::from);
+        let package = own.or_else(|| if has_dependency("react-router") { Some(modules.join("react-router")) } else if has_dependency("react-router-dom") { Some(modules.join("react-router-dom")) } else { None });
+        let major = package.as_ref().and_then(|p| {
+            let mut dir = Some(p.as_path());
+            while let Some(d) = dir {
+                if let Ok(text) = std::fs::read_to_string(d.join("package.json")) {
+                    return Json::parse(&text).ok()?.get("version")?.as_str()?.split(|c: char| !c.is_ascii_digit()).find(|s| !s.is_empty())?.parse::<u32>().ok();
+                }
+                dir = d.parent();
+            }
+            None
+        });
+        let router = |v: u32| bridge.join(format!("router-v{v}.es.js"));
+        let real = package.clone().unwrap_or_default();
+        Ok(match (major, package) {
+            (Some(5), Some(_)) => vec![alias("react-router-dom", router(5)), alias("react-router-dom/index.js", real)],
+            (Some(6), Some(_)) => vec![alias("react-router-dom", router(6)), alias("react-router-dom/dist/index.js", real)],
+            (Some(_), Some(_)) | (None, Some(_)) => vec![
+                alias("react-router", router(7)),
+                alias("react-router-dom", router(7)),
+                alias("react-router/dist/development/index.js", real.clone()),
+                alias("react-router/dist/production/index.js", real.clone()),
+                alias("react-router-dom/dist/index.js", real),
+            ],
+            _ => vec![alias("react-router-dom", router(6))],
+        })
+    }
+
     pub fn build_graph(self: &Arc<Self>, cwd: &Path, entries: &[String], options: &crate::graph::GraphOptions) -> Result<crate::graph::Graph, Vec<Diagnostic>> {
+        let mut with_bridge;
+        let options = match self.bridge_aliases(&options.resolve.alias) {
+            Ok(extra) if extra.is_empty() => options,
+            Ok(extra) => {
+                with_bridge = options.clone();
+                with_bridge.resolve.alias.extend(extra);
+                &with_bridge
+            }
+            Err(message) => return Err(vec![Diagnostic { severity: Severity::Error, message, file: None, pos: None }]),
+        };
         let resolver = Resolver::new(options.resolve.clone());
         let mut absolute: Vec<PathBuf> = Vec::new();
         let mut problems = Vec::new();
@@ -1008,7 +1080,7 @@ impl Federation {
         };
         let list = exposes.iter().map(|(k, p)| format!("{{\"key\":{},\"file\":{}}}", quote(k), quote(&p.to_string_lossy()))).collect::<Vec<_>>().join(",");
         let input = format!(
-            "{{\"command\":\"generate\",\"cwd\":{},\"name\":{},\"exposes\":[{list}],\"outDir\":{},\"tsConfigPath\":{},\"typesFolder\":{},\"compiledTypesFolder\":{},\"additionalFiles\":[{}],\"generateApi\":{}}}",
+            "{{\"command\":\"generate\",\"cwd\":{},\"name\":{},\"exposes\":[{list}],\"outDir\":{},\"tsConfigPath\":{},\"typesFolder\":{},\"compiledTypesFolder\":{},\"additionalFiles\":[{}],\"generateApi\":{},\"compilerInstance\":{},\"extractThirdParty\":{},\"extractRemoteTypes\":{},\"hostTypesFolder\":{},\"afterGenerate\":{}}}",
             quote(&self.cwd.to_string_lossy()),
             quote(&self.name),
             quote(&out_dir.to_string_lossy()),
@@ -1017,6 +1089,11 @@ impl Federation {
             quote(&self.dts.compiled_types_folder),
             self.dts.additional_files.iter().map(|f| quote(&self.cwd.join(f).to_string_lossy())).collect::<Vec<_>>().join(","),
             self.dts.generate_api,
+            quote(&self.dts.compiler),
+            self.dts.extract_third_party.as_ref().map_or("false".to_string(), |exclude| format!("{{\"exclude\":[{}]}}", exclude.iter().map(|e| quote(e)).collect::<Vec<_>>().join(","))),
+            self.dts.extract_remote_types,
+            quote(&self.dts.consume_folder),
+            quote(self.dts.after_generate.as_deref().unwrap_or("")),
         );
         let answer = match run_node(DTS, &input, &self.cwd) {
             Ok(answer) => answer,
@@ -1112,7 +1189,7 @@ impl Federation {
 
     fn read_types_now(&self) -> Vec<String> {
         let remotes = self.remotes.iter().filter(|r| !matches!(r.kind.as_str(), "code" | "internal")).map(|r| format!("{{\"name\":{},\"entry\":{}}}", quote(&r.name), quote(&r.entry))).collect::<Vec<_>>().join(",");
-        let input = format!("{{\"command\":\"consume\",\"cwd\":{},\"remotes\":[{remotes}],\"typesFolder\":{},\"updateTsConfig\":{},\"timeout\":{},\"maxRetries\":{},\"typeUrls\":{{{}}}}}", quote(&self.cwd.to_string_lossy()), quote(&self.dts.consume_folder), self.dts.update_ts_config, self.dts.timeout_ms, self.dts.max_retries, self.dts.remote_type_urls.iter().map(|(n, z, a)| format!("{}:{{\"zip\":{},\"api\":{}}}", quote(n), quote(z), quote(a))).collect::<Vec<_>>().join(","));
+        let input = format!("{{\"command\":\"consume\",\"cwd\":{},\"remotes\":[{remotes}],\"typesFolder\":{},\"updateTsConfig\":{},\"timeout\":{},\"maxRetries\":{},\"typeUrls\":{{{}}},\"family\":{},\"remoteTypesFolder\":{},\"consumeApiTypes\":{},\"runtimePkgs\":[{}]}}", quote(&self.cwd.to_string_lossy()), quote(&self.dts.consume_folder), self.dts.update_ts_config, self.dts.timeout_ms, self.dts.max_retries, self.dts.remote_type_urls.iter().map(|(n, z, a)| format!("{}:{{\"zip\":{},\"api\":{}}}", quote(n), quote(z), quote(a))).collect::<Vec<_>>().join(","), self.dts.family, quote(self.dts.remote_types_folder.as_deref().unwrap_or("")), self.dts.consume_api_types, self.dts.runtime_pkgs.iter().map(|p| quote(p)).collect::<Vec<_>>().join(","));
         match run_node(DTS, &input, &self.cwd) {
             Ok(answer) => {
                 if let Some(Json::Array(notes)) = answer.get("messages") {

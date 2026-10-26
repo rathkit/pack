@@ -10,6 +10,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
+import http from 'node:http';
+import https from 'node:https';
+import { spawnSync } from 'node:child_process';
+import { builtinModules } from 'node:module';
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 
@@ -86,6 +90,102 @@ function zipRead(buffer) {
   return files;
 }
 
+// ---- type packages and remotes' types that travel in the zip ---------------------------------------------
+
+const SPECIFIER = /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+|\brequire\s*\(\s*|\breference\s+types\s*=\s*)['"]([^'"]+)['"]/g;
+const builtins = new Set(builtinModules);
+const packageOf = (spec) => {
+  if (spec.startsWith('.') || spec.startsWith('/') || spec.startsWith('node:')) return null;
+  const parts = spec.split('/');
+  const name = spec.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0];
+  return builtins.has(name) ? null : name;
+};
+const findInNodeModules = (name) => {
+  for (let dir = cwd; ; dir = path.dirname(dir)) {
+    const found = path.join(dir, 'node_modules', name);
+    if (fs.existsSync(path.join(found, 'package.json'))) return found;
+    if (dir === path.dirname(dir)) return null;
+  }
+};
+const hasTypes = (dir) => {
+  const json = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+  return Boolean(json.types || json.typings || fs.existsSync(path.join(dir, 'index.d.ts')) || JSON.stringify(json.exports ?? '').includes('"types"'));
+};
+const walkTypes = (dir, base = '') => fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+  if (e.name === 'node_modules') return [];
+  if (e.isDirectory()) return walkTypes(path.join(dir, e.name), `${base}${e.name}/`);
+  return /\.d\.[cm]?ts$/.test(e.name) || (base === '' && e.name === 'package.json') ? [[`${base}${e.name}`, path.join(dir, e.name)]] : [];
+});
+
+// The declarations of the packages the exposed modules' declarations import, copied beside them (`node_modules` of the zip), so a host
+// that does not have the packages still resolves them. `exclude` lists packages to leave out.
+function thirdPartyEntries(entries, exclude = []) {
+  const out = [];
+  const done = new Set();
+  const skip = (name) => exclude.some((e) => name === e || name.startsWith(e + '/'));
+  const queue = entries.filter(([f]) => /\.d\.[cm]?ts$/.test(f)).map(([, data]) => data.toString('utf8'));
+  while (queue.length) {
+    const text = queue.pop();
+    for (const [, spec] of text.matchAll(SPECIFIER)) {
+      const name = packageOf(spec);
+      if (!name || done.has(name) || skip(name)) continue;
+      done.add(name);
+      let dir = findInNodeModules(name);
+      let target = name;
+      if (!dir || !hasTypes(dir)) {
+        const typed = findInNodeModules(`@types/${name.replace(/^@/, '').replace('/', '__')}`);
+        if (!typed) {
+          if (!dir) note(`the types of ${name} were not copied: the package was not found`);
+          continue;
+        }
+        dir = typed;
+        target = `@types/${name.replace(/^@/, '').replace('/', '__')}`;
+      }
+      for (const [rel, file] of walkTypes(dir)) {
+        const data = fs.readFileSync(file);
+        out.push([`node_modules/${target}/${rel}`, data]);
+        if (rel.endsWith('.ts')) queue.push(data.toString('utf8'));
+      }
+    }
+  }
+  return out;
+}
+
+// The types this application has read of its own remotes, copied into the zip (`node_modules/<remote>`), so a host of this application
+// can use what it re-exports.
+function remoteTypeEntries(hostTypesFolder) {
+  const root = path.resolve(cwd, hostTypesFolder);
+  if (!fs.existsSync(root)) return [];
+  const out = [];
+  for (const remote of fs.readdirSync(root, { withFileTypes: true })) {
+    if (!remote.isDirectory()) continue;
+    const walk = (dir, base) => fs.readdirSync(dir, { withFileTypes: true }).forEach((e) => {
+      if (e.isDirectory()) walk(path.join(dir, e.name), `${base}${e.name}/`);
+      else if (e.name !== '.zip-sha256') out.push([`node_modules/${remote.name}/${base}${e.name}`, fs.readFileSync(path.join(dir, e.name))]);
+    });
+    walk(path.join(root, remote.name), '');
+  }
+  return out;
+}
+
+// A compiler other than `tsc` (`vue-tsc`, `tspc`, or a command with arguments) is run on a tsconfig written for the purpose.
+function runCompiler(command, tsconfig) {
+  const words = command.match(/"[^"]*"|'[^']*'|\S+/g)?.map((w) => w.replace(/^["']|["']$/g, '')) ?? [command];
+  const [name, ...args] = words;
+  let executable = name;
+  for (let dir = cwd; ; dir = path.dirname(dir)) {
+    const shim = path.join(dir, 'node_modules', '.bin', process.platform === 'win32' ? `${name}.cmd` : name);
+    if (fs.existsSync(shim)) {
+      executable = shim;
+      break;
+    }
+    if (dir === path.dirname(dir)) break;
+  }
+  const result = spawnSync(executable, [...args, '--project', tsconfig], { cwd, encoding: 'utf8', shell: process.platform === 'win32' });
+  if (result.error) throw new Error(`the compiler ${name} could not be run: ${result.error.message}`);
+  return result;
+}
+
 // ---- writing a remote's types ----------------------------------------------------------------------
 
 // The project's own TypeScript, and the compiler options it would use (a tsconfig.json found, or the one asked for).
@@ -97,8 +197,12 @@ function loadTypeScript() {
   }
 }
 
+function findConfig(ts, tsConfigPath) {
+  return tsConfigPath ? path.resolve(cwd, tsConfigPath) : ts.findConfigFile(cwd, ts.sys.fileExists, 'tsconfig.json');
+}
+
 function compilerOptions(ts, tsConfigPath) {
-  const configPath = tsConfigPath ? path.resolve(cwd, tsConfigPath) : ts.findConfigFile(cwd, ts.sys.fileExists, 'tsconfig.json');
+  const configPath = findConfig(ts, tsConfigPath);
   let options = { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.ESNext, moduleResolution: ts.ModuleResolutionKind.Bundler, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true, allowJs: true, skipLibCheck: true };
   if (configPath) {
     const read = ts.readConfigFile(configPath, ts.sys.readFile);
@@ -133,7 +237,7 @@ function emit({ entries, outDir, tsConfigPath }) {
   return { written, errors: errors.length };
 }
 
-function generate({ name, exposes, outDir, tsConfigPath, typesFolder = '@mf-types', compiledTypesFolder = 'compiled-types', additionalFiles = [], generateApi = true }) {
+async function generate({ name, exposes, outDir, tsConfigPath, typesFolder = '@mf-types', compiledTypesFolder = 'compiled-types', additionalFiles = [], generateApi = true, compilerInstance = 'tsc', extractThirdParty = false, extractRemoteTypes = false, hostTypesFolder = '@mf-types', afterGenerate = '' }) {
   const ts = loadTypeScript();
   if (!ts) {
     note('types were not written for the exposed modules: the typescript package is not installed');
@@ -149,16 +253,34 @@ function generate({ name, exposes, outDir, tsConfigPath, typesFolder = '@mf-type
   }, path.dirname(files[0]));
   const work = fs.mkdtempSync(path.join(os.tmpdir(), 'rathkit-types-'));
   const compiled = path.join(work, compiledTypesFolder);
-  const program = ts.createProgram(rootFiles, { ...options, declaration: true, emitDeclarationOnly: true, noEmit: false, outDir: compiled, rootDir, declarationMap: false, sourceMap: false, composite: false, incremental: false, noEmitOnError: false, skipLibCheck: true, allowJs: true });
-  const result = program.emit();
-  const diagnostics = ts.getPreEmitDiagnostics(program).filter((d) => d.category === ts.DiagnosticCategory.Error);
-  if (result.emitSkipped && !fs.existsSync(compiled)) {
-    note('no types were written: ' + diagnostics.slice(0, 3).map((d) => ts.flattenDiagnosticMessageText(d.messageText, '\n')).join('; '));
-    fs.rmSync(work, { recursive: true, force: true });
-    return { written: false };
+  const program_options = { declaration: true, emitDeclarationOnly: true, noEmit: false, outDir: compiled, rootDir, declarationMap: false, sourceMap: false, composite: false, incremental: false, noEmitOnError: false, skipLibCheck: true, allowJs: true };
+  let diagnostics = [];
+  let external = 0;
+  if (compilerInstance.trim() === 'tsc' || !compilerInstance.trim()) {
+    const program = ts.createProgram(rootFiles, { ...options, ...program_options });
+    const result = program.emit();
+    diagnostics = ts.getPreEmitDiagnostics(program).filter((d) => d.category === ts.DiagnosticCategory.Error);
+    if (result.emitSkipped && !fs.existsSync(compiled)) {
+      note('no types were written: ' + diagnostics.slice(0, 3).map((d) => ts.flattenDiagnosticMessageText(d.messageText, '\n')).join('; '));
+      fs.rmSync(work, { recursive: true, force: true });
+      return { written: false };
+    }
+  } else {
+    const configPath = findConfig(ts, tsConfigPath);
+    const tsconfig = path.join(work, 'tsconfig.mf.json');
+    fs.writeFileSync(tsconfig, JSON.stringify({ ...(configPath ? { extends: configPath } : {}), compilerOptions: program_options, files: rootFiles, include: [] }));
+    const result = runCompiler(compilerInstance, tsconfig);
+    external = (`${result.stdout}${result.stderr}`.match(/error TS\d+/g) ?? []).length;
+    if (!fs.existsSync(compiled)) {
+      note(`no types were written: the compiler ${compilerInstance} wrote none${result.stdout ? ': ' + result.stdout.split('\n')[0] : ''}`);
+      fs.rmSync(work, { recursive: true, force: true });
+      return { written: false };
+    }
   }
   const collect = (dir, base = '') => fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? collect(path.join(dir, e.name), `${base}${e.name}/`) : [[`${compiledTypesFolder}/${base}${e.name}`, fs.readFileSync(path.join(dir, e.name))]]));
   const entries = collect(compiled);
+  if (extractRemoteTypes) entries.push(...remoteTypeEntries(hostTypesFolder));
+  if (extractThirdParty) entries.push(...thirdPartyEntries(entries, Array.isArray(extractThirdParty?.exclude) ? extractThirdParty.exclude : []));
   const typeFile = (file) => path.relative(rootDir, file).replace(/\.(tsx?|jsx?|mjs|cjs|mts|cts)$/, '').split(path.sep).join('/');
   const keys = exposes.map((e) => `${name}/${e.key.replace(/^\.\//, '')}`);
   const apis = `\n    export type RemoteKeys = ${keys.map((k) => `'${k}'`).join(' | ')};\n    type PackageType<T> = ${exposes.map((e, i) => `T extends '${keys[i]}' ? typeof import('./${compiledTypesFolder}/${typeFile(e.file)}')`).join(' :\n') || 'any'} : any;`;
@@ -172,17 +294,47 @@ function generate({ name, exposes, outDir, tsConfigPath, typesFolder = '@mf-type
   fs.writeFileSync(path.join(outDir, `${typesFolder}.zip`), zipWrite(entries));
   if (generateApi) fs.writeFileSync(path.join(outDir, `${typesFolder}.d.ts`), apis);
   fs.rmSync(work, { recursive: true, force: true });
-  if (diagnostics.length) note(`${diagnostics.length} type error(s) in the exposed modules; the types were written anyway`);
-  return { written: true, zip: `${typesFolder}.zip`, api: generateApi ? `${typesFolder}.d.ts` : '', files: entries.length, typeErrors: diagnostics.length };
+  const errors = diagnostics.length + external;
+  if (errors) note(`${errors} type error(s) in the exposed modules; the types were written anyway`);
+  if (afterGenerate) {
+    // The function came from the configuration as its source text; it can use only what it defines itself.
+    globalThis.require ??= createRequire(path.join(cwd, 'noop.js'));
+    const hook = (0, eval)(`(${afterGenerate})`);
+    await hook({ zipTypesPath: path.join(outDir, `${typesFolder}.zip`), apiTypesPath: generateApi ? path.join(outDir, `${typesFolder}.d.ts`) : '', zipName: `${typesFolder}.zip`, apiFileName: generateApi ? `${typesFolder}.d.ts` : '' });
+  }
+  return { written: true, zip: `${typesFolder}.zip`, api: generateApi ? `${typesFolder}.d.ts` : '', files: entries.length, typeErrors: errors };
 }
 
 // ---- reading the types of remotes ---------------------------------------------------------------------
 
+// `family` 4 or 6 asks for one kind of address, which fetch cannot; the request is made with the http module then.
+function viaHttp(url, timeout, family, redirects = 5) {
+  return new Promise((resolve, reject) => {
+    const lib = url.startsWith('https:') ? https : http;
+    const req = lib.get(url, { family, timeout }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && redirects > 0) {
+        res.resume();
+        resolve(viaHttp(new URL(res.headers.location, url).href, timeout, family, redirects - 1));
+        return;
+      }
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        const body = Buffer.concat(chunks);
+        resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, json: async () => JSON.parse(body.toString('utf8')), arrayBuffer: async () => body.buffer.slice(body.byteOffset, body.byteOffset + body.length) });
+      });
+    });
+    req.on('timeout', () => req.destroy(new Error('timed out')));
+    req.on('error', reject);
+  });
+}
+
+let addressFamily = 0;
 async function get(url, timeout = 5000, retries = 0) {
   let last;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const response = await fetch(url, { signal: AbortSignal.timeout(timeout) });
+      const response = addressFamily ? await viaHttp(url, timeout, addressFamily) : await fetch(url, { signal: AbortSignal.timeout(timeout) });
       if (!response.ok) throw new Error(`${url}: ${response.status}`);
       return response;
     } catch (error) {
@@ -243,7 +395,20 @@ function linkModules(modules) {
   }
 }
 
-async function consume({ remotes, typesFolder = '@mf-types', updateTsConfig = false, timeout = 5000, maxRetries = 0, typeUrls = {} }) {
+// `index.d.ts` of the types folder: `loadRemote` of the runtime packages, typed by the `apis.d.ts` of each remote that has one.
+function writeApiTypes(root, names, runtimePkgs) {
+  const aliases = names.filter((n) => fs.existsSync(path.join(root, n, 'apis.d.ts'))).sort();
+  if (!aliases.length) return;
+  const imports = aliases.map((alias, i) => `import type { PackageType as PackageType_${i}, RemoteKeys as RemoteKeys_${i} } from './${alias}/apis.d.ts';`).join('\n');
+  const keys = `type RemoteKeys = ${aliases.map((_, i) => `RemoteKeys_${i}`).join(' | ')};`;
+  const types = `type PackageType<T, Y=any> = ${[...aliases.map((_, i) => `T extends RemoteKeys_${i} ? PackageType_${i}<T>`), 'Y'].join(' :\n')} ;`;
+  const packages = new Set(['@module-federation/runtime', '@module-federation/enhanced/runtime', '@module-federation/runtime-tools', ...runtimePkgs]);
+  const declarations = [...packages].map((pkg) => `declare module "${pkg}" {\n  ${keys}\n  ${types}\n  export function loadRemote<T extends RemoteKeys,Y>(packageName: T): Promise<PackageType<T, Y>>;\n  export function loadRemote<T extends string,Y>(packageName: T): Promise<PackageType<T, Y>>;\n}`).join('\n');
+  fs.writeFileSync(path.join(root, 'index.d.ts'), `${imports}\n${declarations}\n`);
+}
+
+async function consume({ remotes, typesFolder = '@mf-types', updateTsConfig = false, timeout = 5000, maxRetries = 0, typeUrls = {}, family = 0, remoteTypesFolder = '', consumeApiTypes = false, runtimePkgs = [] }) {
+  addressFamily = family;
   const root = path.resolve(cwd, typesFolder);
   const paths = {};
   const modules = {};
@@ -258,11 +423,19 @@ async function consume({ remotes, typesFolder = '@mf-types', updateTsConfig = fa
         zipUrl = new URL(typeUrls[remote.name].zip, remote.entry).href;
       } else {
         const manifestUrl = /\.json(?:$|[?#])/.test(remote.entry) ? remote.entry : new URL('mf-manifest.json', remote.entry).href;
-        const manifest = await (await get(manifestUrl, timeout, maxRetries)).json();
-        const types = manifest.metaData?.types;
-        if (!types?.zip) continue;
-        const publicPath = manifest.metaData.publicPath && manifest.metaData.publicPath !== 'auto' ? manifest.metaData.publicPath : manifestUrl;
-        zipUrl = new URL(`${types.path ? types.path.replace(/\/?$/, '/') : ''}${types.zip}`, publicPath).href;
+        let types;
+        let publicPath = manifestUrl;
+        try {
+          const manifest = await (await get(manifestUrl, timeout, maxRetries)).json();
+          types = manifest.metaData?.types;
+          if (manifest.metaData?.publicPath && manifest.metaData.publicPath !== 'auto') publicPath = manifest.metaData.publicPath;
+        } catch (error) {
+          if (!remoteTypesFolder) throw error;
+        }
+        if (types?.zip) zipUrl = new URL(`${types.path ? types.path.replace(/\/?$/, '/') : ''}${types.zip}`, publicPath).href;
+        // With no manifest to say where, the archive is named after `remoteTypesFolder`, beside the remote's entry.
+        else if (remoteTypesFolder) zipUrl = new URL(`${remoteTypesFolder}.zip`, remote.entry).href;
+        else continue;
       }
       const zip = Buffer.from(await (await get(zipUrl, Math.max(timeout, 15000), maxRetries)).arrayBuffer());
       const files = zipRead(zip);
@@ -298,6 +471,7 @@ async function consume({ remotes, typesFolder = '@mf-types', updateTsConfig = fa
   }
   linkModules(modules);
   if (updateTsConfig) mapPaths(paths);
+  if (consumeApiTypes) writeApiTypes(root, fetched, runtimePkgs);
   return { fetched, failed };
 }
 
@@ -325,7 +499,7 @@ function link({ typesFolder = '@mf-types' }) {
 
 let answer;
 try {
-  answer = request.command === 'generate' ? generate(request) : request.command === 'emit' ? emit(request) : request.command === 'link' ? link(request) : await consume(request);
+  answer = request.command === 'generate' ? await generate(request) : request.command === 'emit' ? emit(request) : request.command === 'link' ? link(request) : await consume(request);
 } catch (error) {
   answer = { error: String(error?.stack ?? error) };
 }
