@@ -507,9 +507,9 @@ fn what_a_target_cannot_have_stops_the_build_and_is_named() {
     for (source, target, words) in [
         ("export const f = 1n;", "es2019", "a BigInt literal is not available in the target es2019"),
         ("export const t = await Promise.resolve(1);", "es2021", "top-level await is not available in the target es2021"),
-        ("class B {} export class A extends B { async f() { super.x = 1; } }", "es2016", "an async function is not available in the target es2016"),
-        ("class B {} export class A extends B { f() { return async () => super.m(); } }", "es2016", "an async function is not available in the target es2016"),
-        ("export const f = async () => { outer: for await (const x of y) { continue outer; } };", "es2017", "a labeled for await cannot be rewritten"),
+        ("class B {} export class A extends B { async f() { super.x ||= 1; } }", "es2016", "an async function is not available in the target es2016"),
+        ("class B {} export class A extends B { async f(k) { super[k] += 1; } }", "es2016", "an async function is not available in the target es2016"),
+        ("class B {} export class A extends B { x = async () => super.m(); }", "es2016", "an async function is not available in the target es2016"),
         ("for await (const x of y) {}", "es2017", "top-level await is not available in the target es2017"),
         ("const o = { ...a, __proto__: null }; export { o };", "es2017", "a __proto__ property after a spread cannot be rewritten"),
         ("const [x, { ...r }] = y; export { x, r };", "es2017", "object rest in a pattern ({ a, ...rest }) is not available in the target es2017"),
