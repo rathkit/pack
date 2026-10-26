@@ -1430,7 +1430,22 @@ fn catch_interrupt() {}
 type Stamp = Option<(std::time::SystemTime, u64)>;
 
 fn stamp(path: &std::path::Path) -> Stamp {
-    std::fs::metadata(path).ok().map(|m| (m.modified().unwrap_or(std::time::UNIX_EPOCH), m.len()))
+    let meta = std::fs::metadata(path).ok()?;
+    let modified = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+    if meta.is_dir() {
+        // A directory (watched because `import.meta.glob` lists it) is what names it holds: its modification time is not trusted to
+        // change when a file is added (NTFS updates it late) and its size says nothing.
+        let mut names: Vec<std::ffi::OsString> = std::fs::read_dir(path).map(|d| d.filter_map(|e| e.ok().map(|e| e.file_name())).collect()).unwrap_or_default();
+        names.sort();
+        let mut hash = 0xcbf29ce484222325u64;
+        for name in names {
+            for byte in name.to_string_lossy().bytes().chain([0]) {
+                hash = (hash ^ byte as u64).wrapping_mul(0x100000001b3);
+            }
+        }
+        return Some((modified, hash));
+    }
+    Some((modified, meta.len()))
 }
 
 /// Builds, then builds again whenever a file the build read changes, until interrupted. A change to
