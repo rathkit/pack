@@ -464,3 +464,23 @@ fn jsx_dev_tells_the_runtime_where_each_element_is_and_a_raw_tsconfig_replaces_t
     assert_eq!(bad.status.code(), Some(2));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn wasm_init_instantiates_a_copied_module() {
+    if Command::new("node").arg("--version").output().is_err() {
+        return;
+    }
+    let dir = scratch("wasm");
+    // (module (func (export "add") (param i32 i32) (result i32) local.get 0 local.get 1 i32.add))
+    let module = [0, 0x61, 0x73, 0x6d, 1, 0, 0, 0, 1, 7, 1, 0x60, 2, 0x7f, 0x7f, 1, 0x7f, 3, 2, 1, 0, 7, 7, 1, 3, 0x61, 0x64, 0x64, 0, 0, 10, 9, 1, 7, 0, 0x20, 0, 0x20, 1, 0x6a, 0x0b];
+    std::fs::write(dir.join("add.wasm"), module).unwrap();
+    std::fs::write(dir.join("main.js"), "import init from './add.wasm?init';\nimport url from './add.wasm';\nconst instance = await init({});\nconsole.log(instance.exports.add(2, 3), typeof url, url.endsWith('.wasm'));\n").unwrap();
+    for extra in [&[][..], &["--minify"][..]] {
+        assert_eq!(build_and_run(&dir, extra, &[]), "5 string true");
+        // The module is copied next to the bundle, and found from there whatever the working directory is.
+        assert!(std::fs::read_dir(&dir).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with("add-")));
+        let elsewhere = Command::new("node").current_dir(std::env::temp_dir()).arg(dir.join("out.mjs")).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&elsewhere.stdout).trim(), "5 string true", "{}", String::from_utf8_lossy(&elsewhere.stderr));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

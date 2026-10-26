@@ -475,6 +475,13 @@ impl Context<'_> {
                 }
             }
         }
+        // `./a.wasm?init` (Vite's): a function that instantiates the module. The file is copied like any `new URL("./a.wasm", import.meta.url)`.
+        let wasm_init = worker.is_none() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("wasm")) && query.split('&').any(|q| q == "init");
+        if wasm_init {
+            let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            plugin_text = Some(wasm_init_module(&quote(&format!("./{file}"))));
+            module_type = Some("js".to_string());
+        }
         let host = self.options.plugins.as_ref().filter(|_| worker.is_none());
         if let Some(host) = host {
             if let Some(loaded) = host.load(&id).map_err(plugin_error)? {
@@ -492,6 +499,7 @@ impl Context<'_> {
         let ext_loader = match &worker {
             Some(WorkerQuery::Bundled) => Some(Loader::File),
             Some(WorkerQuery::Wrapper { .. }) => None,
+            None if wasm_init => None,
             None => query_loader(&query).or_else(|| self.loader_for(path)).or(forced_asset.then_some(Loader::File)),
         };
         let mut by_plugin = plugin_text.is_some() || plugin_bytes.is_some();
@@ -1025,6 +1033,13 @@ fn split_query(path: &Path) -> (PathBuf, String) {
         Some((file, query)) if !file.is_empty() && !query.contains(['/', '\\']) && !text.starts_with('\0') => (PathBuf::from(file), query.to_string()),
         _ => (path.to_path_buf(), String::new()),
     }
+}
+
+/// The module `./a.wasm?init` is: `init(imports)` resolves to the instance, reading the file with Node's `fs` there and with `fetch` in a browser.
+fn wasm_init_module(url: &str) -> String {
+    format!(
+        "export default async function init(imports) {{\n  const url = new URL({url}, import.meta.url);\n  if (typeof process !== \"undefined\" && process.versions && process.versions.node && url.protocol === \"file:\") {{\n    const {{ readFile }} = await import(\"node:fs/promises\");\n    const {{ fileURLToPath }} = await import(\"node:url\");\n    return (await WebAssembly.instantiate(await readFile(fileURLToPath(url)), imports)).instance;\n  }}\n  const response = await fetch(url);\n  if (WebAssembly.instantiateStreaming && (response.headers.get(\"content-type\") || \"\").startsWith(\"application/wasm\")) return (await WebAssembly.instantiateStreaming(response, imports)).instance;\n  return (await WebAssembly.instantiate(await response.arrayBuffer(), imports)).instance;\n}}\n"
+    )
 }
 
 fn quote(text: &str) -> String {

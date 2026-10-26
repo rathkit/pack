@@ -72,7 +72,9 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   and `$NAME`, `${NAME}` and `${NAME:-default}` in a value are replaced once the files are merged (not in single quotes).
   `import.meta.env` alone is an object of all of these. `--no-env-files` reads no files; a change to a `.env` file starts a
   build again when watching.
-- Vite's import forms: `./x.svg?raw` (text), `?url` (the copied file's address), `?inline` (a data URL), any other
+- Vite's import forms: `./a.wasm?init` (a function that instantiates the module and resolves to the instance, reading the copied file with
+  Node's `fs` in Node and with `fetch` in a browser; a plain `./a.wasm` is the file's address, and ES module integration of
+  WebAssembly (`import { add } from './a.wasm'`) is not supported), `./x.svg?raw` (text), `?url` (the copied file's address), `?inline` (a data URL), any other
   query stays on the module name for plugins (`?react`); `import.meta.glob("./dir/*.js", { eager, import, query, base })`
   (literal arguments; `*`, `**`, `?`, `[a-z]`, `{a,b}`, `!` to leave files out; a file added to a listed directory
   starts a new build when watching); workers: `new Worker(new URL("./w.js", import.meta.url))`, `./w.js?worker`,
