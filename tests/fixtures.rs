@@ -154,7 +154,7 @@ fn the_dev_server_serves_and_tells_pages_about_changes() {
 #[test]
 fn an_unknown_option_is_an_error_and_not_a_file_name() {
     let run = |args: &[&str]| std::process::Command::new(env!("CARGO_BIN_EXE_rkp")).args(args).output().expect("rkp starts");
-    for args in [&["bundle", "main.js", "--target", "es2015"][..], &["serve", "main.js", "--nope"][..], &["bundle", "-x", "main.js"][..]] {
+    for args in [&["bundle", "main.js", "--bogus", "es2015"][..], &["serve", "main.js", "--nope"][..], &["bundle", "-x", "main.js"][..]] {
         let out = run(args);
         let text = String::from_utf8_lossy(&out.stderr);
         assert_eq!(out.status.code(), Some(2), "{args:?}: {text}");
@@ -481,6 +481,43 @@ fn wasm_init_instantiates_a_copied_module() {
         assert!(std::fs::read_dir(&dir).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with("add-")));
         let elsewhere = Command::new("node").current_dir(std::env::temp_dir()).arg(dir.join("out.mjs")).output().unwrap();
         assert_eq!(String::from_utf8_lossy(&elsewhere.stdout).trim(), "5 string true", "{}", String::from_utf8_lossy(&elsewhere.stderr));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn syntax_newer_than_the_target_is_rewritten_and_checked() {
+    // Programs run as written and bundled for each target must print the same, and the bundle must parse as its target's language.
+    if Command::new("node").arg("--version").output().is_err() {
+        return;
+    }
+    let output = Command::new("node").arg("tools/run-target.mjs").env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rkp")).current_dir(env!("CARGO_MANIFEST_DIR")).output().expect("run the target script");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "target builds disagree:\n{text}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+#[test]
+fn what_a_target_cannot_have_stops_the_build_and_is_named() {
+    let dir = scratch("target-errors");
+    let rkp = |source: &str, target: &str| {
+        std::fs::write(dir.join("main.js"), source).unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_rkp")).current_dir(&dir).args(["bundle", "main.js", "--outfile", "out.mjs", "--target", target]).output().expect("rkp starts");
+        (out.status.code(), String::from_utf8_lossy(&out.stderr).into_owned())
+    };
+    for (source, target, words) in [
+        ("export const f = 1n;", "es2019", "a BigInt literal is not available in the target es2019"),
+        ("export const t = await Promise.resolve(1);", "es2021", "top-level await is not available in the target es2021"),
+        ("export const f = async () => await 1;", "es2016", "an async function is not available in the target es2016"),
+    ] {
+        let (code, stderr) = rkp(source, target);
+        assert_eq!(code, Some(1), "{source}: {stderr}");
+        assert!(stderr.contains(words), "{source}: {stderr}");
+    }
+    // The same text is fine for a target that has it, and the target must be one.
+    assert_eq!(rkp("export const f = 1n;", "es2020").0, Some(0));
+    for bad in ["es5", "chrome80", "es2099"] {
+        let (code, stderr) = rkp("export const x = 1;", bad);
+        assert_eq!(code, Some(2), "{bad}: {stderr}");
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

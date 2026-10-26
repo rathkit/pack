@@ -29,5 +29,6 @@ pub mod semantic;
 pub mod serve;
 pub mod sourcemap;
 pub mod shake;
+pub mod target;
 pub mod tsconfig;
 mod unicode;

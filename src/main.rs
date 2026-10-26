@@ -643,6 +643,17 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
                 public_path_given = true;
             }
             "--preserve-symlinks" => options.resolve.preserve_symlinks = true,
+            // --target=es2020: the version of JavaScript the output may use; newer syntax is rewritten, or refused.
+            arg if arg == "--target" || arg.starts_with("--target=") => {
+                let value = if arg == "--target" { it.next().cloned().unwrap_or_default() } else { arg["--target=".len()..].to_string() };
+                match rathkit_pack::target::Target::parse(&value) {
+                    Ok(target) => bundle_options.target = target,
+                    Err(message) => {
+                        eprintln!("error: --target: {message}");
+                        return Done::Exit(ExitCode::from(2));
+                    }
+                }
+            }
             // --tsconfig-raw='{"compilerOptions":{...}}': a tsconfig given as text, which is used instead of any tsconfig.json.
             arg if arg == "--tsconfig-raw" || arg.starts_with("--tsconfig-raw=") => {
                 tsconfig_raw = if arg == "--tsconfig-raw" { it.next().cloned() } else { Some(arg["--tsconfig-raw=".len()..].to_string()) };

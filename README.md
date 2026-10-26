@@ -72,6 +72,15 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   and `$NAME`, `${NAME}` and `${NAME:-default}` in a value are replaced once the files are merged (not in single quotes).
   `import.meta.env` alone is an object of all of these. `--no-env-files` reads no files; a change to a `.env` file starts a
   build again when watching.
+- `--target=es2015` ... `es2025` (or `esnext`, the default, which rewrites nothing): the version of JavaScript the output may use.
+  Syntax newer than it is rewritten, as `--target` does in esbuild: `a ** b` and `**=` (`Math.pow`), `?.`, `??`, `||=` `&&=` `??=`
+  (a value used twice goes in a temporary `var` declared once at the top of the file), numeric separators, `catch` without a
+  binding, and a trailing comma in a call or parameter list. `es2015` is the lowest target. Anything the target cannot have and this
+  cannot rewrite stops the build with a message that names it and the target, never passes through: BigInt literals and top-level
+  await can never be rewritten, and async functions, async iteration, object spread and rest, class fields, private members and
+  static blocks are not rewritten yet. Regular expression syntax and library functions are not looked at, and engine targets such
+  as `chrome80` are not supported. Checked by running programs as written and rewritten for every target in plain, minified,
+  CommonJS and IIFE form, and by parsing each result as the language of its target (`tools/run-target.mjs`).
 - Vite's import forms: `./a.wasm?init` (a function that instantiates the module and resolves to the instance, reading the copied file with
   Node's `fs` in Node and with `fetch` in a browser; a plain `./a.wasm` is the file's address, and ES module integration of
   WebAssembly (`import { add } from './a.wasm'`) is not supported), `./x.svg?raw` (text), `?url` (the copied file's address), `?inline` (a data URL), any other

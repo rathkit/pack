@@ -1,0 +1,431 @@
+//! `--target`: syntax the target's language does not have is written another way, as the scanner meets it.
+//!
+//! Each rewrite replaces a node with text made of its pieces (`Piece::Range` of the parts that stay, which still get their own rewrites and
+//! renames) and a few words. A value that is used twice is a plain name, or is first put in a temporary, a `var` declared once at the top
+//! of the file (`__rk0`, `__rk1`, ...): nothing runs between the assignment and the last read of one, so a recursive call cannot see
+//! another's. What cannot be rewritten (yet) stops the build with a message that names it and the target, and is never passed through.
+
+use super::*;
+use crate::ast::{AssignOp, BinOp};
+use crate::target::Feature;
+
+fn text(s: &str) -> Piece {
+    Piece::Text(s.to_string())
+}
+
+/// One link of a chain such as `a?.b[c](d)`, after the first expression.
+struct Link {
+    node: NodeId,
+    /// Written with `?.`.
+    optional: bool,
+    call: bool,
+    /// The text of the link as it follows an expression, without its `?.` (`.b`, `[c]`, `(d)`), and for a call the arguments only.
+    tail: Vec<Piece>,
+    arguments: Vec<Piece>,
+    has_arguments: bool,
+}
+
+impl Scanner<'_, '_> {
+    fn lowers(&self, feature: Feature) -> bool {
+        !self.bundler.target.supports(feature)
+    }
+
+    fn lower_error(&mut self, feature: Feature, node: NodeId) {
+        let target = self.bundler.target.name();
+        // BigInt and top-level await have no older way of being written; the others will be rewritten.
+        let how = if matches!(feature, Feature::BigInt | Feature::TopLevelAwait) { "and it cannot be rewritten" } else { "and Rathkit Pack cannot rewrite it yet" };
+        let message = format!("{} is not available in the target {target} (it came with es{}), {how}", feature.describe(), feature.since());
+        self.bundler.errors.push(Diagnostic { severity: crate::graph::Severity::Error, message, file: Some(self.module.path.clone()), pos: Some(self.ast[node].span.start) });
+    }
+
+    /// A new temporary: a name for a `var` that the file's top declares.
+    fn temp(&mut self) -> String {
+        let name = format!("__rk{}", self.bundler.temp_count);
+        self.bundler.temp_count += 1;
+        self.bundler.temps.push((self.module.id, name.clone()));
+        name
+    }
+
+    fn source_between(&self, from: u32, to: u32) -> &str {
+        self.module.source.get(from as usize..to as usize).unwrap_or("")
+    }
+
+    /// An expression that is safe to write twice: a name or `this`.
+    fn is_plain(&self, node: NodeId) -> bool {
+        matches!(self.ast[node].kind, NodeKind::Ident(_) | NodeKind::This | NodeKind::Super)
+    }
+
+    /// Where `op` is between two operands (the first one in the text after the left one, past any closing parentheses).
+    fn operator_at(&self, left: NodeId, right: NodeId, op: &str) -> Option<u32> {
+        let from = self.ast[left].span.end;
+        let to = self.ast[right].span.start.max(from);
+        self.source_between(from, to).find(op).map(|at| from + at as u32)
+    }
+
+    /// Where the link after `previous` begins: past the closing parentheses of a parenthesized `previous` and any white space.
+    fn link_start(&self, previous_end: u32, node_end: u32) -> u32 {
+        let rest = self.source_between(previous_end, node_end);
+        let skipped = rest.len() - rest.trim_start_matches(|c: char| c == ')' || c.is_whitespace()).len();
+        previous_end + skipped as u32
+    }
+
+    pub(super) fn lower(&mut self, node: NodeId) {
+        let ast = self.ast;
+        match ast[node].kind {
+            NodeKind::Binary { op: BinOp::Exp, left, right } if self.lowers(Feature::Exponent) => self.lower_exponent(node, left, right),
+            NodeKind::Assign { op: AssignOp::Op(BinOp::Exp), target, value } if self.lowers(Feature::Exponent) => self.lower_exponent_assignment(node, target, value),
+            NodeKind::Binary { op: BinOp::Nullish, left, right } if self.lowers(Feature::NullishCoalescing) => self.lower_nullish(node, left, right),
+            NodeKind::Assign { op: AssignOp::Op(op @ (BinOp::LogAnd | BinOp::LogOr | BinOp::Nullish)), target, value } if self.lowers(Feature::LogicalAssignment) => self.lower_logical_assignment(node, op, target, value),
+            NodeKind::Chain(inner) if self.lowers(Feature::OptionalChain) && !self.skip.contains(&node) => {
+                let pieces = self.lower_chain(inner, false);
+                self.push(node, pieces);
+            }
+            NodeKind::Unary { op: crate::ast::UnaryOp::Delete, arg } if self.lowers(Feature::OptionalChain) && matches!(ast[arg].kind, NodeKind::Chain(_)) => {
+                let NodeKind::Chain(inner) = ast[arg].kind else { return };
+                self.skip.insert(arg);
+                let pieces = self.lower_chain(inner, true);
+                self.push(node, pieces);
+            }
+            NodeKind::Num(_) | NodeKind::BigInt(_) => {
+                let (start, end) = self.span(node);
+                let literal = self.source_between(start, end);
+                if matches!(ast[node].kind, NodeKind::BigInt(_)) && self.lowers(Feature::BigInt) {
+                    self.lower_error(Feature::BigInt, node);
+                } else if literal.contains('_') && self.lowers(Feature::NumericSeparator) {
+                    let plain = literal.replace('_', "");
+                    self.push(node, vec![Piece::Text(plain)]);
+                }
+            }
+            NodeKind::Catch { param: None, .. } if self.lowers(Feature::OptionalCatch) => {
+                let at = ast[node].span.start;
+                if self.source_between(at, at + 5) == "catch" {
+                    self.edits.push(Edit { start: at + 5, end: at + 5, pieces: vec![text(" (__rkError)")], shorthand: None, transparent: false });
+                }
+            }
+            NodeKind::Call { args, .. } | NodeKind::New { args, .. } if self.lowers(Feature::TrailingComma) => {
+                if let Some(&last) = ast.list(args).last() {
+                    let end = ast[node].span.end;
+                    if end > 0 && self.module.source.as_bytes().get(end as usize - 1) == Some(&b')') {
+                        self.drop_trailing_comma(ast[last].span.end, end - 1);
+                    }
+                }
+            }
+            NodeKind::Function { params, body, .. } => {
+                let flags = ast[node].flags;
+                if flags & crate::ast::flags::ASYNC != 0 {
+                    let feature = if flags & crate::ast::flags::GENERATOR != 0 { Feature::AsyncIteration } else { Feature::AsyncFunction };
+                    if self.lowers(feature) {
+                        self.lower_error(feature, node);
+                    }
+                }
+                if self.lowers(Feature::TrailingComma) {
+                    if let Some(&last) = ast.list(params).last() {
+                        let from = ast[last].span.end;
+                        let to = ast[body].span.start.max(from);
+                        let region = self.source_between(from, to);
+                        if let Some(close) = region.rfind(')') {
+                            self.drop_trailing_comma(from, from + close as u32);
+                        }
+                    }
+                }
+            }
+            // Not rewritten yet: stop instead of writing what the target cannot run.
+            NodeKind::Object(props) if self.lowers(Feature::ObjectSpread) && ast.list(props).iter().any(|&p| matches!(ast[p].kind, NodeKind::Spread(_))) => self.lower_error(Feature::ObjectSpread, node),
+            NodeKind::ObjectPattern(props) if self.lowers(Feature::ObjectRest) && ast.list(props).iter().any(|&p| matches!(ast[p].kind, NodeKind::Rest(_))) => self.lower_error(Feature::ObjectRest, node),
+            NodeKind::ClassField { key, .. } if self.lowers(Feature::ClassField) || (self.lowers(Feature::ClassPrivate) && matches!(ast[key].kind, NodeKind::PrivateName(_))) => {
+                let feature = if matches!(ast[key].kind, NodeKind::PrivateName(_)) { Feature::ClassPrivate } else { Feature::ClassField };
+                self.lower_error(feature, node);
+            }
+            NodeKind::ClassMethod { key, .. } if self.lowers(Feature::ClassPrivate) && matches!(ast[key].kind, NodeKind::PrivateName(_)) => self.lower_error(Feature::ClassPrivate, node),
+            NodeKind::StaticBlock(_) if self.lowers(Feature::ClassStaticBlock) => self.lower_error(Feature::ClassStaticBlock, node),
+            NodeKind::Binary { op: BinOp::In, left, .. } if self.lowers(Feature::ClassPrivate) && matches!(ast[left].kind, NodeKind::PrivateName(_)) => self.lower_error(Feature::ClassPrivate, node),
+            NodeKind::ForOf { .. } if ast[node].flags & crate::ast::flags::AWAIT != 0 && self.lowers(Feature::AsyncIteration) => self.lower_error(Feature::AsyncIteration, node),
+            NodeKind::Await(_) if self.fn_depth == 0 && self.lowers(Feature::TopLevelAwait) => self.lower_error(Feature::TopLevelAwait, node),
+            _ => {}
+        }
+    }
+
+    /// Removes the comma that ends the text between `from` and `to` (a list's last item and the `)` after it), if there is one.
+    fn drop_trailing_comma(&mut self, from: u32, to: u32) {
+        let region = self.source_between(from, to);
+        let trimmed = region.trim_end();
+        if trimmed.ends_with(',') {
+            let at = from + trimmed.len() as u32 - 1;
+            self.edits.push(Edit { start: at, end: at + 1, pieces: Vec::new(), shorthand: None, transparent: false });
+        }
+    }
+
+    // ---- ** and **= ----
+
+    fn lower_exponent(&mut self, node: NodeId, left: NodeId, right: NodeId) {
+        let (start, end) = self.span(node);
+        let Some(at) = self.operator_at(left, right, "**") else { return };
+        self.push(node, vec![text("Math.pow("), Piece::Range(start, at), text(", "), Piece::Range(at + 2, end), text(")")]);
+    }
+
+    fn lower_exponent_assignment(&mut self, node: NodeId, target: NodeId, value: NodeId) {
+        let (start, end) = self.span(node);
+        let Some(at) = self.operator_at(target, value, "**=") else { return };
+        let Some((first, again)) = self.assignment_target(target) else {
+            self.lower_error(Feature::ClassPrivate, node);
+            return;
+        };
+        let mut pieces = first;
+        pieces.push(text(" = Math.pow("));
+        pieces.extend(again);
+        pieces.push(text(", "));
+        pieces.push(Piece::Range(at + 3, end));
+        pieces.push(text(")"));
+        let _ = start;
+        self.push(node, pieces);
+    }
+
+    /// An assignment target written for its first use (the parts that are not plain assigned to temporaries) and again for the next uses.
+    fn assignment_target(&mut self, target: NodeId) -> Option<(Vec<Piece>, Vec<Piece>)> {
+        let ast = self.ast;
+        match ast[target].kind {
+            NodeKind::Member { object, prop } if ast[target].flags & crate::ast::flags::OPTIONAL == 0 => {
+                let (os, oe) = self.span(object);
+                let (first_object, again_object) = if self.is_plain(object) {
+                    (vec![Piece::Range(os, oe)], vec![Piece::Range(os, oe)])
+                } else {
+                    let t = self.temp();
+                    (vec![text(&format!("({t} = (")), Piece::Range(os, oe), text("))")], vec![text(&t)])
+                };
+                if ast[target].flags & crate::ast::flags::COMPUTED != 0 {
+                    let (ks, ke) = self.span(prop);
+                    let literal = matches!(ast[prop].kind, NodeKind::Str(_) | NodeKind::Num(_) | NodeKind::Ident(_) | NodeKind::Bool(_) | NodeKind::Null);
+                    let (mut first, mut again) = (first_object, again_object);
+                    if literal {
+                        first.extend([text("["), Piece::Range(ks, ke), text("]")]);
+                        again.extend([text("["), Piece::Range(ks, ke), text("]")]);
+                    } else {
+                        let k = self.temp();
+                        first.extend([text(&format!("[{k} = ")), Piece::Range(ks, ke), text("]")]);
+                        again.push(text(&format!("[{k}]")));
+                    }
+                    Some((first, again))
+                } else {
+                    if matches!(ast[prop].kind, NodeKind::PrivateName(_)) {
+                        return None;
+                    }
+                    let (ps, pe) = self.span(prop);
+                    let (mut first, mut again) = (first_object, again_object);
+                    first.extend([text("."), Piece::Range(ps, pe)]);
+                    again.extend([text("."), Piece::Range(ps, pe)]);
+                    Some((first, again))
+                }
+            }
+            NodeKind::Ident(_) => {
+                let (s, e) = self.span(target);
+                Some((vec![Piece::Range(s, e)], vec![Piece::Range(s, e)]))
+            }
+            _ => None,
+        }
+    }
+
+    // ---- ??, ||=, &&=, ??= ----
+
+    fn lower_nullish(&mut self, node: NodeId, left: NodeId, right: NodeId) {
+        let (start, end) = self.span(node);
+        let Some(at) = self.operator_at(left, right, "??") else { return };
+        let mut pieces = vec![text("(")];
+        if self.is_plain(left) {
+            let (ls, le) = self.span(left);
+            pieces.extend([Piece::Range(ls, le), text(" != null ? "), Piece::Range(ls, le)]);
+        } else {
+            let t = self.temp();
+            pieces.extend([text(&format!("({t} = ")), Piece::Range(start, at), text(&format!(") != null ? {t}"))]);
+        }
+        pieces.extend([text(" : "), Piece::Range(at + 2, end), text(")")]);
+        self.push(node, pieces);
+    }
+
+    fn lower_logical_assignment(&mut self, node: NodeId, op: BinOp, target: NodeId, value: NodeId) {
+        let (_, end) = self.span(node);
+        let symbol = match op {
+            BinOp::LogAnd => "&&=",
+            BinOp::LogOr => "||=",
+            _ => "??=",
+        };
+        let Some(at) = self.operator_at(target, value, symbol) else { return };
+        let Some((first, again)) = self.assignment_target(target) else {
+            self.lower_error(Feature::ClassPrivate, node);
+            return;
+        };
+        let value_pieces = |again: Vec<Piece>| {
+            let mut v = again;
+            v.push(text(" = "));
+            v.push(Piece::Range(at + 3, end));
+            v
+        };
+        let mut pieces = vec![text("(")];
+        match op {
+            BinOp::LogAnd | BinOp::LogOr => {
+                pieces.extend(first);
+                pieces.push(text(if op == BinOp::LogAnd { " && (" } else { " || (" }));
+                pieces.extend(value_pieces(again));
+                pieces.push(text(")"));
+            }
+            _ => {
+                if matches!(self.ast[target].kind, NodeKind::Ident(_)) {
+                    pieces.extend(first.clone());
+                    pieces.push(text(" != null ? "));
+                    pieces.extend(first);
+                    pieces.push(text(" : "));
+                } else {
+                    let t = self.temp();
+                    pieces.push(text(&format!("({t} = ")));
+                    pieces.extend(first);
+                    pieces.push(text(&format!(") != null ? {t} : ")));
+                }
+                pieces.extend(value_pieces(again));
+            }
+        }
+        pieces.push(text(")"));
+        self.push(node, pieces);
+    }
+
+    // ---- optional chains ----
+
+    /// The links of a chain from its first expression outwards, and that expression.
+    fn chain_links(&self, inner: NodeId) -> (NodeId, Vec<Link>) {
+        let ast = self.ast;
+        let mut spine = Vec::new();
+        let mut at = inner;
+        loop {
+            match ast[at].kind {
+                NodeKind::Member { object, .. } => {
+                    spine.push(at);
+                    at = object;
+                }
+                NodeKind::Call { callee, .. } => {
+                    spine.push(at);
+                    at = callee;
+                }
+                _ => break,
+            }
+            if matches!(ast[at].kind, NodeKind::Chain(_)) {
+                break;
+            }
+        }
+        spine.reverse();
+        let base = at;
+        let mut links = Vec::new();
+        let mut previous_end = ast[base].span.end;
+        for node in spine {
+            let (_, end) = self.span(node);
+            let optional = ast[node].flags & crate::ast::flags::OPTIONAL != 0;
+            let mut begin = self.link_start(previous_end, end);
+            let rest = self.source_between(begin, end);
+            // `?.` is dropped: what follows it is written as a plain link (`?.b` is `.b`, `?.[b]` is `[b]`, `?.(b)` is `(b)`).
+            let mut dot = String::new();
+            if optional {
+                if let Some(q) = rest.find("?.") {
+                    begin += q as u32 + 2;
+                    let after = self.source_between(begin, end).trim_start();
+                    if !after.starts_with('[') && !after.starts_with('(') && !after.starts_with('<') {
+                        dot.push('.');
+                    }
+                }
+            }
+            let call = matches!(ast[node].kind, NodeKind::Call { .. });
+            let mut tail = Vec::new();
+            if !dot.is_empty() {
+                tail.push(Piece::Text(dot));
+            }
+            tail.push(Piece::Range(begin, end));
+            let (mut arguments, mut has_arguments) = (Vec::new(), false);
+            if let NodeKind::Call { args, .. } = ast[node].kind {
+                has_arguments = !ast.list(args).is_empty();
+                // The text inside the parentheses: from after the `(` to before the last `)`.
+                let after_open = self.source_between(begin, end).find('(').map_or(begin, |p| begin + p as u32 + 1);
+                arguments.push(Piece::Range(after_open, end.saturating_sub(1)));
+            }
+            links.push(Link { node, optional, call, tail, arguments, has_arguments });
+            previous_end = end;
+        }
+        (base, links)
+    }
+
+    /// An optional chain as a conditional expression: `a?.b.c(d)` is `(a == null ? void 0 : a.b.c(d))`. `delete` is the chain as the
+    /// operand of `delete`, which gives `true` for a short circuit.
+    fn lower_chain(&mut self, inner: NodeId, delete: bool) -> Vec<Piece> {
+        let ast = self.ast;
+        let (base, links) = self.chain_links(inner);
+        let none = if delete { "true" } else { "void 0" };
+        let (bs, be) = self.span(base);
+        let mut prefix: Vec<Piece> = Vec::new();
+        let mut current: Vec<Piece> = vec![Piece::Range(bs, be)];
+        let mut current_plain = self.is_plain(base);
+        let mut this_value: Option<Vec<Piece>> = if matches!(ast[base].kind, NodeKind::Super) { Some(vec![text("this")]) } else { None };
+        for (i, link) in links.iter().enumerate() {
+            let next_is_optional_call = links.get(i + 1).is_some_and(|l| l.call && l.optional);
+            if link.optional {
+                if current_plain {
+                    prefix.extend(current.clone());
+                    prefix.push(text(&format!(" == null ? {none} : ")));
+                } else {
+                    let t = self.temp();
+                    prefix.push(text(&format!("({t} = (")));
+                    prefix.extend(current);
+                    prefix.push(text(&format!(")) == null ? {none} : ")));
+                    current = vec![text(&t)];
+                    current_plain = true;
+                }
+            }
+            if link.call {
+                let mut next = Vec::new();
+                match this_value.take() {
+                    // A call of a method keeps `this` through `.call` when the callee has been put in a name.
+                    Some(this) if link.optional => {
+                        next.extend(current);
+                        next.push(text(".call("));
+                        next.extend(this);
+                        if link.has_arguments {
+                            next.push(text(", "));
+                            next.extend(link.arguments.clone());
+                        }
+                        next.push(text(")"));
+                    }
+                    _ => {
+                        next.extend(current);
+                        next.extend(link.tail.clone());
+                    }
+                }
+                current = next;
+                current_plain = false;
+                this_value = None;
+            } else {
+                // A member: its object is the `this` of a call that follows with `?.`, so it must be evaluated once.
+                let mut object = current;
+                let mut this_text = None;
+                if next_is_optional_call && !current_plain {
+                    let t = self.temp();
+                    let mut captured = vec![text(&format!("({t} = ("))];
+                    captured.extend(object);
+                    captured.push(text("))"));
+                    object = captured;
+                    this_text = Some(vec![text(&t)]);
+                } else if next_is_optional_call || matches!(ast[base].kind, NodeKind::Super) && i == 0 {
+                    // The object is a name already: `this` for the call is that name.
+                    this_text = Some(if matches!(ast[base].kind, NodeKind::Super) && i == 0 { vec![text("this")] } else { object.clone() });
+                }
+                let mut next = object;
+                next.extend(link.tail.clone());
+                current = next;
+                current_plain = false;
+                this_value = this_text;
+            }
+            let _ = link.node;
+        }
+        let mut out = vec![text("(")];
+        out.extend(prefix);
+        if delete {
+            out.push(text("delete "));
+        }
+        out.extend(current);
+        out.push(text(")"));
+        out
+    }
+}

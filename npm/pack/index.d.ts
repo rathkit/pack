@@ -19,6 +19,8 @@ export interface Options {
   globalName?: string;
   /** For an `iife`: the global each external module is read from, `{ react: 'React' }`. */
   globals?: Record<string, string>;
+  /** The version of JavaScript the output may use: `es2015` to `es2025`, or `esnext` (the default; nothing is rewritten). Newer syntax is rewritten, or the build stops saying what could not be: BigInt literals and top-level await cannot be, and some others are not yet. */
+  target?: string;
   /** `true` is whitespace, identifiers and syntax together. */
   minify?: boolean | { whitespace?: boolean; identifiers?: boolean; syntax?: boolean };
   keepNames?: boolean;

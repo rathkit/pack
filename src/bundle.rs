@@ -18,6 +18,7 @@
 //! of a bundled ES module runs that module on first use but loads nothing), and CommonJS code
 //! becomes strict when the output is an ES module.
 
+mod lower;
 mod std_decorators;
 
 use std::collections::{HashMap, HashSet};
@@ -225,6 +226,8 @@ pub struct Options {
     pub out_extensions: Vec<(String, String)>,
     /// What becomes of the legal comments (`/*! ... */`, `@license`, `@preserve`) of the modules when the output is minified.
     pub legal_comments: crate::legal::LegalComments,
+    /// The version of JavaScript the output may use; newer syntax is rewritten (or refused).
+    pub target: crate::target::Target,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -241,7 +244,7 @@ pub enum SourceMapMode {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { splitting: false, format: Format::Esm, global_name: None, globals: Vec::new(), original_paths: false, minify: crate::minify::Options::default(), sourcemap: SourceMapMode::None, sources_content: true, map_base: None, file_name: None, hot: false, entry_names: Vec::new(), federation: None, banner_js: None, footer_js: None, banner_css: None, footer_css: None, drop_console: false, drop_debugger: false, entry_template: None, chunk_template: None, out_extensions: Vec::new(), legal_comments: crate::legal::LegalComments::Eof }
+        Options { splitting: false, format: Format::Esm, global_name: None, globals: Vec::new(), original_paths: false, minify: crate::minify::Options::default(), sourcemap: SourceMapMode::None, sources_content: true, map_base: None, file_name: None, hot: false, entry_names: Vec::new(), federation: None, banner_js: None, footer_js: None, banner_css: None, footer_css: None, drop_console: false, drop_debugger: false, entry_template: None, chunk_template: None, out_extensions: Vec::new(), legal_comments: crate::legal::LegalComments::Eof, target: crate::target::Target::ESNEXT }
     }
 }
 
@@ -356,6 +359,11 @@ struct Bundler<'a> {
     drop_console: bool,
     drop_debugger: bool,
     out_extensions: Vec<(String, String)>,
+    /// `--target`: syntax newer than this is rewritten.
+    target: crate::target::Target,
+    /// The temporaries rewritten code uses, each declared once at the top of the chunk of the module that uses it.
+    temps: Vec<(ModuleId, String)>,
+    temp_count: u32,
     entry_names: Vec<Option<String>>,
     federation: Option<std::sync::Arc<crate::federation::Federation>>,
     /// Module federation: chunks whose code reads shared packages and remotes wait for the runtime to have loaded them
@@ -462,6 +470,9 @@ impl<'a> Bundler<'a> {
             drop_console: false,
             drop_debugger: false,
             out_extensions: Vec::new(),
+            target: crate::target::Target::ESNEXT,
+            temps: Vec::new(),
+            temp_count: 0,
             entry_names: Vec::new(),
             federation: None,
             ready_calls: HashMap::new(),
@@ -489,6 +500,7 @@ impl<'a> Bundler<'a> {
         self.drop_console = options.drop_console;
         self.drop_debugger = options.drop_debugger;
         self.out_extensions = options.out_extensions.clone();
+        self.target = options.target;
         self.federation = options.federation.clone();
         self.format = options.format;
         self.splitting = options.splitting && options.format == Format::Esm;
@@ -2386,6 +2398,9 @@ impl<'a> Scanner<'_, 'a> {
                 return;
             }
         }
+        if !self.bundler.target.is_esnext() {
+            self.lower(node);
+        }
         match ast[node].kind {
             NodeKind::Ident(name) => {
                 if wrapped {
@@ -3228,6 +3243,11 @@ impl Bundler<'_> {
         let has_ns = self.keys.iter().any(|k| matches!(k, Key::Namespace(_)));
         if has_ns {
             out.push_str(HELPER_NS);
+        }
+        // The temporaries of rewritten syntax (`--target`) that the modules of this chunk use.
+        let temps: Vec<&str> = self.temps.iter().filter(|(m, _)| self.in_chunk(*m, chunk)).map(|(_, n)| n.as_str()).collect();
+        if !temps.is_empty() {
+            let _ = writeln!(out, "var {};", temps.join(", "));
         }
         if format != Format::Esm {
             if format == Format::Cjs {
