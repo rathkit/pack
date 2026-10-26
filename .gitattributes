@@ -1,0 +1,7 @@
+# Text files are checked out with LF on every platform: the tests compare programs' output with expected files byte for byte,
+# and lists of file names are read line by line.
+* text=auto eol=lf
+*.png binary
+*.woff binary
+*.woff2 binary
+*.zip binary

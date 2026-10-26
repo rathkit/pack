@@ -58,8 +58,10 @@ try {
   write('extra.js', 'export const extra = "x1";\n');
   write('main.js', 'import { value } from "./dep.js";\nimport { extra } from "./extra.js";\nconsole.log(value, extra);\n');
   await until('a rebuild with extra.js', () => output().includes('x1'));
-  write('extra.js', 'export const extra = "x2";\n');
-  await until('a rebuild after extra.js changed', () => output().includes('x2'));
+  // A change of size too: the watcher compares the modification time and the size, and a write that follows the last build by less
+  // than a clock tick of the file system (a few milliseconds) with the same size looks like no change.
+  write('extra.js', 'export const extra = "x2-changed";\n');
+  await until('a rebuild after extra.js changed', () => output().includes('x2-changed'));
 
   // A file added to a directory that `import.meta.glob` lists is picked up, though no file the build read changed.
   mkdirSync(join(dir, 'items'));
