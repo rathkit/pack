@@ -266,6 +266,8 @@ node tools/check-estree.mjs DIR...            # the ESTree of every .js file aga
 node tools/run-loaders.mjs                    # loaders and style sheets (UPDATE_SNAPSHOTS=1 rewrites the CSS snapshots)
 node tools/run-defines.mjs                    # --define vs the values set in Node
 node tools/test-npm-wrapper.mjs                 # the npm launcher and platform packages
+node tools/scan-secrets.mjs [--history]         # secrets in the files, or in every commit ever (the values are not printed)
+node tools/check-denylist.mjs [--history]     # the private word list (RATHKIT_DENYLIST) against the files, or every commit
 node tools/run-assets.mjs                     # image, font and SVG plugins (url, svgr, file-loader, copy) run for real
 node tools/run-sourcemaps.mjs                 # stack traces through source maps vs the original positions
 node tools/check-pieces.mjs                    # minifying in pieces vs in one pass (add --packages PROJECT for every package)

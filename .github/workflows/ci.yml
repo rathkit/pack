@@ -67,6 +67,35 @@ jobs:
       - run: python3 tools/fuzz-bundle.py --count 300
       - run: node tools/diff-real.mjs "$GITHUB_WORKSPACE/bench"
 
+  # What must never be in the repository: secrets, and the words of the private list (when the list is set as a secret; a fork's pull
+  # request has no secrets, so only the secret scan runs there). The whole history is scanned by hand: history-scan.yml.
+  hygiene:
+    name: secrets and words
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      RATHKIT_DENYLIST: ${{ secrets.RATHKIT_DENYLIST }}
+      RTE_DENYLIST: ${{ secrets.RTE_DENYLIST }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/setup@a0881977cd8ea73b1ed212236c99ca10dcc80cf4
+        with:
+          runtime: node@24
+          working-directory: bench
+          install: false
+      - run: node --test tools/scan-secrets.test.mjs
+      - run: node tools/scan-secrets.mjs
+      - name: Word check
+        if: env.RATHKIT_DENYLIST != '' || env.RTE_DENYLIST != ''
+        run: node tools/check-denylist.mjs
+        env:
+          CI: "true"
+      - name: The word check did not run (no list set)
+        if: env.RATHKIT_DENYLIST == '' && env.RTE_DENYLIST == ''
+        run: echo "::warning::RATHKIT_DENYLIST is not set; the word check was skipped"
+
   # The musl build (Alpine): the program has no C dependencies, so it runs there as it is built; this checks it does.
   musl:
     name: alpine (musl) node 24

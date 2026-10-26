@@ -1,0 +1,35 @@
+name: history-scan
+
+# Run by hand, the day before the repository is made public: the word check and the secret scan over every commit on every branch and tag
+# (messages, author names, paths and every line ever added), not only the files as they are now. The word list is the repository secret
+# RATHKIT_DENYLIST (or RTE_DENYLIST), a comma or newline separated list that is never in the repository.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # Only Node is needed here (no install).
+      - uses: pnpm/setup@a0881977cd8ea73b1ed212236c99ca10dcc80cf4
+        with:
+          runtime: node@24
+          working-directory: bench
+          install: false
+      - name: Word check over the whole history
+        run: node tools/check-denylist.mjs --history
+        env:
+          RATHKIT_DENYLIST: ${{ secrets.RATHKIT_DENYLIST }}
+          RTE_DENYLIST: ${{ secrets.RTE_DENYLIST }}
+          CI: "true"
+      - name: Secret scan over the whole history
+        run: node tools/scan-secrets.mjs --history
