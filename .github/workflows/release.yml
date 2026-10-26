@@ -178,7 +178,8 @@ jobs:
       - run: node tools/make-npm-packages.mjs --out npm-out --from dist
       - name: Pack each package, and check the launcher lists every platform
         run: |
-          for dir in npm-out/*/; do pnpm pack "$dir" --pack-destination npm-packed >/dev/null; done
+          mkdir npm-packed
+          for dir in npm-out/*/; do (cd "$dir" && pnpm pack --pack-destination "$GITHUB_WORKSPACE/npm-packed" >/dev/null); done
           ls -l npm-packed
           test "$(ls npm-packed | wc -l)" = 8
           node -e "const d=require('./npm-out/pack/package.json').optionalDependencies; if (Object.keys(d).length!==7) { console.error(d); process.exit(1) }"
