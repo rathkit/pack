@@ -788,7 +788,7 @@ impl Context<'_> {
         }
         // `./logo.svg?raw` and `./icon.svg?react`: the file is looked for without the query, which stays on the module's name.
         if let Some((bare, query)) = specifier.split_once('?') {
-            if !bare.is_empty() && !query.contains('/') && request.kind != RequestKind::Resolve {
+            if !bare.is_empty() && !query.contains(['/', '\\']) && request.kind != RequestKind::Resolve {
                 if let Ok(found) = self.resolver.resolve(dir, bare, kind) {
                     return Target::Path(PathBuf::from(format!("{}?{query}", found.path.to_string_lossy())));
                 }
@@ -941,8 +941,9 @@ mod tests;
 /// A module name with a query (`/a/logo.svg?raw`): the file, and the query without the `?`.
 fn split_query(path: &Path) -> (PathBuf, String) {
     let text = path.to_string_lossy();
+    // `\\?\C:\dir` (a Windows verbatim path) has a `?` that starts nothing: a query never holds a path separator.
     match text.rsplit_once('?') {
-        Some((file, query)) if !file.is_empty() && !query.contains('/') && !text.starts_with('\0') => (PathBuf::from(file), query.to_string()),
+        Some((file, query)) if !file.is_empty() && !query.contains(['/', '\\']) && !text.starts_with('\0') => (PathBuf::from(file), query.to_string()),
         _ => (path.to_path_buf(), String::new()),
     }
 }

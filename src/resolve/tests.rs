@@ -285,3 +285,11 @@ fn typescript_extension_aliases() {
     assert_eq!(resolve(&r, "/p", "./d.mjs").unwrap(), "/p/d.mts");
     assert_eq!(resolve(&r, "/p", "./a").unwrap(), "/p/a.ts");
 }
+
+#[test]
+fn the_verbatim_prefix_of_a_windows_path_is_dropped() {
+    assert_eq!(without_verbatim_prefix(Path::new(r"\\?\C:\dir\file.js")), Path::new(r"C:\dir\file.js"));
+    // Only a drive path has a plain form: a network path and an ordinary path stay as they are.
+    assert_eq!(without_verbatim_prefix(Path::new(r"\\?\UNC\server\share\a.js")), Path::new(r"\\?\UNC\server\share\a.js"));
+    assert_eq!(without_verbatim_prefix(Path::new("/p/a.js")), Path::new("/p/a.js"));
+}

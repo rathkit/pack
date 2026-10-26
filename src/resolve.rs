@@ -34,6 +34,16 @@ pub trait FileSystem: Send + Sync {
     }
 }
 
+/// On Windows `canonicalize` answers `\\?\C:\dir\file`, a form nothing else expects (a `?` is a query in module names, and
+/// Node and the plugins write `C:\dir\file`). The plain form is the same file whenever the path has a drive letter.
+pub fn without_verbatim_prefix(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if rest.len() >= 3 && rest.as_bytes()[0].is_ascii_alphabetic() && rest.as_bytes()[1] == b':' && rest.as_bytes()[2] == b'\\' => PathBuf::from(rest),
+        _ => path.to_path_buf(),
+    }
+}
+
 /// The real file system.
 pub struct RealFs;
 
@@ -72,7 +82,7 @@ impl FileSystem for RealFs {
     }
 
     fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
-        std::fs::canonicalize(path)
+        std::fs::canonicalize(path).map(|p| without_verbatim_prefix(&p))
     }
 }
 

@@ -152,3 +152,14 @@ fn node_builtin_names() {
         assert!(!is_node_builtin(no), "{no}");
     }
 }
+
+#[test]
+fn a_query_is_split_off_a_module_name_but_not_off_a_windows_verbatim_path() {
+    assert_eq!(split_query(Path::new("/p/logo.svg?raw")), (PathBuf::from("/p/logo.svg"), "raw".to_string()));
+    assert_eq!(split_query(Path::new("/p/a.js")), (PathBuf::from("/p/a.js"), String::new()));
+    // The `?` of `\\?\C:\...` starts nothing: what follows it is a path.
+    let verbatim = PathBuf::from(r"\\?\D:\a\pack\main.js");
+    assert_eq!(split_query(&verbatim), (verbatim.clone(), String::new()));
+    let with_query = PathBuf::from(r"\\?\D:\a\logo.svg?raw");
+    assert_eq!(split_query(&with_query), (PathBuf::from(r"\\?\D:\a\logo.svg"), "raw".to_string()));
+}

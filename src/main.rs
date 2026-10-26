@@ -900,7 +900,7 @@ fn write_pages(job: &Job, dir: &std::path::Path, output: &rathkit_pack::bundle::
     if job.pages.is_empty() {
         return Ok(());
     }
-    let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let canon = |p: &std::path::Path| std::fs::canonicalize(p).map(|c| rathkit_pack::resolve::without_verbatim_prefix(&c)).unwrap_or_else(|_| p.to_path_buf());
     let sheets: Vec<&str> = output.files.iter().map(|f| f.name.as_str()).filter(|n| n.ends_with(".css")).collect();
     let public = job.cwd.join("public");
     for page in &job.pages {
@@ -1247,7 +1247,7 @@ fn run_build(job: &Job) -> Outcome {
                     eprintln!("{}: {e}", dir.display());
                     return outcome;
                 }
-                bundle_options.map_base = std::fs::canonicalize(&dir).ok();
+                bundle_options.map_base = std::fs::canonicalize(&dir).ok().map(|c| rathkit_pack::resolve::without_verbatim_prefix(&c));
             }
             None if bundle_options.sourcemap != rathkit_pack::bundle::SourceMapMode::Inline => {
                 eprintln!("error: --sourcemap writes a file next to the output; give --outfile or --outdir, or use --sourcemap=inline");
