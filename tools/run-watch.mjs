@@ -100,4 +100,9 @@ if (failed) {
   process.exit(1);
 }
 console.log('watch: rebuilds, hooks, restart on config change and Ctrl-C all work');
-rmSync(dir, { recursive: true, force: true });
+// A killed server (and its plugin host) may still hold the folder for a moment on Windows, which cannot delete what a process is in.
+try {
+  rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+} catch (error) {
+  if (process.platform !== 'win32') throw error;
+}
