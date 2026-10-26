@@ -561,7 +561,7 @@ pub fn rewrite(source: &str, module: &Path, root: &Path, fs: &dyn FileSystem, di
         let mut object = String::from("{");
         for (n, file) in files.iter().enumerate() {
             let key = if patterns.iter().any(|p| p.trim_start_matches('!').starts_with('/')) && file.starts_with(root) && options.base.is_none() {
-                format!("/{}", file.strip_prefix(root).unwrap_or(file).to_string_lossy())
+                format!("/{}", file.strip_prefix(root).unwrap_or(file).to_string_lossy().replace('\\', "/"))
             } else {
                 relative_from(&base_dir, file)
             };

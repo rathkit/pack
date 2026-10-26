@@ -80,10 +80,12 @@ try {
 
   child.kill('SIGINT');
   const { code } = await Promise.race([exited, new Promise((_, no) => setTimeout(() => no(new Error('did not stop on SIGINT')), 10000))]);
-  if (code !== 0) throw new Error(`exit code ${code}\n${stderr}`);
+  // Windows has no SIGINT to send a child: Node ends it at once, so the clean stop (exit 0, closeWatcher) can be checked on other systems only.
+  const windows = process.platform === 'win32';
+  if (!windows && code !== 0) throw new Error(`exit code ${code}\n${stderr}`);
   const lines = readFileSync(log, 'utf8').trim().split('\n');
   const text = lines.join(' | ');
-  for (const wanted of ['start watch=true', 'change dep.js update', 'change extra.js update', 'closeWatcher']) {
+  for (const wanted of ['start watch=true', 'change dep.js update', 'change extra.js update', ...(windows ? [] : ['closeWatcher'])]) {
     if (!text.includes(wanted)) throw new Error(`the plugin never logged "${wanted}": ${text}`);
   }
   // Every change comes before the build it causes.

@@ -2,8 +2,9 @@
 // Rules: every dependency table in Cargo.toml is empty, there is no build script,
 // and Cargo.lock lists only this crate.
 import { existsSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
-const root = new URL("..", import.meta.url).pathname;
+const root = fileURLToPath(new URL("..", import.meta.url));
 const problems = [];
 
 const manifest = readFileSync(`${root}Cargo.toml`, "utf8");

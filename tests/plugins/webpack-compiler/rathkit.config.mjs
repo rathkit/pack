@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 // Plugins written against webpack's compiler: lifecycle hooks, assets, stats, a child compiler, and the plugins
 // that ship with webpack (imported from 'webpack', which this project does not install).
 import fs from 'node:fs';
@@ -5,7 +6,7 @@ import path from 'node:path';
 import webpack from 'webpack';
 
 const { Compilation, sources } = webpack;
-const here = path.dirname(new URL(import.meta.url).pathname);
+const here = path.dirname(fileURLToPath(import.meta.url));
 const order = [];
 
 class TracePlugin {

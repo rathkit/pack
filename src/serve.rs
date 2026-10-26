@@ -347,7 +347,8 @@ fn handle(mut stream: TcpStream, state: &Arc<ServeState>) -> std::io::Result<()>
     for base in bases {
         if let Some(file) = safe_join(&base, path) {
             // Dependencies and the project's own configuration are not for pages.
-            let relative = file.strip_prefix(&state.cwd).unwrap_or(&file).to_string_lossy().into_owned();
+            // Parts of the path, whatever the separator (a backslash on Windows).
+            let relative = file.strip_prefix(&state.cwd).unwrap_or(&file).to_string_lossy().replace('\\', "/");
             let private = relative.split('/').any(|part| part == "node_modules") || relative.starts_with("rathkit.config.") || relative == "package.json" || relative == "Cargo.toml";
             if file.is_file() && !private {
                 if let Ok(bytes) = std::fs::read(&file) {
@@ -381,7 +382,9 @@ fn prepare_page(html: &str, state: &ServeState) -> String {
     let mut out = html.to_string();
     // `<script type="module" src="/src/main.ts">` names an entry; the built file replaces it.
     for (entry, file) in &entries {
-        let relative = entry.strip_prefix(&state.cwd).unwrap_or(entry).to_string_lossy().replace('\\', "/");
+        // The project's folder and the entry may be written differently (Windows short names, a symlinked folder): compare the real ones.
+        let real = |p: &std::path::Path| std::fs::canonicalize(p).map(|c| crate::resolve::without_verbatim_prefix(&c)).unwrap_or_else(|_| p.to_path_buf());
+        let relative = entry.strip_prefix(&state.cwd).map(|r| r.to_path_buf()).or_else(|_| real(entry).strip_prefix(real(&state.cwd)).map(|r| r.to_path_buf())).unwrap_or_else(|_| entry.clone()).to_string_lossy().replace('\\', "/");
         let relative = relative.trim_start_matches("./").to_string();
         for needle in [format!("/{relative}"), format!("./{relative}"), relative.clone()] {
             for quote in ['"', '\''] {

@@ -1,5 +1,6 @@
+import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-const here = path.dirname(new URL(import.meta.url).pathname);
+const here = path.dirname(fileURLToPath(import.meta.url));
 
 const markdownish = path.join(here, 'md-loader.cjs');
 export default {
