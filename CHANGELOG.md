@@ -38,6 +38,7 @@ First release.
   one file with `--format iife`).
 - `--banner`, `--footer`, `--drop:console`, `--drop:debugger`, `--packages=external`, `--resolve-extensions`,
   `--preserve-symlinks`, `--pure`, `--metafile`, `--entry-names`, `--chunk-names`, `--out-extension`, `--legal-comments`, `--inject`, `--jsx-dev`, `--tsconfig-raw`; an unknown option is an error.
+- `--dts` and `--dts-dir`: declaration files for the entries, written with the project's `typescript` (JS API `dts`, `dtsDir`).
 - `--target=es2015` to `es2025`: `**`, `?.`, `??`, logical assignment, numeric separators, optional `catch` and trailing commas
   and object spread and rest (in declarations, parameters and `for of`), class fields, private members and static blocks are
   async functions (below es2017), `for await` and async generators (below es2018) are rewritten for targets that lack them; what cannot be rewritten stops the build and is named.

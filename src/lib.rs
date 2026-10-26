@@ -1,6 +1,7 @@
 pub mod ast;
 pub mod css;
 pub mod define;
+pub mod dts;
 pub mod dump;
 pub mod enums;
 pub mod env;

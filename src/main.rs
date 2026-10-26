@@ -548,6 +548,8 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     let mut env_files = true;
     let mut public_path_given = false;
     let mut metafile: Option<String> = None;
+    let mut dts = false;
+    let mut dts_dir: Option<String> = None;
     let mut inject_files: Vec<String> = Vec::new();
     let mut tsconfig_raw: Option<String> = None;
     let mut bundle_options = rathkit_pack::bundle::Options::default();
@@ -717,6 +719,12 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
                     return Done::Exit(ExitCode::from(2));
                 }
                 options.pure_calls.push(name);
+            }
+            // --dts [--dts-dir=DIR]: declaration files for the entries, written with the project's TypeScript.
+            "--dts" => dts = true,
+            arg if arg == "--dts-dir" || arg.starts_with("--dts-dir=") => {
+                dts = true;
+                dts_dir = if arg == "--dts-dir" { it.next().cloned() } else { Some(arg["--dts-dir=".len()..].to_string()) };
             }
             arg if arg == "--metafile" || arg.starts_with("--metafile=") => {
                 metafile = if arg == "--metafile" { it.next().cloned() } else { Some(arg["--metafile=".len()..].to_string()) };
@@ -1041,7 +1049,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     // Workers are scripts built on their own; the files they read and the files they copy are noted for the build that asked.
     let workers = std::sync::Arc::new(WorkerLog::default());
     options.worker_builder = Some(worker_builder(cwd.clone(), options.clone(), bundle_options.clone(), treeshake, workers.clone(), 0));
-    let job = std::sync::Arc::new(Job { cwd, entries, options, bundle_options, treeshake, outfile, outdir, host: plugin_host, config_file, watch, serve: serve_state, bind: (host_name, port), restart_files, workers, pages, metafile });
+    let job = std::sync::Arc::new(Job { cwd, entries, options, bundle_options, treeshake, outfile, outdir, host: plugin_host, config_file, watch, serve: serve_state, bind: (host_name, port), restart_files, workers, pages, metafile, dts: dts.then(|| (dts_dir, tsconfig_path.clone())) });
     if let Some(host) = &job.host {
         // Child compilers of webpack plugins build one entry as a script that sets a global.
         let for_children = job.clone();
@@ -1080,6 +1088,8 @@ struct Job {
     pages: Vec<Page>,
     /// Where to write what went into the build and what came out, as JSON.
     metafile: Option<String>,
+    /// `--dts`: with the folder to write the declarations to, or none for the output folder.
+    dts: Option<(Option<String>, Option<String>)>,
 }
 
 /// An html page given as an entry: its text, and the scripts in it with the files they come from.
@@ -1529,7 +1539,7 @@ fn run_build(job: &Job) -> Outcome {
         }
         return outcome;
     }
-    let status = match result {
+    let mut status = match result {
         Ok(output) if outdir.is_some() => {
             let dir = std::path::PathBuf::from(outdir.clone().unwrap());
             if let Err(e) = std::fs::create_dir_all(&dir) {
@@ -1590,6 +1600,28 @@ fn run_build(job: &Job) -> Outcome {
             ExitCode::FAILURE
         }
     };
+    if status == ExitCode::SUCCESS {
+        if let Some((folder, ts_config)) = &job.dts {
+            let base = match (outdir, outfile) {
+                (Some(dir), _) => std::path::PathBuf::from(dir),
+                (None, Some(file)) => std::path::Path::new(file).parent().map(|p| p.to_path_buf()).unwrap_or_default(),
+                _ => cwd.to_path_buf(),
+            };
+            let target = folder.as_deref().map_or(base, std::path::PathBuf::from);
+            match rathkit_pack::dts::emit(&job.entries.iter().map(|e| cwd.join(e)).collect::<Vec<_>>(), &target, ts_config.as_deref(), cwd) {
+                Ok(done) => {
+                    for message in &done.messages {
+                        eprintln!("types: {message}");
+                    }
+                    println!("{}  {} declaration file{}", target.display(), done.files.len(), if done.files.len() == 1 { "" } else { "s" });
+                }
+                Err(message) => {
+                    eprintln!("error: --dts: {message}");
+                    status = ExitCode::FAILURE;
+                }
+            }
+        }
+    }
     if status == ExitCode::SUCCESS {
         if let Some(host) = plugin_host {
             // `writeBundle` says where the files are: the output folder, which plugins read the files back from.

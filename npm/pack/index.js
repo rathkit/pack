@@ -50,7 +50,7 @@ class BuildError extends Error {
   }
 }
 
-const KEYS = new Set(['entries', 'cwd', 'env', 'signal', 'outfile', 'outdir', 'format', 'globalName', 'globals', 'minify', 'keepNames', 'sourcemap', 'sourcesContent', 'splitting', 'treeShaking', 'platform', 'external', 'conditions', 'mainFields', 'alias', 'define', 'loader', 'assetNames', 'publicPath', 'jsx', 'jsxImportSource', 'jsxFactory', 'jsxFragment', 'decoratorMetadata', 'experimentalDecorators', 'strictNullChecks', 'tsconfig', 'config', 'mode', 'envDir', 'envPrefix', 'envFiles', 'banner', 'footer', 'drop', 'packages', 'resolveExtensions', 'preserveSymlinks', 'metafile', 'pure', 'entryNames', 'chunkNames', 'outExtension', 'legalComments', 'inject', 'jsxDev', 'tsconfigRaw', 'target', 'federation', 'originalPaths', 'corsOrigins', 'port', 'host']);
+const KEYS = new Set(['entries', 'cwd', 'env', 'signal', 'outfile', 'outdir', 'format', 'globalName', 'globals', 'minify', 'keepNames', 'sourcemap', 'sourcesContent', 'splitting', 'treeShaking', 'platform', 'external', 'conditions', 'mainFields', 'alias', 'define', 'loader', 'assetNames', 'publicPath', 'jsx', 'jsxImportSource', 'jsxFactory', 'jsxFragment', 'decoratorMetadata', 'experimentalDecorators', 'strictNullChecks', 'tsconfig', 'config', 'mode', 'envDir', 'envPrefix', 'envFiles', 'banner', 'footer', 'drop', 'packages', 'resolveExtensions', 'preserveSymlinks', 'metafile', 'pure', 'entryNames', 'chunkNames', 'outExtension', 'legalComments', 'inject', 'jsxDev', 'tsconfigRaw', 'target', 'dts', 'dtsDir', 'federation', 'originalPaths', 'corsOrigins', 'port', 'host']);
 
 /** The command line for options. A key that is not an option is an error, so a typo is not ignored. */
 function toArgs(options, cleanups) {
@@ -64,6 +64,7 @@ function toArgs(options, cleanups) {
   add('--outdir', options.outdir);
   add('--format', options.format);
   add('--target', options.target);
+  if (options.dts || options.dtsDir) args.push(options.dtsDir ? `--dts-dir=${resolve(options.cwd ?? process.cwd(), options.dtsDir)}` : '--dts');
   add('--global-name', options.globalName);
   pairs('--global', options.globals);
   const m = options.minify;

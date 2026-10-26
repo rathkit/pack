@@ -88,20 +88,58 @@ function zipRead(buffer) {
 
 // ---- writing a remote's types ----------------------------------------------------------------------
 
-function generate({ name, exposes, outDir, tsConfigPath, typesFolder = '@mf-types', compiledTypesFolder = 'compiled-types' }) {
-  let ts;
+// The project's own TypeScript, and the compiler options it would use (a tsconfig.json found, or the one asked for).
+function loadTypeScript() {
   try {
-    ts = createRequire(path.join(cwd, 'noop.js'))('typescript');
+    return createRequire(path.join(cwd, 'noop.js'))('typescript');
   } catch {
-    note('types were not written for the exposed modules: the typescript package is not installed');
-    return { written: false };
+    return null;
   }
+}
+
+function compilerOptions(ts, tsConfigPath) {
   const configPath = tsConfigPath ? path.resolve(cwd, tsConfigPath) : ts.findConfigFile(cwd, ts.sys.fileExists, 'tsconfig.json');
   let options = { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.ESNext, moduleResolution: ts.ModuleResolutionKind.Bundler, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true, allowJs: true, skipLibCheck: true };
   if (configPath) {
     const read = ts.readConfigFile(configPath, ts.sys.readFile);
     if (read.config) options = { ...options, ...ts.parseJsonConfigFileContent(read.config, ts.sys, path.dirname(configPath)).options };
   }
+  return options;
+}
+
+// ---- writing declarations for entry points (--dts) --------------------------------------------------
+
+// One declaration file for each source file the entries reach, as `tsc --declaration --emitDeclarationOnly` writes them, laid out
+// from the folder the sources have in common. Files in node_modules are not described.
+function emit({ entries, outDir, tsConfigPath }) {
+  const ts = loadTypeScript();
+  if (!ts) return { error: 'the typescript package is not installed (--dts writes declarations with it; install it in the project)' };
+  const options = compilerOptions(ts, tsConfigPath);
+  const out = path.resolve(cwd, outDir);
+  const program = ts.createProgram(entries, { ...options, declaration: true, emitDeclarationOnly: true, noEmit: false, outDir: out, declarationDir: undefined, declarationMap: false, sourceMap: false, composite: false, incremental: false, noEmitOnError: false, skipLibCheck: true, allowJs: true });
+  const written = [];
+  const result = program.emit(undefined, (file, text) => {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, text);
+    written.push(path.relative(out, file).split(path.sep).join('/'));
+  });
+  const errors = ts.getPreEmitDiagnostics(program).filter((d) => d.category === ts.DiagnosticCategory.Error);
+  for (const d of errors.slice(0, 20)) {
+    const where = d.file ? `${path.relative(cwd, d.file.fileName)}:${d.file.getLineAndCharacterOfPosition(d.start).line + 1}: ` : '';
+    note(`${where}${ts.flattenDiagnosticMessageText(d.messageText, '\n').split('\n')[0]}`);
+  }
+  if (result.emitSkipped && !written.length) return { error: 'no declarations were written' };
+  written.sort();
+  return { written, errors: errors.length };
+}
+
+function generate({ name, exposes, outDir, tsConfigPath, typesFolder = '@mf-types', compiledTypesFolder = 'compiled-types' }) {
+  const ts = loadTypeScript();
+  if (!ts) {
+    note('types were not written for the exposed modules: the typescript package is not installed');
+    return { written: false };
+  }
+  const options = compilerOptions(ts, tsConfigPath);
   const files = exposes.map((e) => e.file);
   const rootDir = files.reduce((common, file) => {
     const dir = path.dirname(file);
@@ -270,7 +308,7 @@ function link({ typesFolder = '@mf-types' }) {
 
 let answer;
 try {
-  answer = request.command === 'generate' ? generate(request) : request.command === 'link' ? link(request) : await consume(request);
+  answer = request.command === 'generate' ? generate(request) : request.command === 'emit' ? emit(request) : request.command === 'link' ? link(request) : await consume(request);
 } catch (error) {
   answer = { error: String(error?.stack ?? error) };
 }

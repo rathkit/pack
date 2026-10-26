@@ -85,6 +85,12 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   property after a spread. Regular expression syntax and library functions are not looked at, and engine targets such
   as `chrome80` are not supported. Checked by running programs as written and rewritten for every target in plain, minified,
   CommonJS and IIFE form, and by parsing each result as the language of its target (`tools/run-target.mjs`).
+- `--dts` (and `--dts-dir=DIR`, for a folder other than the output's): declaration files for the entries, written with the project's own
+  `typescript` package (run by Node; it is an error if it is not installed). They are what `tsc --declaration --emitDeclarationOnly`
+  writes: one `.d.ts` for each source file the entries reach, laid out from the folder the sources share (so `src/index.ts` becomes
+  `dist/index.d.ts` beside `dist/index.js`), not merged into one file. A JavaScript entry gets its JSDoc types. Type errors are listed and do
+  not stop the files being written. In the JS API: `dts: true`, `dtsDir`. Checked by type-checking a consumer against the result
+  (`tools/run-dts.mjs`).
 - Vite's import forms: `./a.wasm?init` (a function that instantiates the module and resolves to the instance, reading the copied file with
   Node's `fs` in Node and with `fetch` in a browser; a plain `./a.wasm` is the file's address, and ES module integration of
   WebAssembly (`import { add } from './a.wasm'`) is not supported), `./x.svg?raw` (text), `?url` (the copied file's address), `?inline` (a data URL), any other

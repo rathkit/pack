@@ -48,6 +48,10 @@ export interface Options {
   resolveExtensions?: string[];
   /** Keep a symbolic link's own path instead of the real file's. */
   preserveSymlinks?: boolean;
+  /** Write declaration files (`.d.ts`) for the entries with the project's own `typescript` package: one for each source file, laid out beside the output. */
+  dts?: boolean;
+  /** The folder for the declaration files, when not the output folder (implies `dts`). */
+  dtsDir?: string;
   /** Write what went into the build and what came out, as JSON in the shape of esbuild's metafile, to this file (the result has it too). */
   metafile?: string;
   /** Specifiers left out of the output: exact names, or a prefix ending in `/*`. */

@@ -29,7 +29,7 @@ use crate::resolve::{FileSystem, ResolveKind, ResolveOptions, Resolver};
 pub const ROOT: &str = "/@rathkit/federation";
 
 const RUNTIME: &str = include_str!("federation/runtime.js");
-const DTS: &str = include_str!("federation/dts.mjs");
+pub(crate) const DTS: &str = include_str!("federation/dts.mjs");
 const SEMVER: &str = include_str!("federation/semver.js");
 
 #[derive(Clone, Debug)]
@@ -159,7 +159,7 @@ impl std::fmt::Debug for Federation {
     }
 }
 
-fn quote(text: &str) -> String {
+pub(crate) fn quote(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 2);
     out.push('"');
     for ch in text.chars() {
@@ -1363,7 +1363,7 @@ impl FileSystem for Overlay {
 
 /// Runs a script with Node, which reads one JSON object on stdin and writes one on stdout. The script goes in a private
 /// folder, new, so another user of the machine cannot swap it.
-fn run_node(script: &str, input: &str, cwd: &Path) -> Result<Json, String> {
+pub(crate) fn run_node(script: &str, input: &str, cwd: &Path) -> Result<Json, String> {
     use std::io::Write;
     use std::process::{Command, Stdio};
     let dir = std::env::temp_dir().join(format!("rathkit-dts-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos())));
