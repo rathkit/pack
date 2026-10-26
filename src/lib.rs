@@ -7,6 +7,7 @@ pub mod env;
 pub mod estree;
 pub mod federation;
 pub mod fxhash;
+pub mod legal;
 pub mod lexer;
 pub mod minify;
 pub mod bundle;

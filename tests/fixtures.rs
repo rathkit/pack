@@ -367,3 +367,45 @@ fn files_are_named_by_templates_and_the_hash_follows_what_they_run() {
     assert_eq!(bad.status.code(), Some(2));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn legal_comments_survive_minifying_where_they_are_told_to() {
+    let dir = scratch("legal");
+    let write = |name: &str, text: &str| std::fs::write(dir.join(name), text).unwrap();
+    write("a.js", "/*! lib-a v1 (c) A. MIT */\nexport const a = () => 'a';\n");
+    write("b.js", "/**\n * @license B\n * Apache-2.0\n */\nexport const b = () => 'b';\n");
+    write("main.js", "// a plain comment\nimport { a } from './a.js';\nimport { b } from './b.js';\nconsole.log(a(), b());\n");
+    let build = |extra: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_rkp")).current_dir(&dir).args(["bundle", "main.js", "--outfile", "out.mjs"]).args(extra).output().expect("rkp starts");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        (std::fs::read_to_string(dir.join("out.mjs")).unwrap(), std::fs::read_to_string(dir.join("out.mjs.LEGAL.txt")).ok())
+    };
+    let _ = std::fs::remove_file(dir.join("out.mjs.LEGAL.txt"));
+    for minify in [&["--minify"][..], &[][..]] {
+        let with = |flag: &str| {
+            let mut args = minify.to_vec();
+            if !flag.is_empty() {
+                args.push(flag);
+            }
+            let _ = std::fs::remove_file(dir.join("out.mjs.LEGAL.txt"));
+            build(&args)
+        };
+        // By default the comments come after the code, each once, and the plain comment does not.
+        let (code, file) = with("");
+        assert!(code.contains("/*! lib-a v1 (c) A. MIT */") && code.contains("@license B") && !code.contains("a plain comment"), "{minify:?}: {code}");
+        assert_eq!(code.matches("lib-a v1").count(), 1, "{code}");
+        assert!(file.is_none());
+        let (code, file) = with("--legal-comments=none");
+        assert!(!code.contains("lib-a") && !code.contains("@license"), "{code}");
+        assert!(file.is_none());
+        let (code, file) = with("--legal-comments=linked");
+        assert!(code.contains("For license information please see out.mjs.LEGAL.txt") && !code.contains("Apache-2.0"), "{code}");
+        assert!(file.is_some_and(|f| f.contains("lib-a v1") && f.contains("@license B")));
+        let (code, file) = with("--legal-comments=external");
+        assert!(!code.contains("LEGAL") && !code.contains("Apache-2.0"), "{code}");
+        assert!(file.is_some_and(|f| f.contains("Apache-2.0")));
+    }
+    let bad = Command::new(env!("CARGO_BIN_EXE_rkp")).current_dir(&dir).args(["bundle", "main.js", "--outfile", "x.mjs", "--legal-comments=inline"]).output().unwrap();
+    assert_eq!(bad.status.code(), Some(2));
+    let _ = std::fs::remove_dir_all(&dir);
+}

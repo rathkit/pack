@@ -223,6 +223,8 @@ pub struct Options {
     pub chunk_template: Option<String>,
     /// The extension of each kind of output file, by the one it would have: `(".js", ".mjs")`.
     pub out_extensions: Vec<(String, String)>,
+    /// What becomes of the legal comments (`/*! ... */`, `@license`, `@preserve`) of the modules when the output is minified.
+    pub legal_comments: crate::legal::LegalComments,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -239,7 +241,7 @@ pub enum SourceMapMode {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { splitting: false, format: Format::Esm, global_name: None, globals: Vec::new(), original_paths: false, minify: crate::minify::Options::default(), sourcemap: SourceMapMode::None, sources_content: true, map_base: None, file_name: None, hot: false, entry_names: Vec::new(), federation: None, banner_js: None, footer_js: None, banner_css: None, footer_css: None, drop_console: false, drop_debugger: false, entry_template: None, chunk_template: None, out_extensions: Vec::new() }
+        Options { splitting: false, format: Format::Esm, global_name: None, globals: Vec::new(), original_paths: false, minify: crate::minify::Options::default(), sourcemap: SourceMapMode::None, sources_content: true, map_base: None, file_name: None, hot: false, entry_names: Vec::new(), federation: None, banner_js: None, footer_js: None, banner_css: None, footer_css: None, drop_console: false, drop_debugger: false, entry_template: None, chunk_template: None, out_extensions: Vec::new(), legal_comments: crate::legal::LegalComments::Eof }
     }
 }
 
@@ -616,6 +618,8 @@ impl<'a> Bundler<'a> {
         for result in results {
             files.push(result?);
         }
+        let legal = self.legal_files(&files, options, &settings);
+        files.extend(legal);
         files.extend(self.style_and_asset_files(&settings, options)?);
         let code = files.first().map(|f| f.code.clone()).unwrap_or_default();
         Ok(Output { code, files, chunks: chunk_infos })
@@ -1025,6 +1029,64 @@ impl<'a> Bundler<'a> {
         Ok(files)
     }
 
+    /// The legal comments of the modules in chunk `c`, one after another, that are not already in `code` (text that is not minified keeps
+    /// the comments inside what it copies, and loses only those between statements at the top of a module, which is where licenses are).
+    fn legal_text(&self, c: usize, code: &str) -> String {
+        let mut all: Vec<String> = Vec::new();
+        for &m in &self.plan.chunks[c].modules {
+            for comment in crate::legal::find(&self.graph.module(m).source) {
+                if !all.contains(&comment) && !code.contains(&comment) {
+                    all.push(comment);
+                }
+            }
+        }
+        all.join("\n")
+    }
+
+    /// A file with the legal comments of its modules after the code (or named there), as `--legal-comments` says.
+    fn with_legal_comments(&self, mut code: String, c: usize, file: &str, options: &Options, _settings: &crate::minify::Options) -> String {
+        use crate::legal::LegalComments;
+        if options.legal_comments == LegalComments::None || options.legal_comments == LegalComments::External {
+            return code;
+        }
+        let text = self.legal_text(c, &code);
+        if text.is_empty() {
+            return code;
+        }
+        if !code.ends_with('\n') {
+            code.push('\n');
+        }
+        match options.legal_comments {
+            LegalComments::Linked => {
+                let _ = writeln!(code, "/*! For license information please see {file}.LEGAL.txt */");
+            }
+            _ => {
+                code.push_str(&text);
+                code.push('\n');
+            }
+        }
+        code
+    }
+
+    /// The files of legal comments (`--legal-comments=linked` and `external`), one for each file that has some.
+    fn legal_files(&self, files: &[OutputFile], options: &Options, _settings: &crate::minify::Options) -> Vec<OutputFile> {
+        use crate::legal::LegalComments;
+        if !matches!(options.legal_comments, LegalComments::Linked | LegalComments::External) {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for (c, chunk) in self.plan.chunks.iter().enumerate() {
+            let text = match files.iter().find(|f| f.name == chunk.file) {
+                Some(file) => self.legal_text(c, &file.code),
+                None => continue,
+            };
+            if !text.is_empty() {
+                out.push(OutputFile { name: format!("{}.LEGAL.txt", chunk.file), code: format!("{text}\n"), map: None, data: None, original: None });
+            }
+        }
+        out
+    }
+
     /// Minifies one chunk's text and builds its map, as asked for.
     fn finish_chunk(&self, c: usize, raw: String, mut layout: crate::minify::Layout, options: &Options, settings: &crate::minify::Options, marks: &[Mark]) -> Result<OutputFile, Vec<Diagnostic>> {
         let timing = std::env::var_os("RATHKIT_TIMING").is_some();
@@ -1032,6 +1094,7 @@ impl<'a> Bundler<'a> {
         let file = self.plan.chunks[c].file.clone();
         if !self.mapping {
             let code = if settings.any() { crate::minify::minify_chunk(&raw, &layout, settings, None).map_err(fail)? } else { raw };
+            let code = self.with_legal_comments(code, c, &file, options, settings);
             let code = wrap_text(code, options.banner_js.as_deref(), options.footer_js.as_deref());
             return Ok(OutputFile { name: file, code, map: None, data: None, original: None });
         }
@@ -1061,6 +1124,7 @@ impl<'a> Bundler<'a> {
         if let Some(banner) = options.banner_js.as_deref() {
             map = shift_map_lines(&map, banner.matches('\n').count() + 1);
         }
+        code = self.with_legal_comments(code, c, &file, options, settings);
         code = wrap_text(code, options.banner_js.as_deref(), options.footer_js.as_deref());
         let map_name = format!("{file}.map");
         let mut map_file = None;

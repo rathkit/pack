@@ -641,6 +641,20 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
                 public_path_given = true;
             }
             "--preserve-symlinks" => options.resolve.preserve_symlinks = true,
+            // What becomes of /*! ... */, @license and @preserve comments when minifying: eof (the default), none, linked, external.
+            arg if arg == "--legal-comments" || arg.starts_with("--legal-comments=") => {
+                let value = if arg == "--legal-comments" { it.next().cloned().unwrap_or_default() } else { arg["--legal-comments=".len()..].to_string() };
+                bundle_options.legal_comments = match value.as_str() {
+                    "eof" => rathkit_pack::legal::LegalComments::Eof,
+                    "none" => rathkit_pack::legal::LegalComments::None,
+                    "linked" => rathkit_pack::legal::LegalComments::Linked,
+                    "external" => rathkit_pack::legal::LegalComments::External,
+                    other => {
+                        eprintln!("error: --legal-comments is eof, none, linked or external, not '{other}'");
+                        return Done::Exit(ExitCode::from(2));
+                    }
+                };
+            }
             // Templates for the names of files: [name] and [hash] (a hash of what is in the file and what it loads).
             arg if arg == "--entry-names" || arg == "--chunk-names" || arg.starts_with("--entry-names=") || arg.starts_with("--chunk-names=") => {
                 let entry = arg.starts_with("--entry-names");

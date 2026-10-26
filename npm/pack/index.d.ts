@@ -59,6 +59,8 @@ export interface Options {
   define?: Record<string, string>;
   /** How files with an extension are loaded: `{ '.svg': 'dataurl' }` (text, base64, dataurl, binary, file, empty, css, local-css). */
   loader?: Record<string, 'text' | 'base64' | 'dataurl' | 'binary' | 'file' | 'empty' | 'css' | 'local-css'>;
+  /** What becomes of the comments that say who wrote code and under what terms (`/*! ... *\/`, `@license`, `@preserve`), which minifying would drop: put after the code of the file that has it (`eof`, the default), left out (`none`), put in `NAME.LEGAL.txt` and named at the end of the file (`linked`), or put in that file without a mention (`external`). */
+  legalComments?: 'eof' | 'none' | 'linked' | 'external';
   /** The names of entry files, with `[name]` and `[hash]` filled in (a hash of what is in the file and in the files it loads, so a name changes when anything the file runs does). Default `[name]`. No directories. */
   entryNames?: string;
   /** The names of the other files (shared code, `import()`ed code), with `[name]` and `[hash]`. Default `[name]-[hash]`. No directories. */

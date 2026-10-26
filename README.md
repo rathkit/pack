@@ -41,7 +41,9 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   `--footer`, put around every file of that kind (source maps are moved to match; a banner goes before a `#!` line too, so a
   script that needs one should put it in the banner); `--drop:console` (every `console.*(...)` call of the global `console`
   becomes `(void 0)`, arguments included) and `--drop:debugger`; `--packages=external` (every package import is left out of the
-  bundle: a name that is not a path, and not made into one by an alias); `--resolve-extensions=.ts,.js`; `--entry-names=[name]-[hash]` and `--chunk-names=[name]-[hash]` (templates for the names of the files of entries and of the rest; `[hash]`
+  bundle: a name that is not a path, and not made into one by an alias); `--resolve-extensions=.ts,.js`; `--legal-comments=eof|none|linked|external` (the comments that say who wrote code and under what terms: `/*! ... */`, `@license`,
+  `@preserve`; minifying drops comments, so these are put after the code of the file that has them, each once (`eof`, the default), left
+  out, or put in `NAME.LEGAL.txt`, named at the end of the file or not); `--entry-names=[name]-[hash]` and `--chunk-names=[name]-[hash]` (templates for the names of the files of entries and of the rest; `[hash]`
   is a hash of what is in the file and in the files it loads, so a name changes when anything the file runs does, which is what
   caching by name needs; no directories in a name) and `--out-extension:.js=.mjs` (or `.css=`);
   `--pure:NAME` (calls of a name, or of a chain such as `styled.div`, and tagged templates of it, are free of effects, so an unused one
