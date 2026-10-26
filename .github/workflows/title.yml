@@ -1,0 +1,31 @@
+name: title
+
+# A pull request is squash-merged, so its title becomes the commit subject, and the release tooling reads that subject to choose the next
+# version. The title has to be a Conventional Commit: a type, an optional scope, an optional ! for a breaking change, a colon, and an
+# imperative subject that starts in lower case and has no period at the end. It reads the title from the event, checks nothing out, and
+# uses no actions.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions: {}
+
+jobs:
+  title:
+    name: title
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the pull request title
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          pattern='^(feat|fix|docs|test|perf|refactor|chore|ci|build|style|revert)(\([a-z0-9._/-]+\))?!?: [^[:upper:][:space:].].*[^.]$'
+          if ! printf '%s' "$TITLE" | grep -Eq "$pattern"; then
+            echo "::error::The title \"$TITLE\" is not a Conventional Commit."
+            echo "Write it as type(scope): subject, for example: feat(tables): sort rows by a column"
+            echo "Types: feat, fix, docs, test, perf, refactor, chore, ci, build, style, revert."
+            echo "The subject starts in lower case and does not end with a period."
+            exit 1
+          fi
+          echo "The title is a Conventional Commit."
