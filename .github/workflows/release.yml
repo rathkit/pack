@@ -30,7 +30,8 @@ permissions:
 jobs:
   build:
     strategy:
-      fail-fast: true
+      # One platform failing must not hide what the others do.
+      fail-fast: false
       matrix:
         include:
           - { os: ubuntu-latest, target: linux-x64-gnu }
@@ -46,6 +47,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The tests start the plugin host, which needs Node 24 or later; the runners' own Node is older.
+      - uses: pnpm/setup@a0881977cd8ea73b1ed212236c99ca10dcc80cf4
+        with:
+          runtime: node@24
+          working-directory: bench
+          install: false
       - run: rustup toolchain install stable --profile minimal && rustup default stable
       - name: The tag is the version in Cargo.toml
         shell: bash
