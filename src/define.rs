@@ -171,6 +171,18 @@ impl Defines {
         self.list.push(define);
     }
 
+    /// A definition that stands unless one for the same expression is already there (what the user wrote wins over a default).
+    pub fn add_default(&mut self, define: Define) {
+        if !self.list.iter().any(|d| d.path == define.path) {
+            self.list.push(define);
+        }
+    }
+
+    /// What the user defined as `import.meta.env.NAME`: the name and the expression, for the object `import.meta.env` to hold too.
+    pub fn env_overrides(&self) -> Vec<(String, String)> {
+        self.list.iter().filter(|d| d.path.len() == 3 && d.path[0] == "import.meta" && d.path[1] == "env").map(|d| (d.path[2].clone(), d.replacement())).collect()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.list.is_empty()
     }

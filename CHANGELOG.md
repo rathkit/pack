@@ -36,6 +36,8 @@ First release.
 - Pages: `rkp bundle index.html --outdir dist` builds the module scripts and linked style sheets a page names, copies the
   images and media it names and `public/`, rewrites the page, and runs plugins' `transformIndexHtml` on it (ES modules, or
   one file with `--format iife`).
+- `import.meta.env` with `MODE`, `DEV`, `PROD`, `SSR`, `BASE_URL` and the `VITE_` variables of `.env` files (`--mode`, `--env-dir`,
+  `--env-prefix`, `--no-env-files`).
 - `import.meta.glob`, and workers (`new Worker(new URL(...))`, `?worker`, `?sharedworker`, with `&inline` and `&url`).
 - Builds for linux (x64 and arm64, glibc and musl), macOS (arm64 and x64) and Windows (x64). The unit tests that use fake
   Unix paths run on Unix only; each release build bundles and runs a program with the binary it made.

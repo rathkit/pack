@@ -58,8 +58,14 @@ export interface Options {
   tsconfig?: string | false;
   /** A config file that lists plugins (`rathkit.config.mjs`), or `false` to ignore the one next to the project. */
   config?: string | false;
-  /** Passed to plugins as the mode (`production`, `development`). */
+  /** The mode: `import.meta.env.MODE`, which `.env.[mode]` files are read, and what plugins are told. Default `production` (`development` for `serve`). */
   mode?: string;
+  /** Where the `.env` files are. Default: the current directory. */
+  envDir?: string;
+  /** Names of `.env` files and of the environment that reach `import.meta.env`: those that start with one of these. Default `VITE_`. */
+  envPrefix?: string | string[];
+  /** `false` reads no `.env` files: `import.meta.env` has only `MODE`, `DEV`, `PROD`, `SSR` and `BASE_URL`. */
+  envFiles?: boolean;
   /** Module federation: a JSON file, or the options of a `ModuleFederationPlugin`. */
   federation?: string | Record<string, unknown>;
   /** Names of files in the output keep their original paths in maps and `import.meta.url`. */

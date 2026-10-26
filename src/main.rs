@@ -542,6 +542,11 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     let mut federation_file: Option<String> = None;
     let mut cors_origins: Vec<String> = Vec::new();
     let mut real_federation_plugin = false;
+    // `import.meta.env`: where the .env files are, which names reach the program, and whether the files are read at all.
+    let mut env_dir: Option<String> = None;
+    let mut env_prefixes: Vec<String> = Vec::new();
+    let mut env_files = true;
+    let mut public_path_given = false;
     let mut bundle_options = rathkit_pack::bundle::Options::default();
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -630,7 +635,13 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
                 }
             }
             "--asset-names" => options.asset_names = it.next().cloned().unwrap_or_default(),
-            "--public-path" => options.public_path = it.next().cloned().unwrap_or_default(),
+            "--public-path" => {
+                options.public_path = it.next().cloned().unwrap_or_default();
+                public_path_given = true;
+            }
+            "--env-dir" => env_dir = it.next().cloned(),
+            "--env-prefix" => env_prefixes.extend(it.next().cloned()),
+            "--no-env-files" => env_files = false,
             "--decorator-metadata" => options.decorator_metadata = true,
             "--experimental-decorators" => options.experimental_decorators = true,
             "--strict-null-checks" => options.strict_null_checks = true,
@@ -662,6 +673,30 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     }
     let cwd = std::env::current_dir().expect("working directory");
     let mut restart_files: Vec<std::path::PathBuf> = Vec::new();
+    // A build is `production` and the dev server `development`, unless --mode says otherwise.
+    if mode.is_empty() {
+        mode = if serve { "development" } else { "production" }.to_string();
+    }
+    {
+        // `import.meta.env`: the mode, the base, and the `.env` files' names that start with a prefix; a --define of the same expression wins.
+        let prefixes = if env_prefixes.is_empty() { vec!["VITE_".to_string()] } else { env_prefixes.clone() };
+        let dir = env_dir.as_ref().map(|d| rathkit_pack::graph::absolute(&cwd, d)).unwrap_or_else(|| cwd.clone());
+        let base = if public_path_given { options.public_path.as_str() } else { "/" };
+        let env = rathkit_pack::env::EnvOptions { dir: &dir, mode: &mode, serve, prefixes: &prefixes, base, files: env_files };
+        match rathkit_pack::env::definitions(&env, &|name| std::env::var(name).ok(), &options.defines.env_overrides()) {
+            Ok((definitions, read)) => {
+                for define in definitions {
+                    options.defines.add_default(define);
+                }
+                // A change to a .env file starts the build again (the values are in the output).
+                restart_files.extend(read);
+            }
+            Err(message) => {
+                eprintln!("error: {message}");
+                return Done::Exit(ExitCode::FAILURE);
+            }
+        }
+    }
     if use_tsconfig {
         let found = match &tsconfig_path {
             Some(path) => Some(std::path::absolute(path).unwrap_or_else(|_| path.into())),

@@ -164,3 +164,47 @@ fn an_unknown_option_is_an_error_and_not_a_file_name() {
     let out = run(&["bundle", "--define:A=1", "--sourcemap=inline", "--loader:.txt=text", "missing.js", "--outfile", "/dev/null"]);
     assert!(!String::from_utf8_lossy(&out.stderr).contains("unknown option"));
 }
+
+/// A fresh folder for one test.
+fn scratch(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("rkp-test-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a temp folder");
+    dir
+}
+
+/// Builds `main.js` in `dir` with `args` and returns what the bundle prints under Node (skipped without Node).
+fn build_and_run(dir: &std::path::Path, args: &[&str], envs: &[(&str, &str)]) -> String {
+    let built = Command::new(env!("CARGO_BIN_EXE_rkp")).current_dir(dir).envs(envs.iter().copied()).args(["bundle", "main.js", "--outfile", "out.mjs"]).args(args).output().expect("rkp starts");
+    assert!(built.status.success(), "{args:?}: {}", String::from_utf8_lossy(&built.stderr));
+    let run = Command::new("node").current_dir(dir).arg("out.mjs").output().expect("node starts");
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    String::from_utf8_lossy(&run.stdout).trim().to_string()
+}
+
+#[test]
+fn import_meta_env_has_the_mode_and_the_prefixed_names_of_the_env_files() {
+    if Command::new("node").arg("--version").output().is_err() {
+        return;
+    }
+    let dir = scratch("env");
+    let write = |name: &str, text: &str| std::fs::write(dir.join(name), text).unwrap();
+    write(".env", "VITE_A=file\nVITE_B=base\nSECRET=hidden\nVITE_REF=${VITE_B}-ref\nAPP_X=app\n");
+    write(".env.local", "VITE_B=local\n");
+    write(".env.staging", "VITE_A=staging\n");
+    write(
+        "main.js",
+        "const e = import.meta.env;\nconsole.log([e.MODE, e.DEV, e.PROD, e.SSR, e.BASE_URL, e.VITE_A, e.VITE_B, e.VITE_REF, e.SECRET, e.APP_X, Object.keys(e).length].map(String).join(' '));\n",
+    );
+    // A build: production, the files merged, the names without the prefix left out, a value referring to the final value of another.
+    assert_eq!(build_and_run(&dir, &[], &[]), "production false true false / file local local-ref undefined undefined 8");
+    // A mode of its own reads its file; a custom mode follows the command (a build is production).
+    assert_eq!(build_and_run(&dir, &["--mode", "staging"], &[]), "staging false true false / staging local local-ref undefined undefined 8");
+    assert_eq!(build_and_run(&dir, &["--mode", "development"], &[]), "development true false false / file local local-ref undefined undefined 8");
+    // The real environment wins over the files, and --define wins over both.
+    assert_eq!(build_and_run(&dir, &["--define:import.meta.env.VITE_B=\"defined\""], &[("VITE_A", "real")]), "production false true false / real defined local-ref undefined undefined 8");
+    // Another prefix, another folder, and no files at all.
+    assert_eq!(build_and_run(&dir, &["--env-prefix", "APP_"], &[]), "production false true false / undefined undefined undefined undefined app 6");
+    assert_eq!(build_and_run(&dir, &["--no-env-files"], &[]), "production false true false / undefined undefined undefined undefined undefined 5");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -41,6 +41,14 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   the built files (and their style sheets) in place, runs plugins' `transformIndexHtml` with the built files as `bundle`
   and the entry chunk, and copies `public/`. `<script type="module" src>` tags
   and `<link rel="stylesheet" href>` tags that point at files of the project are built, and the page points at the built files; links to other sites are left as written. The images, icons and media a page names (`<img src>`, `<link rel="icon">`, `<video poster>`, `url()` in `<style>`) are copied under a name with a hash; a file in `public/` stays where it is, and one that is nowhere stays as written (`srcset` and `style=""` attributes are not read). With ES modules (the default) a page's scripts and sheets are separate files and scripts that share code share a file. With `--format iife` everything is one file that the page loads once (the other script and sheet tags are removed). `--format cjs` is an error: a browser cannot load CommonJS.
+- `import.meta.env`, as Vite makes it: `MODE` (`production` for a build, `development` for `serve`, or `--mode`), `DEV`, `PROD`
+  (`--mode development` or `production` decides; any other mode follows the command), `SSR` (false) and `BASE_URL` (`/`, or
+  `--public-path`), and the variables of `.env`, `.env.local`, `.env.[mode]` and `.env.[mode].local` in the project folder (or
+  `--env-dir`) whose names start with `VITE_` (or `--env-prefix`, which can be given again); the rest of a `.env` file is not put
+  in the output. A later file wins, the real environment wins over the files, `--define:import.meta.env.NAME=...` wins over both,
+  and `$NAME`, `${NAME}` and `${NAME:-default}` in a value are replaced once the files are merged (not in single quotes).
+  `import.meta.env` alone is an object of all of these. `--no-env-files` reads no files; a change to a `.env` file starts a
+  build again when watching.
 - Vite's import forms: `./x.svg?raw` (text), `?url` (the copied file's address), `?inline` (a data URL), any other
   query stays on the module name for plugins (`?react`); `import.meta.glob("./dir/*.js", { eager, import, query, base })`
   (literal arguments; `*`, `**`, `?`, `[a-z]`, `{a,b}`, `!` to leave files out; a file added to a listed directory
@@ -221,7 +229,7 @@ rkp bundle ENTRY... [--outfile FILE | --outdir DIR --splitting] [--no-treeshake]
 rkp serve ENTRY... [--port N] [--host H] [the options above] [--define KEY=VALUE]... [--loader .ext=NAME]... [--asset-names T] [--public-path P] [--external NAME]... [--condition NAME]... [--main-field NAME]...
     [--alias NAME=PATH]... [--tsconfig FILE | --no-tsconfig]
     [--jsx automatic|classic] [--jsx-import-source S] [--jsx-factory F] [--jsx-fragment F]
-    [--experimental-decorators] [--decorator-metadata] [--strict-null-checks] [--original-paths] [--platform-browser]
+    [--experimental-decorators] [--decorator-metadata] [--strict-null-checks] [--original-paths] [--platform-browser] [--mode M] [--env-dir D] [--env-prefix P]... [--no-env-files]
 ```
 
 `tsconfig.json` is found automatically and supplies `paths`, `baseUrl`, `jsx`,
