@@ -133,7 +133,7 @@ function emit({ entries, outDir, tsConfigPath }) {
   return { written, errors: errors.length };
 }
 
-function generate({ name, exposes, outDir, tsConfigPath, typesFolder = '@mf-types', compiledTypesFolder = 'compiled-types' }) {
+function generate({ name, exposes, outDir, tsConfigPath, typesFolder = '@mf-types', compiledTypesFolder = 'compiled-types', additionalFiles = [], generateApi = true }) {
   const ts = loadTypeScript();
   if (!ts) {
     note('types were not written for the exposed modules: the typescript package is not installed');
@@ -141,14 +141,15 @@ function generate({ name, exposes, outDir, tsConfigPath, typesFolder = '@mf-type
   }
   const options = compilerOptions(ts, tsConfigPath);
   const files = exposes.map((e) => e.file);
-  const rootDir = files.reduce((common, file) => {
+  const rootFiles = [...files, ...additionalFiles];
+  const rootDir = rootFiles.reduce((common, file) => {
     const dir = path.dirname(file);
     while (!(dir + path.sep).startsWith(common + path.sep) && common !== path.dirname(common)) common = path.dirname(common);
     return common;
   }, path.dirname(files[0]));
   const work = fs.mkdtempSync(path.join(os.tmpdir(), 'rathkit-types-'));
   const compiled = path.join(work, compiledTypesFolder);
-  const program = ts.createProgram(files, { ...options, declaration: true, emitDeclarationOnly: true, noEmit: false, outDir: compiled, rootDir, declarationMap: false, sourceMap: false, composite: false, incremental: false, noEmitOnError: false, skipLibCheck: true, allowJs: true });
+  const program = ts.createProgram(rootFiles, { ...options, declaration: true, emitDeclarationOnly: true, noEmit: false, outDir: compiled, rootDir, declarationMap: false, sourceMap: false, composite: false, incremental: false, noEmitOnError: false, skipLibCheck: true, allowJs: true });
   const result = program.emit();
   const diagnostics = ts.getPreEmitDiagnostics(program).filter((d) => d.category === ts.DiagnosticCategory.Error);
   if (result.emitSkipped && !fs.existsSync(compiled)) {
@@ -161,7 +162,7 @@ function generate({ name, exposes, outDir, tsConfigPath, typesFolder = '@mf-type
   const typeFile = (file) => path.relative(rootDir, file).replace(/\.(tsx?|jsx?|mjs|cjs|mts|cts)$/, '').split(path.sep).join('/');
   const keys = exposes.map((e) => `${name}/${e.key.replace(/^\.\//, '')}`);
   const apis = `\n    export type RemoteKeys = ${keys.map((k) => `'${k}'`).join(' | ')};\n    type PackageType<T> = ${exposes.map((e, i) => `T extends '${keys[i]}' ? typeof import('./${compiledTypesFolder}/${typeFile(e.file)}')`).join(' :\n') || 'any'} : any;`;
-  entries.push(['apis.d.ts', Buffer.from(apis)]);
+  if (generateApi) entries.push(['apis.d.ts', Buffer.from(apis)]);
   const folder = path.join(outDir, typesFolder);
   fs.rmSync(folder, { recursive: true, force: true });
   for (const [file, data] of entries) {
@@ -169,18 +170,26 @@ function generate({ name, exposes, outDir, tsConfigPath, typesFolder = '@mf-type
     fs.writeFileSync(path.join(folder, file), data);
   }
   fs.writeFileSync(path.join(outDir, `${typesFolder}.zip`), zipWrite(entries));
-  fs.writeFileSync(path.join(outDir, `${typesFolder}.d.ts`), apis);
+  if (generateApi) fs.writeFileSync(path.join(outDir, `${typesFolder}.d.ts`), apis);
   fs.rmSync(work, { recursive: true, force: true });
   if (diagnostics.length) note(`${diagnostics.length} type error(s) in the exposed modules; the types were written anyway`);
-  return { written: true, zip: `${typesFolder}.zip`, api: `${typesFolder}.d.ts`, files: entries.length };
+  return { written: true, zip: `${typesFolder}.zip`, api: generateApi ? `${typesFolder}.d.ts` : '', files: entries.length, typeErrors: diagnostics.length };
 }
 
 // ---- reading the types of remotes ---------------------------------------------------------------------
 
-async function get(url, timeout = 5000) {
-  const response = await fetch(url, { signal: AbortSignal.timeout(timeout) });
-  if (!response.ok) throw new Error(`${url}: ${response.status}`);
-  return response;
+async function get(url, timeout = 5000, retries = 0) {
+  let last;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(timeout) });
+      if (!response.ok) throw new Error(`${url}: ${response.status}`);
+      return response;
+    } catch (error) {
+      last = error;
+    }
+  }
+  throw last;
 }
 
 const hasDefault = (text) => /export\s+default\b|export\s*\{[^}]*\bas\s+default\b[^}]*\}|export\s*\{\s*default\b/.test(text);
@@ -234,21 +243,28 @@ function linkModules(modules) {
   }
 }
 
-async function consume({ remotes, typesFolder = '@mf-types', updateTsConfig = false }) {
+async function consume({ remotes, typesFolder = '@mf-types', updateTsConfig = false, timeout = 5000, maxRetries = 0, typeUrls = {} }) {
   const root = path.resolve(cwd, typesFolder);
   const paths = {};
   const modules = {};
   const fetched = [];
+  const failed = [];
   const relative = (target) => './' + path.relative(cwd, target).split(path.sep).join('/');
   for (const remote of remotes) {
     try {
-      const manifestUrl = /\.json(?:$|[?#])/.test(remote.entry) ? remote.entry : new URL('mf-manifest.json', remote.entry).href;
-      const manifest = await (await get(manifestUrl)).json();
-      const types = manifest.metaData?.types;
-      if (!types?.zip) continue;
-      const publicPath = manifest.metaData.publicPath && manifest.metaData.publicPath !== 'auto' ? manifest.metaData.publicPath : manifestUrl;
-      const zipUrl = new URL(`${types.path ? types.path.replace(/\/?$/, '/') : ''}${types.zip}`, publicPath).href;
-      const zip = Buffer.from(await (await get(zipUrl, 15000)).arrayBuffer());
+      let zipUrl;
+      if (typeUrls[remote.name]?.zip) {
+        // The address of the types is given: no manifest is read.
+        zipUrl = new URL(typeUrls[remote.name].zip, remote.entry).href;
+      } else {
+        const manifestUrl = /\.json(?:$|[?#])/.test(remote.entry) ? remote.entry : new URL('mf-manifest.json', remote.entry).href;
+        const manifest = await (await get(manifestUrl, timeout, maxRetries)).json();
+        const types = manifest.metaData?.types;
+        if (!types?.zip) continue;
+        const publicPath = manifest.metaData.publicPath && manifest.metaData.publicPath !== 'auto' ? manifest.metaData.publicPath : manifestUrl;
+        zipUrl = new URL(`${types.path ? types.path.replace(/\/?$/, '/') : ''}${types.zip}`, publicPath).href;
+      }
+      const zip = Buffer.from(await (await get(zipUrl, Math.max(timeout, 15000), maxRetries)).arrayBuffer());
       const files = zipRead(zip);
       const folder = path.join(root, remote.name);
       // The same zip as last time: the files stay as they are (an editor watching them has nothing to read again).
@@ -276,12 +292,13 @@ async function consume({ remotes, typesFolder = '@mf-types', updateTsConfig = fa
       }
       fetched.push(remote.name);
     } catch (error) {
+      failed.push(remote.name);
       note(`types of the remote ${remote.name} were not read: ${error.message}`);
     }
   }
   linkModules(modules);
   if (updateTsConfig) mapPaths(paths);
-  return { fetched };
+  return { fetched, failed };
 }
 
 // Puts the shims for the remotes' modules in node_modules again from the declarations already in @mf-types, with no network:

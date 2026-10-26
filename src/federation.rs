@@ -92,6 +92,22 @@ pub struct Dts {
     pub consume_folder: String,
     /// Also map the remotes' modules in `tsconfig.json` (`paths`); off, the editor finds them through `node_modules`.
     pub update_ts_config: bool,
+    /// `generateTypes.abortOnError` / `consumeTypes.abortOnError`: a failure stops the build instead of being a warning.
+    pub abort_generate: bool,
+    pub abort_consume: bool,
+    /// `generateTypes.additionalFilesToCompile`: files described besides the exposed modules.
+    pub additional_files: Vec<String>,
+    /// `generateTypes.generateAPITypes`: write `apis.d.ts` and `@mf-types.d.ts` too.
+    pub generate_api: bool,
+    /// `generateTypes.outputDir`: the folder of the output that the types go in.
+    pub output_dir: Option<String>,
+    /// `consumeTypes.timeout` (milliseconds) and `maxRetries`.
+    pub timeout_ms: u64,
+    pub max_retries: u32,
+    /// `consumeTypes.remoteTypeUrls`: where a remote's types are, by remote name, `(zip, api)`.
+    pub remote_type_urls: Vec<(String, String, String)>,
+    /// `dev.disableHotTypesReload`: types are not read again while watching.
+    pub hot_types: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -113,6 +129,8 @@ pub struct Federation {
     pub share_strategy: String,
     pub runtime_plugins: Vec<PluginRef>,
     pub dts: Dts,
+    /// `dev.disableLiveReload` is not set: pages of hosts reload when this application builds again while serving.
+    pub live_reload: bool,
     /// The manifest's file name; `None` writes none.
     pub manifest: Option<String>,
     /// Where the files are served from, when it is known at build time (`auto` is the default).
@@ -161,42 +179,39 @@ impl std::fmt::Debug for Federation {
     }
 }
 
-/// Options of `ModuleFederationPlugin` (and of its `dts`) that are read and have no effect here, with the reason: a build that is meant
-/// to behave one way must not quietly behave another. Written to stderr once, when the options are read.
+/// Options of `ModuleFederationPlugin` that change what a build does and are not carried out here, said on stderr when the options are
+/// read: a build meant to behave one way must not quietly behave another. (Settings of how the real plugin is arranged inside webpack or
+/// rspack, such as `runtime`, `implementation`, `async`, `virtualRuntimeEntry` and the `treeShaking*` directories, change nothing a
+/// program can observe here and are accepted without a word.)
 fn warn_unused(options: &Json) {
-    const UNUSED: &[(&str, &str)] = &[
-        ("runtime", "there is one runtime, shared by every container"),
-        ("implementation", "the runtime is built in"),
-        ("virtualRuntimeEntry", "there is no virtual entry"),
-        ("experiments", "none of its settings apply"),
-        ("bridge", "the router bridge belongs to the real plugin (use --real-federation-plugin)"),
-        ("async", "an entry loads its shared packages without an async boundary file"),
-        ("dev", "its settings are for the dev server of the real plugin"),
-        ("treeShakingDir", "shared packages are tree-shaken in place"),
-        ("treeShakingSharedExcludePlugins", "shared packages are tree-shaken in place"),
-        ("treeShakingSharedPlugins", "shared packages are tree-shaken in place"),
-        ("injectTreeShakingUsedExports", "shared packages are tree-shaken in place"),
-    ];
-    for (key, reason) in UNUSED {
-        if options.get(key).is_some() {
-            eprintln!("warning: federation option `{key}` has no effect: {reason}");
+    let on = |value: Option<&Json>| matches!(value, Some(Json::Bool(true))) || matches!(value, Some(Json::Object(_)));
+    if on(options.get("bridge").and_then(|b| b.get("enableBridgeRouter"))) {
+        eprintln!("warning: federation option `bridge.enableBridgeRouter` has no effect: the router bridge belongs to the real plugin (use --real-federation-plugin)");
+    }
+    for key in ["externalRuntime", "provideExternalRuntime"] {
+        if on(options.get("experiments").and_then(|e| e.get(key))) {
+            eprintln!("warning: federation option `experiments.{key}` has no effect: the runtime is always part of the build");
         }
     }
-    const UNUSED_DTS: &[&str] = &["extraOptions", "implementation", "displayErrorInTerminal", "eager", "excludeChunk"];
-    const UNUSED_GENERATE: &[&str] = &["outputDir", "additionalFilesToCompile", "compileInChildProcess", "compilerInstance", "extractThirdParty", "extractRemoteTypes", "deleteTsConfig", "afterGenerate", "generateAPITypes", "abortOnError", "deleteTypesFolder"];
-    const UNUSED_CONSUME: &[&str] = &["remoteTypesFolder", "deleteTypesFolder", "maxRetries", "consumeAPITypes", "runtimePkgs", "remoteTypeUrls", "timeout", "family", "typesOnBuild", "abortOnError"];
-    if let Some(dts) = options.get("dts") {
-        for key in UNUSED_DTS {
-            if dts.get(key).is_some() {
-                eprintln!("warning: federation option `dts.{key}` has no effect");
-            }
+    let Some(dts) = options.get("dts") else { return };
+    for key in ["extraOptions", "implementation", "excludeChunk"] {
+        if dts.get(key).is_some() {
+            eprintln!("warning: federation option `dts.{key}` has no effect");
         }
-        for (section, keys) in [("generateTypes", UNUSED_GENERATE), ("consumeTypes", UNUSED_CONSUME)] {
-            for key in keys {
-                if dts.get(section).is_some_and(|s| s.get(key).is_some()) {
-                    eprintln!("warning: federation option `dts.{section}.{key}` has no effect");
-                }
-            }
+    }
+    let generate = dts.get("generateTypes");
+    for key in ["extractThirdParty", "extractRemoteTypes", "afterGenerate"] {
+        if generate.is_some_and(|g| g.get(key).is_some_and(|v| !matches!(v, Json::Bool(false)))) {
+            eprintln!("warning: federation option `dts.generateTypes.{key}` has no effect");
+        }
+    }
+    if let Some(compiler) = generate.and_then(|g| g.get("compilerInstance")).and_then(Json::as_str).filter(|c| *c != "tsc") {
+        eprintln!("warning: federation option `dts.generateTypes.compilerInstance` is {compiler:?}; types are written with the typescript package");
+    }
+    let consume = dts.get("consumeTypes");
+    for key in ["family", "runtimePkgs", "remoteTypesFolder", "consumeAPITypes"] {
+        if consume.is_some_and(|c| c.get(key).is_some_and(|v| !matches!(v, Json::Bool(false)))) {
+            eprintln!("warning: federation option `dts.consumeTypes.{key}` has no effect");
         }
     }
 }
@@ -459,7 +474,26 @@ impl Federation {
             compiled_types_folder: text("compiledTypesFolder", section("generateTypes")).unwrap_or_else(|| "compiled-types".to_string()),
             consume_folder: text("typesFolder", section("consumeTypes")).unwrap_or_else(|| "@mf-types".to_string()),
             update_ts_config: section("consumeTypes").and_then(|c| c.get("updateTsConfig")).and_then(Json::as_bool).unwrap_or(false),
+            abort_generate: section("generateTypes").and_then(|c| c.get("abortOnError")).and_then(Json::as_bool).unwrap_or(false),
+            abort_consume: section("consumeTypes").and_then(|c| c.get("abortOnError")).and_then(Json::as_bool).unwrap_or(false),
+            additional_files: match section("generateTypes").and_then(|c| c.get("additionalFilesToCompile")) {
+                Some(Json::Array(list)) => list.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
+                _ => Vec::new(),
+            },
+            generate_api: section("generateTypes").and_then(|c| c.get("generateAPITypes")).and_then(Json::as_bool).unwrap_or(true),
+            output_dir: text("outputDir", section("generateTypes")).filter(|d| !d.is_empty()),
+            timeout_ms: section("consumeTypes").and_then(|c| c.get("timeout")).and_then(Json::as_f64).map_or(5000, |t| t as u64),
+            max_retries: section("consumeTypes").and_then(|c| c.get("maxRetries")).and_then(Json::as_f64).map_or(0, |t| t as u32),
+            remote_type_urls: match section("consumeTypes").and_then(|c| c.get("remoteTypeUrls")) {
+                Some(Json::Object(entries)) => entries
+                    .iter()
+                    .filter_map(|(name, v)| Some((name.clone(), v.get("zip")?.as_str()?.to_string(), v.get("api").and_then(Json::as_str).unwrap_or("").to_string())))
+                    .collect(),
+                _ => Vec::new(),
+            },
+            hot_types: !matches!(options.get("dev"), Some(d) if d.get("disableHotTypesReload").and_then(Json::as_bool) == Some(true)),
         };
+        let live_reload = !matches!(options.get("dev"), Some(d) if d.get("disableLiveReload").and_then(Json::as_bool) == Some(true));
         Ok(Federation {
             name,
             filename,
@@ -472,6 +506,7 @@ impl Federation {
             share_strategy: options.get("shareStrategy").and_then(Json::as_str).unwrap_or("version-first").to_string(),
             runtime_plugins,
             dts,
+            live_reload,
             manifest,
             public_path: options.get("publicPath").and_then(Json::as_str).filter(|p| *p != "auto").map(String::from),
             public_path_code: options.get("getPublicPath").and_then(Json::as_str).map(String::from),
@@ -947,10 +982,10 @@ impl Federation {
 
     /// Declarations for what the application exposes, as files to add to the output. Empty when there is nothing to
     /// describe, or no TypeScript to do it with (a JavaScript project is not told).
-    fn generate_types(&self) -> (Vec<OutputFile>, Vec<String>) {
+    fn generate_types(&self) -> (Vec<OutputFile>, Vec<String>, Option<String>) {
         let mut messages = Vec::new();
         if !self.dts.generate || self.exposes.is_empty() {
-            return (Vec::new(), messages);
+            return (Vec::new(), messages, None);
         }
         let resolver = Resolver::new(ResolveOptions::default());
         let mut exposes = Vec::new();
@@ -961,32 +996,34 @@ impl Federation {
         }
         let typed = exposes.iter().any(|(_, p)| p.extension().is_some_and(|e| matches!(e.to_str(), Some("ts" | "tsx" | "mts" | "cts")))) || self.cwd.join("tsconfig.json").is_file();
         if !typed || exposes.is_empty() {
-            return (Vec::new(), messages);
+            return (Vec::new(), messages, None);
         }
         // The declarations are written to a folder of ours, new and private, and read from there.
         let out_dir = match private_dir("rathkit-types") {
             Ok(dir) => dir,
             Err(message) => {
                 messages.push(format!("types were not written: {message}"));
-                return (Vec::new(), messages);
+                return (Vec::new(), messages, None);
             }
         };
         let list = exposes.iter().map(|(k, p)| format!("{{\"key\":{},\"file\":{}}}", quote(k), quote(&p.to_string_lossy()))).collect::<Vec<_>>().join(",");
         let input = format!(
-            "{{\"command\":\"generate\",\"cwd\":{},\"name\":{},\"exposes\":[{list}],\"outDir\":{},\"tsConfigPath\":{},\"typesFolder\":{},\"compiledTypesFolder\":{}}}",
+            "{{\"command\":\"generate\",\"cwd\":{},\"name\":{},\"exposes\":[{list}],\"outDir\":{},\"tsConfigPath\":{},\"typesFolder\":{},\"compiledTypesFolder\":{},\"additionalFiles\":[{}],\"generateApi\":{}}}",
             quote(&self.cwd.to_string_lossy()),
             quote(&self.name),
             quote(&out_dir.to_string_lossy()),
             self.dts.ts_config.as_deref().map_or("null".to_string(), quote),
             quote(&self.dts.types_folder),
             quote(&self.dts.compiled_types_folder),
+            self.dts.additional_files.iter().map(|f| quote(&self.cwd.join(f).to_string_lossy())).collect::<Vec<_>>().join(","),
+            self.dts.generate_api,
         );
         let answer = match run_node(DTS, &input, &self.cwd) {
             Ok(answer) => answer,
             Err(message) => {
                 let _ = std::fs::remove_dir_all(&out_dir);
                 messages.push(format!("types were not written: {message}"));
-                return (Vec::new(), messages);
+                return (Vec::new(), messages, None);
             }
         };
         if let Some(Json::Array(notes)) = answer.get("messages") {
@@ -995,8 +1032,10 @@ impl Federation {
         if let Some(error) = answer.get("error").and_then(Json::as_str) {
             let _ = std::fs::remove_dir_all(&out_dir);
             messages.push(format!("types were not written: {}", error.lines().next().unwrap_or("")));
-            return (Vec::new(), messages);
+            return (Vec::new(), messages, None);
         }
+        let type_errors = answer.get("typeErrors").and_then(Json::as_f64).unwrap_or(0.0) as u64;
+        let abort = (self.dts.abort_generate && type_errors > 0).then(|| format!("{type_errors} type error(s) in the exposed modules (abortOnError)"));
         let mut files = Vec::new();
         if answer.get("written").and_then(Json::as_bool) == Some(true) {
             fn walk(dir: &Path, base: &str, out: &mut Vec<(String, Vec<u8>)>) {
@@ -1015,20 +1054,28 @@ impl Federation {
             walk(&out_dir, "", &mut found);
             found.sort();
             for (name, bytes) in found {
+                let name = match &self.dts.output_dir {
+                    Some(dir) => format!("{}/{name}", dir.trim_matches('/')),
+                    None => name,
+                };
                 files.push(OutputFile { name, code: String::new(), map: None, data: Some(bytes), original: None });
             }
         }
         let _ = std::fs::remove_dir_all(&out_dir);
-        (files, messages)
+        (files, messages, abort)
     }
 
     /// Downloads the declarations of the remotes this application imports from, into the project. Remotes that are not
     /// up, or publish none, are skipped; this is for the editor, and a build does not depend on it. While watching, it
     /// happens beside the build and is tried again, at most every ten seconds, until every remote has answered.
-    pub fn read_types(self: &Arc<Self>, background: bool) {
+    pub fn read_types(self: &Arc<Self>, background: bool) -> Result<(), String> {
         use std::sync::atomic::Ordering::SeqCst;
         if !self.dts.consume || self.remotes.is_empty() || !self.cwd.join("tsconfig.json").is_file() {
-            return;
+            return Ok(());
+        }
+        // `dev.disableHotTypesReload`: after the first read, watching leaves the types alone.
+        if background && !self.dts.hot_types && self.types_read.load(SeqCst) {
+            return Ok(());
         }
         // Installing packages removes the folders that stand for the remotes in node_modules; they are put back from what was read.
         if self.types_read.load(SeqCst) && background {
@@ -1041,11 +1088,11 @@ impl Federation {
         // A one-off build reads once; while watching, the remotes are asked again (at most every ten seconds), since a remote that
         // is up may have new types, and a zip that has not changed leaves the files alone.
         if self.types_read.load(SeqCst) && !background {
-            return;
+            return Ok(());
         }
         if background {
             if self.last_read.lock().expect("last_read").is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(std::env::var("RATHKIT_TYPES_RETRY_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(10_000))) || self.reading.swap(true, SeqCst) {
-                return;
+                return Ok(());
             }
             *self.last_read.lock().expect("last_read") = Some(std::time::Instant::now());
             let this = self.clone();
@@ -1053,14 +1100,19 @@ impl Federation {
                 this.read_types_now();
                 this.reading.store(false, SeqCst);
             });
+            Ok(())
         } else {
-            self.read_types_now();
+            let failed = self.read_types_now();
+            match (self.dts.abort_consume, failed.is_empty()) {
+                (true, false) => Err(format!("the types of {} could not be read (abortOnError)", failed.join(", "))),
+                _ => Ok(()),
+            }
         }
     }
 
-    fn read_types_now(&self) {
+    fn read_types_now(&self) -> Vec<String> {
         let remotes = self.remotes.iter().filter(|r| !matches!(r.kind.as_str(), "code" | "internal")).map(|r| format!("{{\"name\":{},\"entry\":{}}}", quote(&r.name), quote(&r.entry))).collect::<Vec<_>>().join(",");
-        let input = format!("{{\"command\":\"consume\",\"cwd\":{},\"remotes\":[{remotes}],\"typesFolder\":{},\"updateTsConfig\":{}}}", quote(&self.cwd.to_string_lossy()), quote(&self.dts.consume_folder), self.dts.update_ts_config);
+        let input = format!("{{\"command\":\"consume\",\"cwd\":{},\"remotes\":[{remotes}],\"typesFolder\":{},\"updateTsConfig\":{},\"timeout\":{},\"maxRetries\":{},\"typeUrls\":{{{}}}}}", quote(&self.cwd.to_string_lossy()), quote(&self.dts.consume_folder), self.dts.update_ts_config, self.dts.timeout_ms, self.dts.max_retries, self.dts.remote_type_urls.iter().map(|(n, z, a)| format!("{}:{{\"zip\":{},\"api\":{}}}", quote(n), quote(z), quote(a))).collect::<Vec<_>>().join(","));
         match run_node(DTS, &input, &self.cwd) {
             Ok(answer) => {
                 if let Some(Json::Array(notes)) = answer.get("messages") {
@@ -1070,11 +1122,16 @@ impl Federation {
                 }
                 let got = answer.get("fetched").and_then(Json::as_array).map_or(0, |a| a.len());
                 *self.types_remotes.lock().expect("types_remotes") = answer.get("fetched").and_then(Json::as_array).map_or(Vec::new(), |a| a.iter().filter_map(|n| n.as_str().map(String::from)).collect());
+                let failed: Vec<String> = answer.get("failed").and_then(Json::as_array).map_or(Vec::new(), |a| a.iter().filter_map(|n| n.as_str().map(String::from)).collect());
                 if got == self.remotes.iter().filter(|r| !matches!(r.kind.as_str(), "code" | "internal")).count() {
                     self.types_read.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
+                failed
             }
-            Err(message) => eprintln!("warning: types of remotes were not read: {message}"),
+            Err(message) => {
+                eprintln!("warning: types of remotes were not read: {message}");
+                self.remotes.iter().filter(|r| !matches!(r.kind.as_str(), "code" | "internal")).map(|r| r.name.clone()).collect()
+            }
         }
     }
 
@@ -1085,7 +1142,7 @@ impl Federation {
 
     /// The declarations of the exposed modules. The first run is part of the build (the manifest says whether there
     /// are any); when building again and again, the earlier ones are used and new ones are written beside the build.
-    fn types_files(self: &Arc<Self>, repeated: bool) -> Vec<OutputFile> {
+    fn types_files(self: &Arc<Self>, repeated: bool) -> Result<Vec<OutputFile>, String> {
         use std::sync::atomic::Ordering::SeqCst;
         let cached = self.types_cache.lock().expect("types_cache").clone();
         match cached {
@@ -1093,7 +1150,7 @@ impl Federation {
                 if !self.types_running.swap(true, SeqCst) {
                     let this = self.clone();
                     std::thread::spawn(move || {
-                        let (files, messages) = this.generate_types();
+                        let (files, messages, _) = this.generate_types();
                         for message in messages {
                             eprintln!("warning: {message}");
                         }
@@ -1106,15 +1163,18 @@ impl Federation {
                         this.types_running.store(false, SeqCst);
                     });
                 }
-                files
+                Ok(files)
             }
             _ => {
-                let (files, messages) = self.generate_types();
+                let (files, messages, abort) = self.generate_types();
                 for message in messages {
                     eprintln!("warning: {message}");
                 }
+                if let Some(reason) = abort {
+                    return Err(reason);
+                }
                 *self.types_cache.lock().expect("types_cache") = Some(files.clone());
-                files
+                Ok(files)
             }
         }
     }
@@ -1174,7 +1234,7 @@ impl Federation {
         let core_file = output.chunks.iter().find(|c| c.facade_module.as_deref() == Some(core.as_str())).map(|c| c.file.clone()).ok_or("the federation runtime was not built; the build needs the esm format with splitting")?;
         if !self.exposes.is_empty() {
             let styles: Vec<(String, Vec<String>)> = self.expose_assets(output).into_iter().filter(|(_, _, _, css)| !css.is_empty()).map(|(e, _, _, css)| (e.key.clone(), css)).collect();
-            output.files.push(OutputFile { name: self.filename.clone(), code: self.remote_entry(&core_file, hot, &styles), map: None, data: None, original: None });
+            output.files.push(OutputFile { name: self.filename.clone(), code: self.remote_entry(&core_file, hot && self.live_reload, &styles), map: None, data: None, original: None });
         }
         for reason in self.shaken_skipped.lock().expect("shaken_skipped").iter() {
             eprintln!("warning: no copy of {reason} was written with only the exports in use; it is shared whole");
@@ -1184,8 +1244,12 @@ impl Federation {
         if std::env::var_os("RATHKIT_TIMING").is_some() {
             eprintln!("  federation: copies with only some exports: {:.1} ms", started.elapsed().as_secs_f64() * 1000.0);
         }
-        let types = self.types_files(repeated);
-        let has_types = types.iter().any(|f| f.name == format!("{}.zip", self.dts.types_folder));
+        let types = self.types_files(repeated)?;
+        let zip_name = match &self.dts.output_dir {
+            Some(dir) => format!("{}/{}.zip", dir.trim_matches('/'), self.dts.types_folder),
+            None => format!("{}.zip", self.dts.types_folder),
+        };
+        let has_types = types.iter().any(|f| f.name == zip_name);
         output.files.extend(types);
         if let Some(name) = &self.manifest {
             let manifest = self.manifest_json(output, has_types);
@@ -1327,7 +1391,7 @@ impl Federation {
             .collect::<Vec<_>>();
         let public_path = self.public_path.as_deref().unwrap_or("auto");
         format!(
-            "{{\n  \"id\": {name},\n  \"name\": {name},\n  \"metaData\": {{\n    \"name\": {name},\n    \"type\": \"app\",\n    \"buildInfo\": {{ \"buildVersion\": {version}, \"buildName\": {name} }},\n    \"remoteEntry\": {{ \"name\": {file}, \"path\": \"\", \"type\": {kind} }},\n    \"types\": {{ \"path\": \"\", \"name\": \"\", \"zip\": {zip}, \"api\": {api} }},\n    \"globalName\": {global},\n    \"pluginVersion\": \"rathkit-pack\",\n    \"publicPath\": {public}\n  }},\n  \"shared\": [\n{shared}\n  ],\n  \"remotes\": [\n{remotes}\n  ],\n  \"exposes\": [\n{exposes}\n  ]\n}}\n",
+            "{{\n  \"id\": {name},\n  \"name\": {name},\n  \"metaData\": {{\n    \"name\": {name},\n    \"type\": \"app\",\n    \"buildInfo\": {{ \"buildVersion\": {version}, \"buildName\": {name} }},\n    \"remoteEntry\": {{ \"name\": {file}, \"path\": \"\", \"type\": {kind} }},\n    \"types\": {{ \"path\": {types_path}, \"name\": \"\", \"zip\": {zip}, \"api\": {api} }},\n    \"globalName\": {global},\n    \"pluginVersion\": \"rathkit-pack\",\n    \"publicPath\": {public}\n  }},\n  \"shared\": [\n{shared}\n  ],\n  \"remotes\": [\n{remotes}\n  ],\n  \"exposes\": [\n{exposes}\n  ]\n}}\n",
             name = quote(&self.name),
             version = quote(self.version.as_deref().unwrap_or("local")),
             file = quote(&self.filename),
@@ -1340,7 +1404,8 @@ impl Federation {
             }),
             global = quote(&self.library_name),
             zip = quote(&if has_types { format!("{}.zip", self.dts.types_folder) } else { String::new() }),
-            api = quote(&if has_types { format!("{}.d.ts", self.dts.types_folder) } else { String::new() }),
+            api = quote(&if has_types && self.dts.generate_api { format!("{}.d.ts", self.dts.types_folder) } else { String::new() }),
+            types_path = quote(self.dts.output_dir.as_deref().map_or("", |d| d.trim_matches('/'))),
             public = quote(public_path),
             shared = shared.join(",\n"),
             remotes = remotes.join(",\n"),

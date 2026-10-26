@@ -184,20 +184,87 @@ const visit = async (url) => {
   }
 };
 
-scenario('getPublicPath sets where the container loads from, and options with no effect are said so', async () => {
+scenario('getPublicPath sets where the container loads from, and options that change nothing here are named', async () => {
   const dist = await build('remote', {
     as: 'remote-options',
     patch: withOption('mf.json', (j) => {
       j.getPublicPath = "return 'https://cdn.example/app'";
+      // Arrangements inside the real plugin: accepted without a word.
       j.runtime = 'runtime';
-      j.dev = { disableLiveReload: true };
-      j.dts = { generateTypes: { abortOnError: true }, consumeTypes: { timeout: 1 } };
+      j.implementation = 'x';
+      j.async = true;
+      j.dev = { disableLiveReload: true, disableDynamicRemoteTypeHints: true };
+      j.dts = { generateTypes: { deleteTypesFolder: true, compileInChildProcess: true }, consumeTypes: { timeout: 1000, maxRetries: 1, deleteTypesFolder: true } };
+      // Behavior this does not carry out: said.
+      j.bridge = { enableBridgeRouter: true };
+      j.dts.generateTypes.extractThirdParty = true;
+      j.dts.consumeTypes.family = 4;
     }),
   });
   const entry = readFileSync(join(dist, 'remoteEntry.js'), 'utf8');
   check('the function body is the base address (with a slash added)', entry.includes("return 'https://cdn.example/app'") && entry.includes("p.endsWith('/')"), entry.slice(0, 400));
-  for (const key of ['`runtime`', '`dev`', '`dts.generateTypes.abortOnError`', '`dts.consumeTypes.timeout`']) check(`a warning names ${key}`, lastStderr.includes(key), lastStderr);
-  check('options that do work are not warned about', !lastStderr.includes('`getPublicPath`') && !lastStderr.includes('`shared`'), lastStderr);
+  for (const key of ['`bridge.enableBridgeRouter`', '`dts.generateTypes.extractThirdParty`', '`dts.consumeTypes.family`']) check(`a warning names ${key}`, lastStderr.includes(key), lastStderr);
+  for (const key of ['runtime', 'implementation', 'async', 'dev', 'abortOnError', 'timeout', 'deleteTypesFolder', 'compileInChildProcess', 'getPublicPath']) check(`${key} is not warned about`, !lastStderr.includes('`' + key) && !lastStderr.includes('.' + key + '`'), lastStderr);
+});
+
+scenario('dts options: outputDir, generateAPITypes, additionalFilesToCompile, abortOnError, and a remote whose types cannot be read', async () => {
+  if (!existsSync(join(bench, 'node_modules', 'typescript'))) return;
+  const dist = await build('remote-types', {
+    entry: 'src/index.ts',
+    as: 'remote-types-options',
+    patch: (dir) => {
+      writeFileSync(join(dir, 'src', 'extra.ts'), 'export const extra: number = 1;\n');
+      withOption('mf.json', (j) => (j.dts = { generateTypes: { outputDir: 'types-out', generateAPITypes: false, additionalFilesToCompile: ['src/extra.ts'] } }))(dir);
+    },
+  });
+  check('the types are in outputDir', existsSync(join(dist, 'types-out', '@mf-types.zip')) && existsSync(join(dist, 'types-out', '@mf-types', 'compiled-types', 'Button.d.ts')));
+  check('an additional file is described', existsSync(join(dist, 'types-out', '@mf-types', 'compiled-types', 'extra.d.ts')));
+  check('without generateAPITypes there is no api file', !existsSync(join(dist, 'types-out', '@mf-types.d.ts')) && !existsSync(join(dist, 'types-out', '@mf-types', 'apis.d.ts')));
+  const manifest = JSON.parse(readFileSync(join(dist, 'mf-manifest.json'), 'utf8'));
+  check('the manifest says where', manifest.metaData.types.path === 'types-out' && manifest.metaData.types.zip === '@mf-types.zip' && manifest.metaData.types.api === '', JSON.stringify(manifest.metaData.types));
+
+  const withError = (abort) => (dir) => {
+    writeFileSync(join(dir, 'src', 'Button.ts'), readFileSync(join(dir, 'src', 'Button.ts'), 'utf8') + "export const broken: number = 'text';\n");
+    withOption('mf.json', (j) => (j.dts = { generateTypes: { abortOnError: abort } }))(dir);
+  };
+  await build('remote-types', { entry: 'src/index.ts', as: 'remote-types-lenient', patch: withError(false) });
+  check('a type error is a warning by default', /type error/.test(lastStderr), lastStderr);
+  let refused = '';
+  try {
+    await build('remote-types', { entry: 'src/index.ts', as: 'remote-types-strict', patch: withError(true) });
+  } catch (error) {
+    refused = String(error.message);
+  }
+  check('with abortOnError a type error stops the build', /abortOnError/.test(refused), refused);
+
+  // A remote that is down: a warning, or with abortOnError an error.
+  const down = (abort) => withOption('mf.json', (j) => {
+    j.remotes = { r3: 'r3@http://localhost:4998/remoteEntry.js' };
+    j.dts = { consumeTypes: { abortOnError: abort, timeout: 500 } };
+  });
+  await build('host-types', { entry: 'src/index.ts', as: 'host-types-down', links: false, patch: down(false) });
+  check('types that cannot be read are a warning', /types of the remote r3 were not read/.test(lastStderr), lastStderr);
+  refused = '';
+  try {
+    await build('host-types', { entry: 'src/index.ts', as: 'host-types-down-strict', links: false, patch: down(true) });
+  } catch (error) {
+    refused = String(error.message);
+  }
+  check('with abortOnError they stop the build', /could not be read/.test(refused), refused);
+
+  // remoteTypeUrls names where the types are, so the remote itself need not be up.
+  serve(4997, dist);
+  const hostDir = copy('host-types', 'host-types-urls', false);
+  await build('host-types', {
+    entry: 'src/index.ts',
+    as: 'host-types-urls',
+    links: false,
+    patch: withOption('mf.json', (j) => {
+      j.remotes = { r3: 'r3@http://localhost:4998/remoteEntry.js' };
+      j.dts = { consumeTypes: { remoteTypeUrls: { r3: { zip: 'http://localhost:4997/types-out/@mf-types.zip', api: '' } } } };
+    }),
+  });
+  check('types are read from the given address', existsSync(join(hostDir, '@mf-types', 'r3', 'compiled-types', 'Button.d.ts')) && !/were not read/.test(lastStderr), lastStderr);
 });
 
 scenario('a host and a remote built by rathkit-pack', async () => {

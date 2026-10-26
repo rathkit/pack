@@ -78,9 +78,9 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   binding, a trailing comma in a call or parameter list, and object spread (`__spreadValues` and `__spreadProps`, which keep getters
   and methods) and object rest (`__objRest`) in a declaration, a function parameter (also of an arrow with an expression body)
   or a `for of`, and class fields, private members (`#x`, private methods and accessors, `#x in o`) and static blocks
-  (`__publicField`, and a `WeakMap` or `WeakSet` per private name, as esbuild does), and async functions, methods and arrows (generators run by `__async`, each `await` a `yield`), `for await` loops and async generators (`__forAwait`, `__asyncGenerator`, and `yield*` through `__yieldStar`), and `super` inside an async method (read through an accessor the method defines). `es2015` is the lowest target. Anything the target cannot have and this
+  (`__publicField`, and a `WeakMap` or `WeakSet` per private name, as esbuild does), and async functions, methods and arrows (generators run by `__async`, each `await` a `yield`), `for await` loops and async generators (`__forAwait`, `__asyncGenerator`, and `yield*` through `__yieldStar`), and `super` inside an async method or arrow (read and written through accessors made where the `super` is valid). `es2015` is the lowest target. Anything the target cannot have and this
   cannot rewrite stops the build with a message that names it and the target, never passes through: BigInt literals and top-level
-  await can never be rewritten, nor are `||=` `&&=` `??=` `**=` or a computed key with an operator on a `super` property in an async method, `super` in an async arrow that is a class field, decorators together with
+  await can never be rewritten, nor are decorators together with
   class fields, `super` in a private method or a static initializer, a tagged template on a private member, or object rest anywhere else (nested in another pattern, in an assignment, in `catch`), or a `__proto__`
   property after a spread. Regular expression syntax and library functions are not looked at, and engine targets such
   as `chrome80` are not supported. Checked by running programs as written and rewritten for every target in plain, minified,
@@ -205,9 +205,15 @@ rkp bundle src/main.ts --outfile dist/app.mjs
     or `generateTypes` / `consumeTypes` set to `false`, turn either half off. While watching, types are written and read
     beside the build.
   - `getPublicPath` (the body of a function that returns the address the container's files are served from) is used for the
-    container. Options that are read and have no effect here (`runtime`, `implementation`, `experiments`, `bridge`, `async`,
-    `dev`, the `treeShaking*` directories, and the `dts` settings that belong to the real plugin's compiler) are named in a warning
-    on stderr rather than ignored without a word.
+    container. `dts.generateTypes` honors `outputDir`, `generateAPITypes`, `additionalFilesToCompile` and `abortOnError` (a type
+    error stops the build; by default it is a warning), and `dts.consumeTypes` honors `timeout`, `maxRetries`, `remoteTypeUrls`
+    (an object of `{ zip, api }` by remote name) and `abortOnError` (types that cannot be read stop the build). `dev.disableLiveReload`
+    stops pages from reloading when a served remote builds again, and `dev.disableHotTypesReload` stops types being read again while
+    watching. Settings of how the real plugin is arranged inside webpack or rspack (`runtime`, `implementation`, `async`,
+    `virtualRuntimeEntry`, the `treeShaking*` directories, `deleteTypesFolder`) change nothing a program can see and are accepted.
+    What is not carried out is named in a warning on stderr: `bridge.enableBridgeRouter`, `experiments.externalRuntime`, a
+    `compilerInstance` other than `tsc`, `extractThirdParty`, `extractRemoteTypes`, `afterGenerate`, and the `consumeTypes` settings
+    `family`, `runtimePkgs`, `remoteTypesFolder` and `consumeAPITypes`.
   - `serve` does the same in development: the build is in memory, `remoteEntry.js` and the manifest are served to pages
     of other local dev servers (`--cors-origin ORIGIN` adds other origins), and a change rebuilds the remote and
     reloads the pages of hosts that use it.

@@ -1325,7 +1325,10 @@ fn run_build(job: &Job) -> Outcome {
     let mut entry_names: Vec<Option<String>> = vec![None; entries.len()];
     let mut seen_chunks: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Some(federation) = &options.federation {
-        federation.read_types(job.watch);
+        if let Err(message) = federation.read_types(job.watch) {
+            eprintln!("error: {message}");
+            return outcome;
+        }
     }
     let graph = loop {
         let graph = match &options.federation {
