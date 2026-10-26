@@ -70,6 +70,7 @@ const copy = (name, as = name, links = true) => {
   }
   return copies.get(as);
 };
+let lastStderr = '';
 const build = async (name, { entry = 'src/index.js', args = [], patch, as = name, links = true } = {}) => {
   const dir = copy(name, as, links);
   if (patch) patch(dir);
@@ -83,6 +84,7 @@ const build = async (name, { entry = 'src/index.js', args = [], patch, as = name
     child.on('close', (status) => resolve({ status, stderr }));
   });
   if (r.status !== 0) throw new Error(`building ${name}: ${r.stderr}`);
+  lastStderr = r.stderr;
   if (existsSync(join(dir, 'index.html'))) cpSync(join(dir, 'index.html'), join(dir, 'dist', 'index.html'));
   return join(dir, 'dist');
 };
@@ -181,6 +183,22 @@ const visit = async (url) => {
     page.close();
   }
 };
+
+scenario('getPublicPath sets where the container loads from, and options with no effect are said so', async () => {
+  const dist = await build('remote', {
+    as: 'remote-options',
+    patch: withOption('mf.json', (j) => {
+      j.getPublicPath = "return 'https://cdn.example/app'";
+      j.runtime = 'runtime';
+      j.dev = { disableLiveReload: true };
+      j.dts = { generateTypes: { abortOnError: true }, consumeTypes: { timeout: 1 } };
+    }),
+  });
+  const entry = readFileSync(join(dist, 'remoteEntry.js'), 'utf8');
+  check('the function body is the base address (with a slash added)', entry.includes("return 'https://cdn.example/app'") && entry.includes("p.endsWith('/')"), entry.slice(0, 400));
+  for (const key of ['`runtime`', '`dev`', '`dts.generateTypes.abortOnError`', '`dts.consumeTypes.timeout`']) check(`a warning names ${key}`, lastStderr.includes(key), lastStderr);
+  check('options that do work are not warned about', !lastStderr.includes('`getPublicPath`') && !lastStderr.includes('`shared`'), lastStderr);
+});
 
 scenario('a host and a remote built by rathkit-pack', async () => {
   const remote = await build('remote');

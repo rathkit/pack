@@ -204,6 +204,10 @@ rkp bundle src/main.ts --outfile dist/app.mjs
     `dts: { consumeTypes: { updateTsConfig: true } }` also adds a `paths` entry per module to `tsconfig.json`. `dts: false`,
     or `generateTypes` / `consumeTypes` set to `false`, turn either half off. While watching, types are written and read
     beside the build.
+  - `getPublicPath` (the body of a function that returns the address the container's files are served from) is used for the
+    container. Options that are read and have no effect here (`runtime`, `implementation`, `experiments`, `bridge`, `async`,
+    `dev`, the `treeShaking*` directories, and the `dts` settings that belong to the real plugin's compiler) are named in a warning
+    on stderr rather than ignored without a word.
   - `serve` does the same in development: the build is in memory, `remoteEntry.js` and the manifest are served to pages
     of other local dev servers (`--cors-origin ORIGIN` adds other origins), and a change rebuilds the remote and
     reloads the pages of hosts that use it.

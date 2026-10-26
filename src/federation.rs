@@ -117,6 +117,8 @@ pub struct Federation {
     pub manifest: Option<String>,
     /// Where the files are served from, when it is known at build time (`auto` is the default).
     pub public_path: Option<String>,
+    /// `getPublicPath`: the body of a function that returns the address the container's files are served from.
+    pub public_path_code: Option<String>,
     pub version: Option<String>,
     cwd: PathBuf,
     files: RwLock<Arc<HashMap<PathBuf, String>>>,
@@ -156,6 +158,46 @@ pub struct Federation {
 impl std::fmt::Debug for Federation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Federation({})", self.name)
+    }
+}
+
+/// Options of `ModuleFederationPlugin` (and of its `dts`) that are read and have no effect here, with the reason: a build that is meant
+/// to behave one way must not quietly behave another. Written to stderr once, when the options are read.
+fn warn_unused(options: &Json) {
+    const UNUSED: &[(&str, &str)] = &[
+        ("runtime", "there is one runtime, shared by every container"),
+        ("implementation", "the runtime is built in"),
+        ("virtualRuntimeEntry", "there is no virtual entry"),
+        ("experiments", "none of its settings apply"),
+        ("bridge", "the router bridge belongs to the real plugin (use --real-federation-plugin)"),
+        ("async", "an entry loads its shared packages without an async boundary file"),
+        ("dev", "its settings are for the dev server of the real plugin"),
+        ("treeShakingDir", "shared packages are tree-shaken in place"),
+        ("treeShakingSharedExcludePlugins", "shared packages are tree-shaken in place"),
+        ("treeShakingSharedPlugins", "shared packages are tree-shaken in place"),
+        ("injectTreeShakingUsedExports", "shared packages are tree-shaken in place"),
+    ];
+    for (key, reason) in UNUSED {
+        if options.get(key).is_some() {
+            eprintln!("warning: federation option `{key}` has no effect: {reason}");
+        }
+    }
+    const UNUSED_DTS: &[&str] = &["extraOptions", "implementation", "displayErrorInTerminal", "eager", "excludeChunk"];
+    const UNUSED_GENERATE: &[&str] = &["outputDir", "additionalFilesToCompile", "compileInChildProcess", "compilerInstance", "extractThirdParty", "extractRemoteTypes", "deleteTsConfig", "afterGenerate", "generateAPITypes", "abortOnError", "deleteTypesFolder"];
+    const UNUSED_CONSUME: &[&str] = &["remoteTypesFolder", "deleteTypesFolder", "maxRetries", "consumeAPITypes", "runtimePkgs", "remoteTypeUrls", "timeout", "family", "typesOnBuild", "abortOnError"];
+    if let Some(dts) = options.get("dts") {
+        for key in UNUSED_DTS {
+            if dts.get(key).is_some() {
+                eprintln!("warning: federation option `dts.{key}` has no effect");
+            }
+        }
+        for (section, keys) in [("generateTypes", UNUSED_GENERATE), ("consumeTypes", UNUSED_CONSUME)] {
+            for key in keys {
+                if dts.get(section).is_some_and(|s| s.get(key).is_some()) {
+                    eprintln!("warning: federation option `dts.{section}.{key}` has no effect");
+                }
+            }
+        }
     }
 }
 
@@ -208,6 +250,7 @@ impl Federation {
     /// Reads the options of a `ModuleFederationPlugin`, as JSON.
     pub fn from_json(options: &Json, cwd: &Path) -> Result<Federation, String> {
         let name = options.get("name").and_then(Json::as_str).ok_or("module federation needs a `name`")?.to_string();
+        warn_unused(options);
         let library = options.get("library");
         let library_type = library.and_then(|l| l.get("type")).and_then(Json::as_str).unwrap_or("var").to_string();
         let library_name = library.and_then(|l| l.get("name")).and_then(Json::as_str).unwrap_or(&name).to_string();
@@ -431,6 +474,7 @@ impl Federation {
             dts,
             manifest,
             public_path: options.get("publicPath").and_then(Json::as_str).filter(|p| *p != "auto").map(String::from),
+            public_path_code: options.get("getPublicPath").and_then(Json::as_str).map(String::from),
             version: options.get("version").and_then(Json::as_str).map(String::from),
             cwd: cwd.to_path_buf(),
             files: RwLock::new(Arc::new(HashMap::new())),
@@ -1154,6 +1198,8 @@ impl Federation {
     fn remote_entry(&self, core_file: &str, hot: bool, styles: &[(String, Vec<String>)]) -> String {
         let file = quote(core_file);
         let base = match &self.public_path {
+            // `getPublicPath` is the body of a function; its answer gets the trailing slash the files are joined with.
+            _ if self.public_path_code.is_some() => format!("((p) => p.endsWith('/') ? p : p + '/')((function () {{ {} }})())", self.public_path_code.as_deref().unwrap_or("")),
             Some(p) => quote(&if p.ends_with('/') { p.clone() } else { format!("{p}/") }),
             // SystemJS runs the module later, when there is no current script; it says where the module is.
             None if self.library_type == "system" => "context.meta.url.slice(0, context.meta.url.lastIndexOf('/') + 1)".to_string(),
@@ -1170,7 +1216,7 @@ impl Federation {
         };
         let get = if styles.is_empty() { "core().then((c) => c.container.get(module))".to_string() } else { "Promise.all([sheets(module), core().then((c) => c.container.get(module))]).then((both) => both[1])".to_string() };
         if self.library_type == "module" {
-            let start = if self.public_path.is_some() { base.clone() } else { "(import.meta.url.slice(0, import.meta.url.lastIndexOf('/') + 1))".to_string() };
+            let start = if self.public_path.is_some() || self.public_path_code.is_some() { base.clone() } else { "(import.meta.url.slice(0, import.meta.url.lastIndexOf('/') + 1))".to_string() };
             return format!(
                 "const base = {start};\n{sheets}const core = () => import(/* @vite-ignore */ new URL({file}, base).href);\nexport const get = (module) => {get};\nexport const init = (scope, initScope, options) => core().then((c) => c.container.init(scope, initScope, options));\n",
             );
