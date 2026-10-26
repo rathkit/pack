@@ -50,7 +50,7 @@ class BuildError extends Error {
   }
 }
 
-const KEYS = new Set(['entries', 'cwd', 'env', 'signal', 'outfile', 'outdir', 'format', 'globalName', 'globals', 'minify', 'keepNames', 'sourcemap', 'sourcesContent', 'splitting', 'treeShaking', 'platform', 'external', 'conditions', 'mainFields', 'alias', 'define', 'loader', 'assetNames', 'publicPath', 'jsx', 'jsxImportSource', 'jsxFactory', 'jsxFragment', 'decoratorMetadata', 'experimentalDecorators', 'strictNullChecks', 'tsconfig', 'config', 'mode', 'envDir', 'envPrefix', 'envFiles', 'banner', 'footer', 'drop', 'packages', 'resolveExtensions', 'preserveSymlinks', 'metafile', 'pure', 'entryNames', 'chunkNames', 'outExtension', 'legalComments', 'inject', 'federation', 'originalPaths', 'corsOrigins', 'port', 'host']);
+const KEYS = new Set(['entries', 'cwd', 'env', 'signal', 'outfile', 'outdir', 'format', 'globalName', 'globals', 'minify', 'keepNames', 'sourcemap', 'sourcesContent', 'splitting', 'treeShaking', 'platform', 'external', 'conditions', 'mainFields', 'alias', 'define', 'loader', 'assetNames', 'publicPath', 'jsx', 'jsxImportSource', 'jsxFactory', 'jsxFragment', 'decoratorMetadata', 'experimentalDecorators', 'strictNullChecks', 'tsconfig', 'config', 'mode', 'envDir', 'envPrefix', 'envFiles', 'banner', 'footer', 'drop', 'packages', 'resolveExtensions', 'preserveSymlinks', 'metafile', 'pure', 'entryNames', 'chunkNames', 'outExtension', 'legalComments', 'inject', 'jsxDev', 'tsconfigRaw', 'federation', 'originalPaths', 'corsOrigins', 'port', 'host']);
 
 /** The command line for options. A key that is not an option is an error, so a typo is not ignored. */
 function toArgs(options, cleanups) {
@@ -89,12 +89,14 @@ function toArgs(options, cleanups) {
   add('--asset-names', options.assetNames);
   add('--public-path', options.publicPath);
   add('--jsx', options.jsx);
+  if (options.jsxDev) args.push('--jsx-dev');
   add('--jsx-import-source', options.jsxImportSource);
   add('--jsx-factory', options.jsxFactory);
   add('--jsx-fragment', options.jsxFragment);
   if (options.decoratorMetadata) args.push('--decorator-metadata');
   if (options.experimentalDecorators) args.push('--experimental-decorators');
   if (options.strictNullChecks) args.push('--strict-null-checks');
+  if (options.tsconfigRaw !== undefined) args.push('--tsconfig-raw', typeof options.tsconfigRaw === 'string' ? options.tsconfigRaw : JSON.stringify(options.tsconfigRaw));
   if (options.tsconfig === false) args.push('--no-tsconfig');
   else add('--tsconfig', options.tsconfig);
   if (options.config === false) args.push('--no-config');

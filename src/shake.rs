@@ -198,7 +198,7 @@ impl Shaker<'_> {
         // JSX turns into calls of the runtime's functions, which the source never names.
         if let Some(request) = module.record.jsx_runtime {
             if let Edge::Module(target) = module.edges[request] {
-                for name in ["jsx", "jsxs", "Fragment"] {
+                for name in ["jsx", "jsxs", "jsxDEV", "Fragment"] {
                     if let Some(binding) = resolve_export(self.graph, target, name) {
                         self.work.push(Work::Binding(binding));
                     }

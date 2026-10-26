@@ -549,6 +549,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     let mut public_path_given = false;
     let mut metafile: Option<String> = None;
     let mut inject_files: Vec<String> = Vec::new();
+    let mut tsconfig_raw: Option<String> = None;
     let mut bundle_options = rathkit_pack::bundle::Options::default();
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -642,6 +643,10 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
                 public_path_given = true;
             }
             "--preserve-symlinks" => options.resolve.preserve_symlinks = true,
+            // --tsconfig-raw='{"compilerOptions":{...}}': a tsconfig given as text, which is used instead of any tsconfig.json.
+            arg if arg == "--tsconfig-raw" || arg.starts_with("--tsconfig-raw=") => {
+                tsconfig_raw = if arg == "--tsconfig-raw" { it.next().cloned() } else { Some(arg["--tsconfig-raw=".len()..].to_string()) };
+            }
             // --inject:FILE: what FILE exports stands in for the globals of those names, in every module that uses one.
             arg if arg == "--inject" || arg.starts_with("--inject:") => {
                 let file = if arg == "--inject" { it.next().cloned().unwrap_or_default() } else { arg["--inject:".len()..].to_string() };
@@ -772,6 +777,10 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
                 }
             }
             "--jsx" => options.jsx.automatic = it.next().is_none_or(|mode| mode != "classic"),
+            "--jsx-dev" => {
+                options.jsx.automatic = true;
+                options.jsx.dev = true;
+            }
             "--jsx-import-source" => options.jsx.import_source = it.next().cloned().unwrap_or_default(),
             "--jsx-factory" => options.jsx.factory = it.next().cloned().unwrap_or_default(),
             "--jsx-fragment" => options.jsx.fragment = it.next().cloned().unwrap_or_default(),
@@ -825,7 +834,15 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
             }
         }
     }
-    if use_tsconfig {
+    if let Some(text) = &tsconfig_raw {
+        match rathkit_pack::tsconfig::TsConfig::raw(&rathkit_pack::resolve::RealFs, text, &cwd) {
+            Ok(config) => config.apply(&mut options),
+            Err(message) => {
+                eprintln!("error: --tsconfig-raw: {message}");
+                return Done::Exit(ExitCode::from(2));
+            }
+        }
+    } else if use_tsconfig {
         let found = match &tsconfig_path {
             Some(path) => Some(std::path::absolute(path).unwrap_or_else(|_| path.into())),
             None => cwd.ancestors().map(|d| d.join("tsconfig.json")).find(|p| p.is_file()),

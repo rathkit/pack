@@ -89,11 +89,14 @@ pub struct JsxOptions {
     pub import_source: String,
     pub factory: String,
     pub fragment: String,
+    /// For the automatic runtime: `jsxDEV` from `<import_source>/jsx-dev-runtime`, which is told where each element is written
+    /// (file, line, column), as React's development builds want.
+    pub dev: bool,
 }
 
 impl Default for JsxOptions {
     fn default() -> Self {
-        JsxOptions { automatic: true, import_source: "react".to_string(), factory: "React.createElement".to_string(), fragment: "React.Fragment".to_string() }
+        JsxOptions { automatic: true, import_source: "react".to_string(), factory: "React.createElement".to_string(), fragment: "React.Fragment".to_string(), dev: false }
     }
 }
 
@@ -180,7 +183,7 @@ impl Builder<'_> {
         }
         self.scan_calls();
         if self.ast.uses_jsx && self.jsx.automatic {
-            let specifier = format!("{}/jsx-runtime", self.jsx.import_source);
+            let specifier = format!("{}/{}", self.jsx.import_source, if self.jsx.dev { "jsx-dev-runtime" } else { "jsx-runtime" });
             let index = self.request_for(&specifier, RequestKind::Static, Vec::new(), Span { start: 0, end: 0 });
             self.record.jsx_runtime = Some(index);
         }

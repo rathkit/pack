@@ -1929,7 +1929,7 @@ impl<'a> Bundler<'a> {
             self.code.insert(id, Code::Wrapped { edits: Vec::new(), json: true, require_cases: None });
             return;
         };
-        let mut scanner = Scanner { bundler: self, module, ast: &parsed.ast, semantic: &parsed.semantic, edits: Vec::new(), shorthand: HashSet::new(), skip: HashSet::new(), written: HashSet::new(), fn_depth: 0, has_tla: false, needs_require: false, top_decl: None, in_wrapper: false, name_hint: None, shared_names: None };
+        let mut scanner = Scanner { bundler: self, module, places: None, ast: &parsed.ast, semantic: &parsed.semantic, edits: Vec::new(), shorthand: HashSet::new(), skip: HashSet::new(), written: HashSet::new(), fn_depth: 0, has_tla: false, needs_require: false, top_decl: None, in_wrapper: false, name_hint: None, shared_names: None };
         let code = if module.kind == ModuleKind::Esm { scanner.scan_esm(id) } else { scanner.scan_wrapped(id) };
         self.code.insert(id, code);
     }
@@ -1979,6 +1979,8 @@ impl<'a> Bundler<'a> {
 struct Scanner<'b, 'a> {
     bundler: &'b mut Bundler<'a>,
     module: &'a Module,
+    /// The module's lines, for the place of a JSX element (`--jsx-dev`), made when first needed.
+    places: Option<crate::sourcemap::Positions<'a>>,
     ast: &'a Ast,
     semantic: &'a Semantic,
     edits: Vec<Edit>,
@@ -3731,7 +3733,14 @@ impl Scanner<'_, '_> {
         pieces
     }
 
-    /// One of the automatic runtime's exports (`jsx`, `jsxs`, `Fragment`), as a callable.
+    /// The line and column (from 0) at which an element starts in the module's text.
+    fn element_place(&mut self, offset: u32) -> (u32, u32) {
+        let source = &self.module.source;
+        let positions = self.places.get_or_insert_with(|| crate::sourcemap::Positions::new(source));
+        positions.at(offset)
+    }
+
+    /// One of the automatic runtime's exports (`jsx`, `jsxs`, `jsxDEV`, `Fragment`), as a callable.
     fn jsx_runtime_pieces(&mut self, name: &str) -> Vec<Piece> {
         let module = self.module;
         let graph = self.bundler.graph;
@@ -3838,6 +3847,7 @@ impl Scanner<'_, '_> {
                 }
             }
             let function = match child_ids.len() {
+                _ if jsx.dev => "jsxDEV",
                 0 | 1 => "jsx",
                 _ => "jsxs",
             };
@@ -3876,7 +3886,17 @@ impl Scanner<'_, '_> {
                 }
                 pieces.push(text(" }"));
             }
-            if let Some(key) = key {
+            if jsx.dev {
+                // jsxDEV(type, props, key, isStaticChildren, { fileName, lineNumber, columnNumber }, this): where the element is written.
+                let (line, column) = self.element_place(ast[node].span.start);
+                pieces.push(text(", "));
+                match key {
+                    Some(key) => pieces.extend(key),
+                    None => pieces.push(text("void 0")),
+                }
+                let file = json_string(&self.module.path.to_string_lossy());
+                pieces.push(text(&format!(", {}, {{ fileName: {file}, lineNumber: {}, columnNumber: {} }}, this", child_ids.len() > 1, line + 1, column + 1)));
+            } else if let Some(key) = key {
                 pieces.push(text(", "));
                 pieces.extend(key);
             }

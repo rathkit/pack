@@ -74,12 +74,16 @@ export interface Options {
   /** What copied files' addresses start with. */
   publicPath?: string;
   jsx?: 'automatic' | 'classic';
+  /** Compile JSX to `jsxDEV` of `<jsxImportSource>/jsx-dev-runtime`, told where each element is written (React's development builds). `tsconfig.json` `"jsx": "react-jsxdev"` does the same. */
+  jsxDev?: boolean;
   jsxImportSource?: string;
   jsxFactory?: string;
   jsxFragment?: string;
   decoratorMetadata?: boolean;
   experimentalDecorators?: boolean;
   strictNullChecks?: boolean;
+  /** A tsconfig given as text or as an object, used in place of any `tsconfig.json`. */
+  tsconfigRaw?: string | Record<string, unknown>;
   /** A `tsconfig.json` to use, or `false` for none. */
   tsconfig?: string | false;
   /** A config file that lists plugins (`rathkit.config.mjs`), or `false` to ignore the one next to the project. */

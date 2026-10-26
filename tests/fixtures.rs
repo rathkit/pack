@@ -432,3 +432,35 @@ fn an_injected_export_stands_in_for_the_global_of_its_name() {
     assert_eq!(build_and_run(&dir, &[], &[]), "object");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn jsx_dev_tells_the_runtime_where_each_element_is_and_a_raw_tsconfig_replaces_the_file() {
+    if Command::new("node").arg("--version").output().is_err() {
+        return;
+    }
+    let dir = scratch("jsxdev");
+    std::fs::create_dir_all(dir.join("node_modules/react")).unwrap();
+    let write = |name: &str, text: &str| std::fs::write(dir.join(name), text).unwrap();
+    write("node_modules/react/package.json", "{\"name\":\"react\",\"exports\":{\"./jsx-dev-runtime\":\"./dev.js\",\"./jsx-runtime\":\"./prod.js\"}}");
+    write(
+        "node_modules/react/dev.js",
+        "export const Fragment = Symbol('Fragment');\nexport function jsxDEV(type, props, key, isStatic, source) { return [typeof type === 'string' ? type : 'fragment', key, isStatic, source.fileName.replace(/^.*[\\\\/]/, ''), source.lineNumber, source.columnNumber].join(' '); }\n",
+    );
+    write("node_modules/react/prod.js", "export const Fragment = Symbol('Fragment');\nexport const jsx = () => 'prod';\nexport const jsxs = () => 'prods';\n");
+    write("main.jsx", "console.log(<div id=\"x\" />);\nconsole.log(<ul key=\"k\">{'a'}{'b'}</ul>);\nconsole.log(\n    <>\n      <i>one</i>\n    </>);\n");
+    let dev = "div  false main.jsx 1 13\nul k true main.jsx 2 13\nfragment  false main.jsx 4 5";
+    let run = |args: &[&str]| {
+        let built = Command::new(env!("CARGO_BIN_EXE_rkp")).current_dir(&dir).args(["bundle", "main.jsx", "--outfile", "out.mjs"]).args(args).output().expect("rkp starts");
+        assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+        String::from_utf8_lossy(&Command::new("node").current_dir(&dir).arg("out.mjs").output().unwrap().stdout).trim().to_string()
+    };
+    assert_eq!(run(&["--jsx-dev"]), dev);
+    assert_eq!(run(&[]), "prod\nprods\nprod");
+    // A tsconfig.json that says react-jsxdev does the same; a raw tsconfig is used in its place.
+    write("tsconfig.json", "{ \"compilerOptions\": { \"jsx\": \"react-jsxdev\" } }");
+    assert_eq!(run(&[]), dev);
+    assert_eq!(run(&["--tsconfig-raw", "{\"compilerOptions\":{\"jsx\":\"react-jsx\"}}"]), "prod\nprods\nprod");
+    let bad = Command::new(env!("CARGO_BIN_EXE_rkp")).current_dir(&dir).args(["bundle", "main.jsx", "--outfile", "x.mjs", "--tsconfig-raw", "{not json"]).output().unwrap();
+    assert_eq!(bad.status.code(), Some(2));
+    let _ = std::fs::remove_dir_all(&dir);
+}

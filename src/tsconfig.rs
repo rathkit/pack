@@ -57,6 +57,19 @@ impl TsConfig {
         let text = fs.read_to_string(file).ok()?;
         let json = Json::parse_jsonc(&text).ok()?;
         let dir = file.parent().unwrap_or(Path::new("/"));
+        Some(TsConfig::from_json(fs, &json, dir, seen))
+    }
+
+    /// A configuration given as text (`--tsconfig-raw`), as if it were the file `tsconfig.json` in `dir`.
+    pub fn raw(fs: &dyn FileSystem, text: &str, dir: &Path) -> Result<TsConfig, String> {
+        let json = Json::parse_jsonc(text).map_err(|e| format!("not JSON: {e}"))?;
+        let mut seen = Vec::new();
+        let mut config = TsConfig::from_json(fs, &json, dir, &mut seen);
+        config.dir = dir.to_path_buf();
+        Ok(config)
+    }
+
+    fn from_json(fs: &dyn FileSystem, json: &Json, dir: &Path, seen: &mut Vec<PathBuf>) -> TsConfig {
         // Parents first, so that the file's own settings override them.
         let mut config = TsConfig::default();
         let parents: Vec<&str> = match json.get("extends") {
@@ -100,7 +113,7 @@ impl TsConfig {
                 config.strict = b;
             }
         }
-        Some(config)
+        config
     }
 
     /// Takes a parent's settings; the ones set here afterwards override them.
@@ -137,7 +150,11 @@ impl TsConfig {
         options.strict_null_checks |= self.strict_null_checks.unwrap_or(self.strict);
         match self.jsx.as_deref() {
             Some("react") => options.jsx.automatic = false,
-            Some("react-jsx" | "react-jsxdev") => options.jsx.automatic = true,
+            Some("react-jsx") => options.jsx.automatic = true,
+            Some("react-jsxdev") => {
+                options.jsx.automatic = true;
+                options.jsx.dev = true;
+            }
             _ => {}
         }
         if let Some(source) = &self.jsx_import_source {
