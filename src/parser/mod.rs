@@ -138,10 +138,13 @@ pub fn parse(src: &str, options: ParseOptions) -> PResult<Parsed> {
     let mut parser = Parser::new(src, options)?;
     parser.parse_program()?;
     let is_ts = parser.ts;
-    let Parser { mut ast, sb, tokens, asi, eof_asi, .. } = parser;
+    let Parser { mut ast, sb, tokens, asi, eof_asi, lexer, .. } = parser;
     ast.shrink_to_fit();
     let semantic = sb.finish(&ast).map_err(|e| ParseError::new(e.message, e.pos))?;
-    Ok(Parsed { ast, semantic, is_ts, tokens, asi, eof_asi })
+    let mut legal = lexer.legal;
+    legal.sort_unstable();
+    legal.dedup();
+    Ok(Parsed { ast, semantic, is_ts, tokens, asi, eof_asi, legal })
 }
 
 /// A parsed file: its syntax tree and what its identifiers mean.
@@ -156,6 +159,8 @@ pub struct Parsed {
     /// Indexes into `tokens` of those the parser inserted a semicolon before, because a line
     /// break ended the statement.
     pub asi: Vec<usize>,
+    /// Where the legal comments are (`/*! */`, `//!`, `@license`, `@preserve`), in order and once each.
+    pub legal: Vec<(u32, u32)>,
     /// The last statement ended at the end of the text with no `;`: whatever is written after
     /// this text needs one in between.
     pub eof_asi: bool,

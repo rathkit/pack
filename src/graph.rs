@@ -634,18 +634,6 @@ impl Context<'_> {
                     (None, Some(bytes)) => String::from_utf8_lossy(&bytes).into_owned(),
                     (None, None) => self.resolver.read_to_string(path).map_err(|e| error(format!("Cannot read file: {e}"), None))?,
                 };
-                // `import(\`./dir/${name}.js\`)` becomes a choice among imports of the files that fit.
-                if text.contains("import(") || text.contains("import (") {
-                    let mut dirs = Vec::new();
-                    let mut warnings = Vec::new();
-                    let rewritten = crate::glob::rewrite_dynamic_imports(&text, path, self.cwd, self.resolver.file_system(), &mut dirs, &mut warnings);
-                    self.state.0.lock().unwrap().watch_dirs.extend(dirs);
-                    diagnostics.extend(warnings.into_iter().map(|message| Diagnostic { severity: Severity::Warning, message, file: Some(path.to_path_buf()), pos: None }));
-                    if let Some(rewritten) = rewritten {
-                        text = rewritten;
-                        used_glob = true;
-                    }
-                }
                 // `import.meta.glob(...)` becomes the imports of the files it names.
                 if text.contains("import.meta.glob") {
                     let mut dirs = Vec::new();
@@ -703,6 +691,19 @@ impl Context<'_> {
                 options.decorator_metadata = self.options.decorator_metadata;
                 options.strict_null_checks = self.options.strict_null_checks;
                 let (mut parsed, mut as_module) = parse_file(&source, mode, options).map_err(|e| error(e.message.clone(), Some(e.pos)))?;
+                // `import(\`./dir/${name}.js\`)` becomes a choice among imports of the files that fit (the parser noted there is one).
+                if parsed.ast.variable_import {
+                    let mut dirs = Vec::new();
+                    let mut warnings = Vec::new();
+                    let rewritten = crate::glob::rewrite_dynamic_imports(&source, path, self.cwd, self.resolver.file_system(), &mut dirs, &mut warnings);
+                    self.state.0.lock().unwrap().watch_dirs.extend(dirs);
+                    diagnostics.extend(warnings.into_iter().map(|message| Diagnostic { severity: Severity::Warning, message, file: Some(path.to_path_buf()), pos: None }));
+                    if let Some(rewritten) = rewritten {
+                        source = rewritten;
+                        used_glob = true;
+                        (parsed, as_module) = parse_file(&source, mode, options).map_err(|e| error(e.message.clone(), Some(e.pos)))?;
+                    }
+                }
                 // `--inject`: a global the module uses that a file exports is imported from it, written on the module's first line so no line moves.
                 if !self.options.inject.is_empty() {
                     let mut wanted: Vec<(&Path, Vec<&str>)> = Vec::new();

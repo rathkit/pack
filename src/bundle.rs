@@ -1034,7 +1034,11 @@ impl<'a> Bundler<'a> {
     fn legal_text(&self, c: usize, code: &str) -> String {
         let mut all: Vec<String> = Vec::new();
         for &m in &self.plan.chunks[c].modules {
-            for comment in crate::legal::find(&self.graph.module(m).source) {
+            let module = self.graph.module(m);
+            // The parser noted where they are; a module it did not parse (a sheet, JSON) has none worth keeping.
+            let Some(parsed) = &module.parsed else { continue };
+            for &(start, end) in &parsed.legal {
+                let comment = module.source[start as usize..end as usize].trim_end().to_string();
                 if !all.contains(&comment) && !code.contains(&comment) {
                     all.push(comment);
                 }

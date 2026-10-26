@@ -481,6 +481,8 @@ pub struct Ast {
     class_bodies: Vec<(NodeId, Span)>,
     /// The file contains JSX.
     pub uses_jsx: bool,
+    /// The file has an `import()` of a template literal or of a `+` (`import(`./a/${x}.js`)`): a path with a variable in it.
+    pub variable_import: bool,
     atoms: Interner,
     pub root: NodeId,
 }
@@ -492,7 +494,7 @@ impl Ast {
         // Index 0 is a placeholder so `NodeId` can be non-zero and `Option<NodeId>` stays 4 bytes.
         nodes.push(Node { kind: NodeKind::Empty, span: Span::default(), flags: 0 });
         let root = NodeId(NonZeroU32::new(1).unwrap());
-        Ast { nodes, lists: Vec::with_capacity(source_len / 16), imports: Vec::new(), exports: Vec::new(), jsx_elements: Vec::new(), erased: Vec::new(), rewrites: Vec::new(), param_props: Vec::new(), ts_commonjs: false, decorators: Vec::new(), type_meta: std::collections::HashMap::new(), class_bodies: Vec::new(), uses_jsx: false, atoms: Interner::with_source_len(source_len), root }
+        Ast { nodes, lists: Vec::with_capacity(source_len / 16), imports: Vec::new(), exports: Vec::new(), jsx_elements: Vec::new(), erased: Vec::new(), rewrites: Vec::new(), param_props: Vec::new(), ts_commonjs: false, decorators: Vec::new(), type_meta: std::collections::HashMap::new(), class_bodies: Vec::new(), uses_jsx: false, variable_import: false, atoms: Interner::with_source_len(source_len), root }
     }
 
     pub(crate) fn alloc(&mut self, kind: NodeKind, span: Span, flags: u8) -> NodeId {

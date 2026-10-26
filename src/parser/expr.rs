@@ -1778,6 +1778,9 @@ impl<'a> Parser<'a> {
         self.next()?;
         self.allow_in(|p| {
             let source = p.parse_assign()?;
+            if matches!(p.ast[source].kind, NodeKind::Template { .. } | NodeKind::Binary { op: BinOp::Add, .. }) {
+                p.ast.variable_import = true;
+            }
             let mut options = None;
             if p.eat(Punct::Comma)? && !p.at(Punct::RParen) {
                 options = Some(p.parse_assign()?);

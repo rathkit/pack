@@ -193,6 +193,8 @@ pub struct Lexer<'a> {
     bytes: &'a [u8],
     pos: usize,
     html_comments: bool,
+    /// Where the legal comments (`/*! */`, `//!`, `@license`, `@preserve`) are, as they are met (a comment met again after the parser went back is met twice).
+    pub legal: Vec<(u32, u32)>,
 }
 
 impl<'a> Lexer<'a> {
@@ -200,7 +202,7 @@ impl<'a> Lexer<'a> {
         if src.len() > u32::MAX as usize {
             return Err(LexError::new("source files larger than 4 GiB are not supported", 0));
         }
-        let mut lexer = Lexer { src, bytes: src.as_bytes(), pos: 0, html_comments: false };
+        let mut lexer = Lexer { src, bytes: src.as_bytes(), pos: 0, html_comments: false, legal: Vec::new() };
         // A hashbang is only a comment at the very start of the file.
         if lexer.bytes.starts_with(b"#!") {
             lexer.skip_line_comment_body();
@@ -379,10 +381,16 @@ impl<'a> Lexer<'a> {
                 }
                 b'/' => match self.at(1) {
                     b'/' => {
+                        let start = self.pos;
                         self.pos += 2;
                         self.skip_line_comment_body();
+                        self.note_if_legal(start);
                     }
-                    b'*' => newline |= self.skip_block_comment()?,
+                    b'*' => {
+                        let start = self.pos;
+                        newline |= self.skip_block_comment()?;
+                        self.note_if_legal(start);
+                    }
                     _ => break,
                 },
                 0x80.. => {
@@ -398,6 +406,15 @@ impl<'a> Lexer<'a> {
             }
         }
         Ok(newline)
+    }
+
+    /// Notes the comment that began at `start` and ends at the cursor if it says who wrote the code: `/*!`, `//!`, `@license` or `@preserve`.
+    fn note_if_legal(&mut self, start: usize) {
+        let text = &self.bytes[start..self.pos];
+        let bang = text.get(2) == Some(&b'!');
+        if bang || text.windows(8).any(|w| w == b"@license") || text.windows(9).any(|w| w == b"@preserve") {
+            self.legal.push((start as u32, self.pos as u32));
+        }
     }
 
     fn skip_line_comment_body(&mut self) {

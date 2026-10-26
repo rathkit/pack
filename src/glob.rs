@@ -610,49 +610,6 @@ pub fn rewrite(source: &str, module: &Path, root: &Path, fs: &dyn FileSystem, di
 
 // ---- `import(\`./dir/${name}.js\`)` ---------------------------------------------------------------------------------------------------
 
-/// A quick look that finds no `import(` whose argument is a template literal with a `${`, or a string followed by `+`: most files, and
-/// every big one. A `true` is only a maybe (it may be text in a string or a comment); the full scan decides.
-fn may_have_variable_import(source: &str) -> bool {
-    let bytes = source.as_bytes();
-    let mut from = 0;
-    while let Some(at) = source[from..].find("import") {
-        let start = from + at;
-        from = start + 6;
-        let mut i = start + 6;
-        while bytes.get(i).is_some_and(|b| b.is_ascii_whitespace()) {
-            i += 1;
-        }
-        if bytes.get(i) != Some(&b'(') {
-            continue;
-        }
-        i += 1;
-        while bytes.get(i).is_some_and(|b| b.is_ascii_whitespace()) {
-            i += 1;
-        }
-        match bytes.get(i) {
-            // A template literal that has a `${` before it ends.
-            Some(b'`') => {
-                let rest = &source[i + 1..];
-                let end = rest.find('`').unwrap_or(rest.len());
-                if rest[..end].contains("${") {
-                    return true;
-                }
-            }
-            // A string that is followed by a `+`.
-            Some(&q @ (b'"' | b'\'')) => {
-                let rest = &bytes[i + 1..];
-                if let Some(close) = rest.iter().take(400).position(|&b| b == q) {
-                    if rest[close + 1..].iter().find(|b| !b.is_ascii_whitespace()) == Some(&b'+') {
-                        return true;
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    false
-}
-
 /// What a scan of JavaScript text is inside of: the text of a template literal, or the code of one of its `${ }` (with the `{` it holds).
 enum Frame {
     Text,
@@ -933,9 +890,6 @@ fn dynamic_pattern(parts: &[Part]) -> Result<String, String> {
 /// written out) becomes a call of a function that has an `import()` of each file the pattern reaches, and chooses by the path:
 /// the same rules as `@rollup/plugin-dynamic-import-vars`. What does not fit is left as it is; `warnings` says why, for a relative path.
 pub fn rewrite_dynamic_imports(source: &str, module: &Path, root: &Path, fs: &dyn FileSystem, dirs: &mut Vec<PathBuf>, warnings: &mut Vec<String>) -> Option<String> {
-    if !may_have_variable_import(source) {
-        return None;
-    }
     let calls = import_calls(source);
     if calls.is_empty() {
         return None;
