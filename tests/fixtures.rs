@@ -507,7 +507,8 @@ fn what_a_target_cannot_have_stops_the_build_and_is_named() {
     for (source, target, words) in [
         ("export const f = 1n;", "es2019", "a BigInt literal is not available in the target es2019"),
         ("export const t = await Promise.resolve(1);", "es2021", "top-level await is not available in the target es2021"),
-        ("export const f = async () => await 1;", "es2016", "an async function is not available in the target es2016"),
+        ("class B { m() {} } export class A extends B { async f() { return super.m(); } }", "es2016", "an async function is not available in the target es2016"),
+        ("export const f = async () => { for await (const x of y) {} };", "es2016", "async iteration"),
         ("const o = { ...a, __proto__: null }; export { o };", "es2017", "a __proto__ property after a spread cannot be rewritten"),
         ("const [x, { ...r }] = y; export { x, r };", "es2017", "object rest in a pattern ({ a, ...rest }) is not available in the target es2017"),
         ("let a, r; ({ a, ...r } = y); export { a, r };", "es2017", "object rest in a pattern"),

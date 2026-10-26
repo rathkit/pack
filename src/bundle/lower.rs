@@ -117,9 +117,18 @@ impl Scanner<'_, '_> {
             NodeKind::Function { params, body, .. } => {
                 let flags = ast[node].flags;
                 if flags & crate::ast::flags::ASYNC != 0 {
-                    let feature = if flags & crate::ast::flags::GENERATOR != 0 { Feature::AsyncIteration } else { Feature::AsyncFunction };
-                    if self.lowers(feature) {
-                        self.lower_error(feature, node);
+                    if flags & crate::ast::flags::GENERATOR != 0 {
+                        if self.lowers(Feature::AsyncIteration) {
+                            self.lower_error(Feature::AsyncIteration, node);
+                        }
+                    } else if self.lowers(Feature::AsyncFunction) && !self.skip.contains(&node) {
+                        // A method's `async` comes before its key; the method has already handled it (see below).
+                        let at = ast[node].span.start;
+                        if self.source_between(at, at + 5) == "async" {
+                            self.lower_async(node, at);
+                        } else {
+                            self.lower_error(Feature::AsyncFunction, node);
+                        }
                     }
                 }
                 if self.lowers(Feature::ObjectRest) {
@@ -135,6 +144,13 @@ impl Scanner<'_, '_> {
                         }
                     }
                 }
+            }
+            NodeKind::ClassMethod { key, value, .. } if self.lowers(Feature::AsyncFunction) && self.is_async_method(value) => self.lower_async_method(node, key, value),
+            NodeKind::Property { key, value, kind: crate::ast::PropKind::Method } if self.lowers(Feature::AsyncFunction) && self.is_async_method(value) => self.lower_async_method(node, key, value),
+            NodeKind::Await(_) if self.fn_depth > 0 && self.lowers(Feature::AsyncFunction) => {
+                let (start, end) = self.span(node);
+                self.edits.push(Edit { start, end: start + 5, pieces: vec![text("(yield")], shorthand: None, transparent: false });
+                self.edits.push(Edit { start: end, end, pieces: vec![text(")")], shorthand: None, transparent: false });
             }
             // Not rewritten yet: stop instead of writing what the target cannot run.
             NodeKind::Object(props) if self.lowers(Feature::ObjectSpread) && ast.list(props).iter().any(|&p| matches!(ast[p].kind, NodeKind::Spread(_))) => self.lower_object_spread(node, props),
@@ -689,5 +705,67 @@ impl Scanner<'_, '_> {
             self.edits.push(Edit { start: at, end: at, pieces: [vec![text(" { ")], statements, vec![text("return ")]].concat(), shorthand: None, transparent: false });
             self.edits.push(Edit { start: end, end, pieces: vec![text("; }")], shorthand: None, transparent: false });
         }
+    }
+
+    fn is_async_method(&self, value: NodeId) -> bool {
+        let ast = self.ast;
+        matches!(ast[value].kind, NodeKind::Function { .. }) && ast[value].flags & crate::ast::flags::ASYNC != 0 && ast[value].flags & crate::ast::flags::GENERATOR == 0
+    }
+
+    /// `async name() {}` in a class or an object: the keyword is somewhere before the key.
+    fn lower_async_method(&mut self, method: NodeId, key: NodeId, value: NodeId) {
+        let from = self.ast[method].span.start;
+        let to = self.ast[key].span.start;
+        let region = self.source_between(from, to);
+        let found = region.match_indices("async").find(|&(i, _)| {
+            let after = region.as_bytes().get(i + 5).copied().unwrap_or(b' ');
+            !(after.is_ascii_alphanumeric() || after == b'_' || after == b'$')
+        });
+        let Some((i, _)) = found else {
+            self.lower_error(Feature::AsyncFunction, value);
+            return;
+        };
+        self.skip.insert(value);
+        self.lower_async(value, from + i as u32);
+    }
+
+    /// An async function becomes a plain one that runs a generator through `__async`, each `await` a `yield`.
+    fn lower_async(&mut self, function: NodeId, async_at: u32) {
+        let ast = self.ast;
+        let NodeKind::Function { body, .. } = ast[function].kind else { return };
+        if self.contains_super(body) {
+            self.lower_error(Feature::AsyncFunction, function);
+            return;
+        }
+        self.bundler.helpers.async_fn = true;
+        // `async` and the space after it.
+        let after = self.source_between(async_at + 5, ast[function].span.end).len() - self.source_between(async_at + 5, ast[function].span.end).trim_start().len();
+        self.edits.push(Edit { start: async_at, end: async_at + 5 + after as u32, pieces: Vec::new(), shorthand: None, transparent: false });
+        let (bs, be) = self.span(body);
+        let arrow = ast[function].has(crate::ast::flags::ARROW);
+        let arguments = if !arrow || self.source_between(bs, be).contains("arguments") { "arguments" } else { "null" };
+        let open = format!("__async(this, {arguments}, function* () ");
+        if matches!(ast[body].kind, NodeKind::Block(_)) {
+            self.edits.push(Edit { start: bs, end: bs, pieces: vec![text(&format!("{{ return {open}"))], shorthand: None, transparent: false });
+            // Replacing the closing brace, rather than adding after it, keeps the edit inside a method that is moved elsewhere.
+            self.edits.push(Edit { start: be - 1, end: be, pieces: vec![text("} ); }")], shorthand: None, transparent: false });
+        } else {
+            self.edits.push(Edit { start: bs, end: bs, pieces: vec![text(&format!("{open}{{ return "))], shorthand: None, transparent: false });
+            self.edits.push(Edit { start: be, end: be, pieces: vec![text("; })")], shorthand: None, transparent: false });
+        }
+    }
+
+    /// Whether `super` is used in the function (not in a function of its own, but in an arrow it is).
+    fn contains_super(&self, node: NodeId) -> bool {
+        let ast = self.ast;
+        if matches!(ast[node].kind, NodeKind::Super) {
+            return true;
+        }
+        if matches!(ast[node].kind, NodeKind::Function { .. }) && !ast[node].has(crate::ast::flags::ARROW) {
+            return false;
+        }
+        let mut found = false;
+        ast.for_each_child(node, |c| found = found || self.contains_super(c));
+        found
     }
 }

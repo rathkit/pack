@@ -343,6 +343,7 @@ struct Helpers {
     spread: bool,
     /// `__publicField`, `__privateGet` and the others: class fields and private members written for an older target.
     class_private: bool,
+    async_fn: bool,
 }
 
 struct Bundler<'a> {
@@ -2906,6 +2907,7 @@ fn json_string(text: &str) -> String {
 // ---- output ----------------------------------------------------------------------------------
 
 const HELPER_CJS: &str = "var __cjs = (fn, req) => { var m; return () => m ? m.exports : (m = { exports: {} }, fn.call(m.exports, m.exports, m, req), m.exports); };\n";
+const HELPER_ASYNC: &str = "var __async = (__this, __arguments, generator) => new Promise((resolve, reject) => { var fulfilled = (value) => { try { step(generator.next(value)); } catch (e) { reject(e); } }; var rejected = (value) => { try { step(generator.throw(value)); } catch (e) { reject(e); } }; var step = (x) => x.done ? resolve(x.value) : Promise.resolve(x.value).then(fulfilled, rejected); step((generator = generator.apply(__this, __arguments)).next()); });\n";
 const HELPER_SPREAD: &str = "var __hasOwn = Object.prototype.hasOwnProperty;\nvar __propIsEnum = Object.prototype.propertyIsEnumerable;\nvar __defNormal = (obj, key, value) => key in obj ? Object.defineProperty(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;\nvar __spreadValues = (a, b) => { for (var prop in b || (b = {})) if (__hasOwn.call(b, prop)) __defNormal(a, prop, b[prop]); if (Object.getOwnPropertySymbols) for (var prop of Object.getOwnPropertySymbols(b)) { if (__propIsEnum.call(b, prop)) __defNormal(a, prop, b[prop]); } return a; };\nvar __spreadProps = (a, b) => { for (var key of Reflect.ownKeys(b)) Object.defineProperty(a, key, Object.getOwnPropertyDescriptor(b, key)); return a; };\nvar __objRest = (source, exclude) => { var target = {}; for (var prop in source) if (__hasOwn.call(source, prop) && exclude.indexOf(prop) < 0) target[prop] = source[prop]; if (source != null && Object.getOwnPropertySymbols) for (var prop of Object.getOwnPropertySymbols(source)) { if (exclude.indexOf(prop) < 0 && __propIsEnum.call(source, prop)) target[prop] = source[prop]; } return target; };\n";
 const HELPER_CLASS_PRIVATE: &str = "var __typeError = (msg) => { throw TypeError(msg); };\nvar __defNormalProp = (obj, key, value) => key in obj ? Object.defineProperty(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;\nvar __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== \"symbol\" ? key + \"\" : key, value);\nvar __accessCheck = (obj, member, msg) => member.has(obj) || __typeError(\"Cannot \" + msg);\nvar __privateGet = (obj, member, getter) => (__accessCheck(obj, member, \"read from private field\"), getter ? getter.call(obj) : member.get(obj));\nvar __privateAdd = (obj, member, value) => member.has(obj) ? __typeError(\"Cannot add the same private member more than once\") : member instanceof WeakSet ? member.add(obj) : member.set(obj, value);\nvar __privateSet = (obj, member, value, setter) => (__accessCheck(obj, member, \"write to private field\"), setter ? setter.call(obj, value) : member.set(obj, value), value);\nvar __privateMethod = (obj, member, method) => (__accessCheck(obj, member, \"access private method\"), method);\nvar __privateWrapper = (obj, member, setter, getter) => ({ set _(value) { __privateSet(obj, member, value, setter); }, get _() { return __privateGet(obj, member, getter); } });\nvar __privateIn = (member, obj) => Object(obj) !== obj ? __typeError('Cannot use the \"in\" operator on this value') : member.has(obj);\n";
 const HELPER_TO_DEFAULT: &str = "var __toDefault = (e, node) => e && !node && e.__esModule ? e.default : e;\n";
@@ -3245,6 +3247,9 @@ impl Bundler<'_> {
         }
         if self.helpers.class_private {
             out.push_str(HELPER_CLASS_PRIVATE);
+        }
+        if self.helpers.async_fn {
+            out.push_str(HELPER_ASYNC);
         }
         if self.code.values().any(|c| matches!(c, Code::Wrapped { require_cases: Some(_), .. })) {
             out.push_str(match format {
