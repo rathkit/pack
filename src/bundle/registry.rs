@@ -32,70 +32,44 @@ fn member(name: &ImportName) -> String {
 }
 
 impl Scanner<'_, '_> {
-    /// The module as an ES module in the table: its imports and exports as table calls, the rest of its text as it is.
+    /// The module as an ES module in the table: its statements as the usual output has them (declarations, classes with decorators, enums
+    /// and namespaces), with the `export` keywords gone and the names as written. The imports and exports are a header, made at the end.
     pub(super) fn scan_registry(&mut self, id: ModuleId) -> Code {
-        let ast = self.ast;
-        let module = self.module;
-        let NodeKind::Program(body) = ast[ast.root].kind else { unreachable!("a program") };
-        // The statements about modules go; their meaning is in the header.
-        let mut default_value = false;
-        for &stmt in ast.list(body) {
-            let (start, end) = self.span(stmt);
-            let declaration = match ast[stmt].kind {
-                NodeKind::ExportNamed(export) => ast.export(export).decl.unwrap_or(stmt),
-                NodeKind::ExportDefault(value) => value,
-                _ => stmt,
-            };
-            if matches!(ast[declaration].kind, NodeKind::Class { .. }) && (self.class_is_decorated(declaration) || self.needs_standard_lowering(declaration)) {
-                self.bundler.errors.push(Diagnostic {
-                    severity: crate::graph::Severity::Error,
-                    message: "--hmr does not support decorators yet".to_string(),
-                    file: Some(module.path.clone()),
-                    pos: Some(ast[declaration].span.start),
-                });
-            }
-            match ast[stmt].kind {
-                NodeKind::Import(_) | NodeKind::ExportAll { .. } => self.edits.push(Edit { start, end, pieces: Vec::new(), shorthand: None, transparent: false }),
-                NodeKind::ExportNamed(export) => match ast.export(export).decl {
-                    Some(decl) => self.edits.push(Edit { start, end: ast[decl].span.start, pieces: Vec::new(), shorthand: None, transparent: false }),
-                    None => self.edits.push(Edit { start, end, pieces: Vec::new(), shorthand: None, transparent: false }),
-                },
-                NodeKind::ExportDefault(value) => {
-                    let named = match ast[value].kind {
-                        NodeKind::Function { name: Some(_), .. } | NodeKind::Class { name: Some(_), .. } => true,
-                        _ => false,
-                    };
-                    let (vs, ve) = self.span(value);
-                    if named {
-                        self.edits.push(Edit { start, end: vs, pieces: Vec::new(), shorthand: None, transparent: false });
-                    } else {
-                        default_value = true;
-                        self.edits.push(Edit { start, end: vs, pieces: vec![Piece::Text("var __rkd = ".to_string())], shorthand: None, transparent: false });
-                        self.edits.push(Edit { start: ve, end: ve, pieces: vec![Piece::Text(";".to_string())], shorthand: None, transparent: false });
-                    }
-                }
-                _ => {}
-            }
+        match self.scan_esm(id) {
+            Code::Esm(code) => Code::Registry(code),
+            other => other,
         }
-        let _ = default_value;
-        self.walk(ast.root, false);
-        self.add_erasures(0, module.source.len() as u32);
-        if self.has_tla {
-            self.bundler.errors.push(Diagnostic {
-                severity: crate::graph::Severity::Error,
-                message: "--hmr does not support top-level await".to_string(),
-                file: Some(module.path.clone()),
-                pos: None,
-            });
-        }
+    }
+
+    /// How an import is spelled where it is used: a read of the exports object of the module it comes from.
+    pub(super) fn registry_binding(&self, import: &ImportEntry) -> String {
+        format!("__rki{}{}", import.request, member(&import.name))
+    }
+
+    /// A reference to an imported name in a module of the table. Called, it must not call with the exports object as `this`.
+    pub(super) fn registry_reference(&mut self, node: NodeId, sym: SymbolId) {
+        let Some(import) = self.module.record.imports.iter().find(|i| i.local == sym) else { return };
+        let text = self.registry_binding(import);
+        let text = if self.call_callees.contains(&node) && !matches!(import.name, ImportName::Namespace) { format!("(0, {text})") } else { text };
+        self.push_ident_edit(node, vec![Piece::Text(text)]);
+    }
+}
+
+impl Bundler<'_> {
+    /// The lines that stand for a module's imports and exports: getters for what it exports (defined before anything runs, so a cycle sees
+    /// them), then each import. An import of a module that waits (top-level await) is waited for.
+    fn registry_header(&mut self, module: &Module, asyncs: &HashSet<ModuleId>) -> String {
+        let graph = self.graph;
         let mut header = String::new();
-        // What the module exports: getters, defined before anything runs, so a cycle sees them.
         let mut getters = Vec::new();
         for export in &module.record.exports {
             let value = match &export.source {
                 ExportSource::Local(sym) => match module.record.imports.iter().find(|i| i.local == *sym) {
-                    Some(import) => self.registry_binding(import),
-                    None => self.semantic_name(*sym),
+                    Some(import) => format!("__rki{}{}", import.request, member(&import.name)),
+                    None => match module.parsed.as_ref() {
+                        Some(parsed) => parsed.ast.atom(parsed.semantic.symbol(*sym).name).to_string(),
+                        None => continue,
+                    },
                 },
                 ExportSource::DefaultValue(_) => "__rkd".to_string(),
                 ExportSource::Indirect { request, name } => format!("__rki{request}{}", member(name)),
@@ -112,11 +86,17 @@ impl Scanner<'_, '_> {
             }
             match &module.edges[index] {
                 Edge::Module(target) => {
-                    let call = if self.bundler.graph.module(*target).kind == ModuleKind::Esm { "i" } else { "c" };
-                    let _ = write!(header, "var __rki{index} = __r.{call}({});\n", json_string(&self.bundler.graph.module(*target).path.to_string_lossy()));
+                    let target_module = graph.module(*target);
+                    let path = json_string(&target_module.path.to_string_lossy());
+                    if asyncs.contains(target) {
+                        let _ = write!(header, "var __rki{index} = await __r.w({path});\n");
+                    } else {
+                        let call = if target_module.kind == ModuleKind::Esm { "i" } else { "c" };
+                        let _ = write!(header, "var __rki{index} = __r.{call}({path});\n");
+                    }
                 }
                 Edge::External(spec) => {
-                    let n = self.bundler.registry_external(spec);
+                    let n = self.registry_external(spec);
                     let _ = write!(header, "var __rki{index} = __rkx{n};\n");
                 }
                 Edge::Unresolved => {}
@@ -127,29 +107,31 @@ impl Scanner<'_, '_> {
                 let _ = write!(header, "__r.s(exports, __rki{index});\n");
             }
         }
-        let _ = id;
-        Code::Registry { edits: std::mem::take(&mut self.edits), header }
+        header
     }
 
-    /// How an import is spelled where it is used: a read of the exports object of the module it comes from.
-    pub(super) fn registry_binding(&self, import: &ImportEntry) -> String {
-        format!("__rki{}{}", import.request, member(&import.name))
+    /// The modules that wait for something: those with top-level await, and the ones that import them.
+    fn registry_async_modules(&self) -> HashSet<ModuleId> {
+        let graph = self.graph;
+        let mut waits: HashSet<ModuleId> = graph.modules.iter().filter(|m| self.included(m.id) && matches!(self.code.get(&m.id), Some(Code::Registry(code)) if code.has_tla)).map(|m| m.id).collect();
+        loop {
+            let mut grew = false;
+            for module in &graph.modules {
+                if waits.contains(&module.id) || !self.included(module.id) || !matches!(self.code.get(&module.id), Some(Code::Registry(_))) {
+                    continue;
+                }
+                let imports_waiter = module.record.requests.iter().zip(&module.edges).any(|(r, e)| r.kind == RequestKind::Static && matches!(e, Edge::Module(t) if waits.contains(t)));
+                if imports_waiter {
+                    waits.insert(module.id);
+                    grew = true;
+                }
+            }
+            if !grew {
+                return waits;
+            }
+        }
     }
 
-    pub(super) fn semantic_name(&self, sym: SymbolId) -> String {
-        self.ast.atom(self.semantic.symbol(sym).name).to_string()
-    }
-
-    /// A reference to an imported name in a module of the table. Called, it must not call with the exports object as `this`.
-    pub(super) fn registry_reference(&mut self, node: NodeId, sym: SymbolId) {
-        let Some(import) = self.module.record.imports.iter().find(|i| i.local == sym) else { return };
-        let text = self.registry_binding(import);
-        let text = if self.call_callees.contains(&node) && !matches!(import.name, ImportName::Namespace) { format!("(0, {text})") } else { text };
-        self.push_ident_edit(node, vec![Piece::Text(text)]);
-    }
-}
-
-impl Bundler<'_> {
     /// The number a module of the table refers to an external module by: `__rkx0`, `__rkx1`, ...
     pub(super) fn registry_external(&mut self, spec: &str) -> usize {
         match self.registry_externals.iter().position(|s| s == spec) {
@@ -164,6 +146,7 @@ impl Bundler<'_> {
     /// The build as a table of modules. Returns the text of the one script, and the modules as a hot update sends them.
     pub(super) fn emit_registry(&mut self, names: &HashMap<Key, String>) -> (String, Vec<HmrModule>) {
         let graph = self.graph;
+        let asyncs = self.registry_async_modules();
         let mut modules = Vec::new();
         let mut definitions = String::new();
         for module in &graph.modules {
@@ -171,14 +154,16 @@ impl Bundler<'_> {
                 continue;
             }
             let path = module.path.to_string_lossy().into_owned();
+            let header = if matches!(self.code.get(&module.id), Some(Code::Registry(_))) { self.registry_header(module, &asyncs) } else { String::new() };
             let Some(code) = self.code.get(&module.id) else { continue };
             // The temporaries of the module's rewrites for the target, declared where they are used.
             let temps: Vec<&str> = self.temps.iter().filter(|(m, _)| *m == module.id).map(|(_, n)| n.as_str()).collect();
             let declare = if temps.is_empty() { String::new() } else { format!("var {};\n", temps.join(", ")) };
             let (kind, text) = match code {
-                Code::Registry { edits, header } => {
-                    let body = self.render(module.id, 0, module.source.len() as u32, edits, names);
-                    ("esm", format!("function (exports, module, __r) {{\n\"use strict\";\n{declare}{header}{body}\n}}"))
+                Code::Registry(code) => {
+                    let body: String = code.stmts.iter().map(|stmt| self.render_stmt(module.id, stmt, names) + "\n").collect();
+                    let waits = asyncs.contains(&module.id);
+                    ("esm", format!("{}function (exports, module, __r) {{\n\"use strict\";\n{declare}{header}{body}\n}}", if waits { "async " } else { "" }))
                 }
                 Code::Wrapped { edits, json, .. } => {
                     let body = if *json {
@@ -220,6 +205,15 @@ impl Bundler<'_> {
             let _ = write!(out, "import * as __rkx{n} from {};\n", json_string(spec));
         }
         out.push_str(RUNTIME);
+        if self.helpers.decorate {
+            out.push_str(HELPER_DECORATE);
+        }
+        if self.helpers.metadata {
+            out.push_str(HELPER_METADATA);
+        }
+        if self.helpers.std_decorators {
+            out.push_str(HELPER_STD_DECORATORS);
+        }
         if self.helpers.spread {
             out.push_str(HELPER_SPREAD);
         }

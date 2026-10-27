@@ -42,8 +42,9 @@ const __r = (() => {
     cache[id] = module;
     delete accepts[id];
     delete declined[id];
+    let result;
     try {
-      fn.call(esm ? undefined : exports, exports, module, api, (spec) => {
+      result = fn.call(esm ? undefined : exports, exports, module, api, (spec) => {
         const target = (specs[id] || {})[spec];
         if (target === undefined) {
           // A module of Node itself, when this runs in Node.
@@ -57,7 +58,23 @@ const __r = (() => {
       delete cache[id];
       throw error;
     }
-    module.loaded = true;
+    // A module with top-level await is an async function: its record holds the promise of its having run.
+    if (result && typeof result.then === 'function') {
+      module.promise = result.then(
+        () => {
+          module.loaded = true;
+        },
+        (error) => {
+          if (cache[id] === module) delete cache[id];
+          throw error;
+        },
+      );
+    } else module.loaded = true;
+    return module;
+  };
+  const settled = async (id) => {
+    const module = load(id);
+    if (module.promise) await module.promise;
     return module;
   };
 
@@ -117,7 +134,7 @@ const __r = (() => {
         declined[id] = true;
       },
       invalidate() {
-        if (!propagate([id])) location.reload();
+        Promise.resolve(propagate([id])).then((ok) => ok || location.reload());
       },
       on(event, callback) {
         const c = client(id);
@@ -175,8 +192,7 @@ const __r = (() => {
       }
     }
     for (const id of rerun) delete cache[id];
-    try {
-      for (const b of boundaries) load(b.self ? b.module : b.dep);
+    const finish = () => {
       for (const b of boundaries) {
         if (b.self) for (const callback of b.callbacks) callback(cache[b.module] && cache[b.module].exports);
         else
@@ -185,12 +201,25 @@ const __r = (() => {
             callback(many ? list.map((spec) => (((specs[b.module] || {})[spec] === b.dep) ? cache[b.dep].exports : undefined)) : cache[b.dep].exports);
           }
       }
-    } catch (error) {
+      console.log('[rkp] hot updated: ' + [...rerun].join(', '));
+      return true;
+    };
+    const failed = (error) => {
       console.error('[rkp] hot update failed; reloading', error);
       return false;
+    };
+    // Modules with top-level await take time: the answer is then a promise, and the callbacks wait for them.
+    try {
+      const waiting = [];
+      for (const b of boundaries) {
+        const module = load(b.self ? b.module : b.dep);
+        if (module.promise) waiting.push(module.promise);
+      }
+      if (waiting.length) return Promise.all(waiting).then(finish).catch(failed);
+      return finish();
+    } catch (error) {
+      return failed(error);
     }
-    console.log('[rkp] hot updated: ' + [...rerun].join(', '));
-    return true;
   };
 
   const api = {
@@ -203,7 +232,14 @@ const __r = (() => {
     i: (id) => load(id).exports,
     c: view,
     r: (id) => (kinds[id] === 'esm' ? load(id).exports : load(id).exports),
-    d: (id) => Promise.resolve().then(() => (kinds[id] === 'esm' ? load(id).exports : view(id))),
+    d: (id) =>
+      Promise.resolve().then(() => {
+        const module = load(id);
+        const done = () => (kinds[id] === 'esm' ? module.exports : view(id));
+        return module.promise ? module.promise.then(done) : done();
+      }),
+    // An import of a module that may have to wait: ready when it has run.
+    w: (id) => settled(id).then((m) => m.exports),
     get: (id, key) => {
       const value = cache[id] && cache[id].exports;
       return key === 'default' ? (value && value.__esModule ? value.default : value) : value == null ? undefined : value[key];
@@ -219,7 +255,12 @@ const __r = (() => {
     h: hot,
     run(entries) {
       link();
-      for (const id of entries) load(id);
+      const waiting = [];
+      for (const id of entries) {
+        const module = load(id);
+        if (module.promise) waiting.push(module.promise);
+      }
+      if (waiting.length) return Promise.all(waiting);
     },
     // A message from the server: the modules that changed (their new text, imports and the specifiers they use), and the ones gone.
     update(message) {

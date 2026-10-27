@@ -53,7 +53,8 @@ source.onmessage = (event) => {
     case 'hmr':
       hideError();
       // The page's module table swaps the modules in place; with none, or when a change reaches an entry nothing accepts, reload.
-      if (!(globalThis.__rathkit_hmr && globalThis.__rathkit_hmr.update(message))) reload();
+      if (!globalThis.__rathkit_hmr) reload();
+      else Promise.resolve(globalThis.__rathkit_hmr.update(message)).then((ok) => ok || reload());
       break;
     case 'css-update':
       hideError();

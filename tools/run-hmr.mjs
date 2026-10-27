@@ -22,12 +22,14 @@ import { value } from './counter.js';
 import { label } from './label.js';
 import def, { helper } from './lib.cjs';
 globalThis.log = globalThis.log || [];
+import('./waits.js').then((m) => globalThis.log.push('dynamic wait ' + m.w));
 globalThis.log.push('main ran ' + value + ' ' + label() + ' ' + def.kind + ' ' + helper());
 if (import.meta.hot) {
   import.meta.hot.accept('./counter.js', (mod) => globalThis.log.push('main saw counter ' + mod.value + ' ' + value));
 }
 `);
 write('counter.js', 'export const value = 1;\n');
+write('waits.js', "export const w = await Promise.resolve(7);\nif (import.meta.hot) import.meta.hot.accept((m) => globalThis.log.push('waits accepted ' + m.w));\n");
 write('label.js', `
 export let count = (import.meta.hot?.data.count ?? 0) + 1;
 export const label = () => 'label' + count;
@@ -100,6 +102,7 @@ try {
   writeFileSync(file, built);
   await import(pathToFileURL(file).href);
   check(globalThis.log[0] === 'main ran 1 label1 cjs h', 'the modules ran', JSON.stringify(globalThis.log));
+  check(await until(() => globalThis.log.includes('dynamic wait 7')), 'a dynamic import of a module that waits is waited for', JSON.stringify(globalThis.log));
 
   const next = async (type) => {
     const before = messages.length;
@@ -112,15 +115,23 @@ try {
   write('counter.js', 'export const value = 2;\n');
   const first = await wait;
   check(first && Object.keys(first.modules).length === 1 && Object.keys(first.modules)[0].endsWith('counter.js'), 'only the changed module is sent', JSON.stringify(first && Object.keys(first.modules)));
-  check(globalThis.__rathkit_hmr.update(first) === true, 'the update is applied');
+  check((await globalThis.__rathkit_hmr.update(first)) === true, 'the update is applied');
   check(globalThis.log.at(-1) === 'main saw counter 2 2' && globalThis.log.filter((l) => l.startsWith('main ran')).length === 1, 'the accepting importer is called, and does not run again', JSON.stringify(globalThis.log));
 
   // 2. label.js accepts itself: it is disposed, runs again with its data, and its callback gets the new module.
   const wait2 = next('hmr');
   write('label.js', readFileSync(join(dir, 'label.js'), 'utf8').replace("'label'", "'LABEL'"));
   const second = await wait2;
-  check(globalThis.__rathkit_hmr.update(second) === true, 'a self-accepting module is replaced');
+  check((await globalThis.__rathkit_hmr.update(second)) === true, 'a self-accepting module is replaced');
   check(globalThis.log.includes('label disposed') && globalThis.log.at(-1) === 'label accepted LABEL2', 'dispose ran, data carried over, the callback got the new module', JSON.stringify(globalThis.log.slice(-3)));
+
+  // A module with top-level await is replaced too: the callback runs when the new one has finished.
+  const waitAsync = next('hmr');
+  write('waits.js', readFileSync(join(dir, 'waits.js'), 'utf8').replace('Promise.resolve(7)', 'new Promise((r) => setTimeout(() => r(8), 20))'));
+  const asyncUpdate = await waitAsync;
+  const applying = globalThis.__rathkit_hmr.update(asyncUpdate);
+  check(applying instanceof Promise && globalThis.log.at(-1) !== 'waits accepted 8', 'an update of a module that waits answers with a promise', String(applying));
+  check((await applying) === true && globalThis.log.at(-1) === 'waits accepted 8', 'and applies it when the module has run', JSON.stringify(globalThis.log.slice(-2)));
 
   // A module that gains an import of a new file: both are sent, and the new one runs.
   const wait2b = next('hmr');
@@ -128,20 +139,20 @@ try {
   write('label.js', readFileSync(join(dir, 'label.js'), 'utf8').replace("export const label", "import { extra } from './extra.js';\nexport const extraLabel = () => extra;\nexport const label"));
   const added = await wait2b;
   check(added && Object.keys(added.modules).some((k) => k.endsWith('extra.js')) && Object.keys(added.modules).some((k) => k.endsWith('label.js')), 'a new module is sent with the one that imports it', JSON.stringify(added && Object.keys(added.modules)));
-  check(globalThis.__rathkit_hmr.update(added) === true && globalThis.log.at(-1).startsWith('label accepted'), 'and the update is applied');
+  check((await globalThis.__rathkit_hmr.update(added)) === true && globalThis.log.at(-1).startsWith('label accepted'), 'and the update is applied');
   // And one that loses it: the file is reported as removed.
   const wait2c = next('hmr');
   write('label.js', readFileSync(join(dir, 'label.js'), 'utf8').replace("import { extra } from './extra.js';\nexport const extraLabel = () => extra;\n", ''));
   rmSync(join(dir, 'extra.js'));
   const dropped = await wait2c;
   check(dropped && dropped.removed.some((k) => k.endsWith('extra.js')), 'a module that is gone is reported', JSON.stringify(dropped));
-  check(globalThis.__rathkit_hmr.update(dropped) === true, 'and the update is applied without it');
+  check((await globalThis.__rathkit_hmr.update(dropped)) === true, 'and the update is applied without it');
 
   // 3. lib.cjs is imported by main.js, which accepts nothing about it: the change reaches an entry, so the page reloads.
   const wait3 = next('hmr');
   write('lib.cjs', readFileSync(join(dir, 'lib.cjs'), 'utf8').replace('"h"', '"H"'));
   const third = await wait3;
-  check(third && globalThis.__rathkit_hmr.update(third) === false, 'a change nothing accepts asks for a reload');
+  check(third && (await globalThis.__rathkit_hmr.update(third)) === false, 'a change nothing accepts asks for a reload');
 
   controller.abort();
 } catch (error) {
@@ -173,6 +184,36 @@ try {
     check(want.status === 0, 'the normal bundle runs', want.stderr);
     check(got.status === 0, 'the table runs', got.stderr);
     check(got.stdout === want.stdout, 'the table prints what the bundle prints', '--- bundle\n' + want.stdout + '--- table\n' + got.stdout);
+  } catch (error) {
+    failed++;
+    console.log('FAIL ' + (error?.stack ?? error));
+  } finally {
+    served.kill();
+  }
+}
+
+// Decorators, enums, namespaces and top-level await (in the entry, in a dependency, through a re-export, and in a dynamic import).
+{
+  const app = join(root, 'tests', 'hmr', 'decorators-tla');
+  const normal = join(dir, 'dt-normal.mjs');
+  const built = spawnSync(bin, ['bundle', 'main.ts', '--outfile', normal, '--format', 'esm'], { cwd: app, encoding: 'utf8' });
+  check(built.status === 0, 'the decorators program builds as a bundle', built.stderr);
+  const want = spawnSync('node', [normal], { encoding: 'utf8' });
+  const served = spawn(bin, ['serve', 'main.ts', '--hmr', '--port', '0'], { cwd: app, stdio: ['ignore', 'pipe', 'pipe'] });
+  let log = '';
+  served.stdout.on('data', (d) => (log += d));
+  served.stderr.on('data', (d) => (log += d));
+  try {
+    if (!(await until(() => /(?:127\.0\.0\.1|localhost):\d+/.test(log)))) throw new Error('the server did not start: ' + log);
+    const port = /(?:localhost|127\.0\.0\.1):(\d+)/.exec(log)[1];
+    const table = await fetchBuilt('http://127.0.0.1:' + port);
+    check(!/does not support/.test(log), 'decorators and top-level await are accepted', log);
+    const file = join(dir, 'dt-table.mjs');
+    writeFileSync(file, table);
+    const got = spawnSync('node', [file], { encoding: 'utf8' });
+    check(want.status === 0 && want.stdout.includes('main-waited'), 'the program runs as a bundle', want.stderr + want.stdout);
+    check(got.status === 0, 'and as a table', got.stderr);
+    check(got.stdout === want.stdout, 'the table prints the same, the awaits in the same order', '--- bundle\n' + want.stdout + '--- table\n' + got.stdout + got.stderr);
   } catch (error) {
     failed++;
     console.log('FAIL ' + (error?.stack ?? error));

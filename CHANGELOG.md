@@ -43,7 +43,7 @@ First release.
 - `--target`: top-level await is rewritten for targets that lack it when the program is one file with nothing exported (the whole program becomes an async function, or a generator run by `__async` below es2017).
 - JS API: `plugins` takes plugin objects (their hooks run in the calling process, across a local socket) and `{ module }` descriptors.
 - `rkp serve --https` (with `--https-cert` and `--https-key`, or a self-signed certificate it makes and keeps): TLS (HTTP/2, or HTTP/1.1 for clients that ask for it) through a Node.js proxy in front of the dev server.
-- `rkp serve --hmr`: changed modules are replaced in the open page (`import.meta.hot.accept`, `dispose`, `data`, `decline`, `invalidate`), with the page reloading only when a change reaches an entry nothing accepts.
+- `rkp serve --hmr`: changed modules are replaced in the open page (`import.meta.hot.accept`, `dispose`, `data`, `decline`, `invalidate`), with the page reloading only when a change reaches an entry nothing accepts; top-level await and decorators work.
 - `--dts` and `--dts-dir`: declaration files for the entries, written with the project's `typescript` (JS API `dts`, `dtsDir`).
 - `--target=es2015` to `es2025`: `**`, `?.`, `??`, logical assignment, numeric separators, optional `catch` and trailing commas
   and object spread and rest (in declarations, parameters and `for of`), class fields, private members and static blocks are

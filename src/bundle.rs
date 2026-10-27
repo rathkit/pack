@@ -152,8 +152,8 @@ enum Code {
     /// Statements of an ES module, hoisted into the bundle scope.
     Esm(EsmCode),
     /// A CommonJS or JSON module: the whole file as a function body.
-    /// An ES module of the table `--hmr` builds: its text with the module statements gone, and the lines that stand for them.
-    Registry { edits: Vec<Edit>, header: String },
+    /// An ES module of the table `--hmr` builds: its statements as the usual output has them; the imports and exports are written at the end.
+    Registry(EsmCode),
     Wrapped {
         edits: Vec<Edit>,
         json: bool,

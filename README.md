@@ -171,8 +171,9 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   modules that accept it, those run again, and the page reloads when it reaches an entry that nothing accepts or when a file
   that is not a module changes; style sheets are swapped as before. What an importer reads from a replaced ES module is
   the new bindings (its exports object is the same one). No React Fast Refresh: a component module must accept updates
-  itself. `--hmr` does not support top-level await, decorators or module federation (it says so), and keeps
-  CommonJS packages as they are, so a package's own code is not replaced when it changes.
+  itself. Top-level await works (a module that awaits, and the ones that import it, run as async functions, and an update
+  of one is applied when it has run), as do decorators, enums and namespaces. `--hmr` does not work with module federation (it
+  says so), and keeps CommonJS packages as they are, so a package's own code is not replaced when it changes.
 - Plugins in the JS API: `build({ plugins: [...] })` and `serve({ plugins: [...] })` take plugin objects (Rollup's hooks,
   and Vite's `config`, `configResolved`, `transformIndexHtml`, `handleHotUpdate`), which stay in your process: the plugin host
   calls their hooks across a local socket, so what goes in and out is JSON (bytes as `Buffer`), a plugin keeps its own state as
