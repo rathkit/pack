@@ -1872,8 +1872,12 @@ impl<'a> Bundler<'a> {
         let mut seen = vec![false; graph.modules.len()];
         // `import()` and `require()` edges are not followed: what they load runs when they do,
         // except modules that could not be wrapped, which run at startup.
-        let mut roots = root_modules.to_vec();
-        roots.extend_from_slice(forced);
+        // Those that wait (top-level await) run before the entry points, which may `await import()` them at once and would find them
+        // not yet run; the others follow the entry points.
+        let waits = |id: &ModuleId| matches!(self.code.get(id), Some(Code::Esm(code)) if code.has_tla);
+        let mut roots: Vec<ModuleId> = forced.iter().copied().filter(|id| waits(id)).collect();
+        roots.extend_from_slice(root_modules);
+        roots.extend(forced.iter().copied().filter(|id| !waits(id)));
         for root in roots {
             if seen[root.index()] {
                 continue;
