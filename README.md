@@ -174,6 +174,12 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   the new bindings (its exports object is the same one). No React Fast Refresh: a component module must accept updates
   itself. `--hmr` does not support top-level await, decorators or module federation (it says so), and keeps
   CommonJS packages as they are, so a package's own code is not replaced when it changes.
+- `rkp serve ... --https` (`https: true` in the JS API) serves over HTTPS: a Node.js process (so Node is needed, as for
+  plugins) speaks TLS on the public port and passes requests, event streams included, to the dev server on the loopback.
+  By default a self-signed certificate for `localhost`, `127.0.0.1`, `::1` (and `--host`, when it is a name or address) is
+  made and kept in the cache folder (`$XDG_CACHE_HOME/rathkit` or `~/.cache/rathkit`; `RATHKIT_CERT_DIR` changes it),
+  valid for a year and made again when it is about to end; the browser asks you to trust it once. `--https-cert FILE
+  --https-key FILE` (PEM; `https: { cert, key }`) use your own, such as one from mkcert. HTTP/2 is not used.
 - Module federation: an application offers modules to others (`exposes`), takes modules from other applications
   (`remotes`), and agrees with them on one copy of each package they have in common (`shared`). The options are
   those of `ModuleFederationPlugin`; give them as `--federation FILE.json`, as `federation` in `rathkit.config.*`, or

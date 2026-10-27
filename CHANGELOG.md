@@ -40,6 +40,7 @@ First release.
   `--preserve-symlinks`, `--pure`, `--metafile`, `--entry-names`, `--chunk-names`, `--out-extension`, `--legal-comments`, `--inject`, `--jsx-dev`, `--tsconfig-raw`; an unknown option is an error.
 - Module federation: `getPublicPath`, `dts` `outputDir`, `generateAPITypes`, `additionalFilesToCompile`, `abortOnError`, `timeout`, `maxRetries`, `remoteTypeUrls` and `dev.disableLiveReload` / `disableHotTypesReload` are used; what is not carried out is named in a warning.
 - Module federation: `compilerInstance`, `extractThirdParty`, `extractRemoteTypes`, `afterGenerate`, `family`, `remoteTypesFolder`, `consumeAPITypes`, `runtimePkgs` and the router `bridge` are carried out; only `dts.implementation` is named in a warning.
+- `rkp serve --https` (with `--https-cert` and `--https-key`, or a self-signed certificate it makes and keeps): TLS through a Node.js proxy in front of the dev server.
 - `rkp serve --hmr`: changed modules are replaced in the open page (`import.meta.hot.accept`, `dispose`, `data`, `decline`, `invalidate`), with the page reloading only when a change reaches an entry nothing accepts.
 - `--dts` and `--dts-dir`: declaration files for the entries, written with the project's `typescript` (JS API `dts`, `dtsDir`).
 - `--target=es2015` to `es2025`: `**`, `?.`, `??`, logical assignment, numeric separators, optional `catch` and trailing commas

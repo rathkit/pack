@@ -48,6 +48,8 @@ export interface Options {
   resolveExtensions?: string[];
   /** Keep a symbolic link's own path instead of the real file's. */
   preserveSymlinks?: boolean;
+  /** `serve` only: serve over HTTPS. `true` makes (and keeps) a self-signed certificate for localhost that the browser has to be told to trust; give `{ cert, key }` (PEM files) to use your own, such as one made by mkcert. Needs Node.js. */
+  https?: boolean | { cert?: string; key?: string };
   /** `serve` only: replace changed modules in the open page (`import.meta.hot.accept`) instead of reloading it. The modules are a table of functions, not one scope-hoisted program; no top-level await, decorators or module federation. */
   hmr?: boolean;
   /** Write declaration files (`.d.ts`) for the entries with the project's own `typescript` package: one for each source file, laid out beside the output. */

@@ -136,11 +136,19 @@ impl ServeState {
 
 /// Binds the address and serves in the background. Returns the port.
 pub fn start(state: Arc<ServeState>, host: &str, port: u16) -> std::io::Result<u16> {
-    let listener = TcpListener::bind((host, port))?;
-    let port = listener.local_addr()?.port();
-    let loopback = listener.local_addr()?.ip().is_loopback();
-    *state.exposed.lock().unwrap() = !loopback;
-    *state.bound_host.lock().unwrap() = host.to_string();
+    let port = bind_and_serve(state.clone(), host, host, port)?;
+    configure(&state, port, host);
+    Ok(port)
+}
+
+/// Serves on the loopback, on a port of its own, for the HTTPS proxy to pass requests to; `public_host` is the address people reach the
+/// proxy at, which decides what is served (beyond this machine, only `public/`) and which host names are accepted.
+pub fn start_behind_proxy(state: Arc<ServeState>, public_host: &str) -> std::io::Result<u16> {
+    bind_and_serve(state, "127.0.0.1", public_host, 0)
+}
+
+/// Lets plugins set up the server (`configureServer`) and send messages to pages.
+pub fn configure(state: &Arc<ServeState>, port: u16, host: &str) {
     if let Some(plugins) = &state.host {
         let sink_state = state.clone();
         plugins.set_page_sink(Some(Arc::new(move |payload: &str| sink_state.broadcast(payload))));
@@ -148,6 +156,18 @@ pub fn start(state: Arc<ServeState>, host: &str, port: u16) -> std::io::Result<u
             *state.middlewares.lock().unwrap() = has;
         }
     }
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    use std::net::ToSocketAddrs;
+    host == "localhost" || (host, 0).to_socket_addrs().is_ok_and(|mut a| a.all(|addr| addr.ip().is_loopback()))
+}
+
+fn bind_and_serve(state: Arc<ServeState>, bind_host: &str, public_host: &str, port: u16) -> std::io::Result<u16> {
+    let listener = TcpListener::bind((bind_host, port))?;
+    let port = listener.local_addr()?.port();
+    *state.exposed.lock().unwrap() = if bind_host == public_host { !listener.local_addr()?.ip().is_loopback() } else { !is_loopback_host(public_host) };
+    *state.bound_host.lock().unwrap() = public_host.to_string();
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             let state = state.clone();
@@ -157,6 +177,72 @@ pub fn start(state: Arc<ServeState>, host: &str, port: u16) -> std::io::Result<u
         }
     });
     Ok(port)
+}
+
+const HTTPS: &str = include_str!("serve/https.mjs");
+
+/// The process that speaks TLS for the dev server (see `serve/https.mjs`). Dropping it closes its standard input, which ends it.
+pub struct HttpsProxy {
+    _child: std::process::Child,
+    _stdin: std::process::ChildStdin,
+}
+
+/// Starts the proxy on `host:port` (port 0 for any), passing requests to the dev server on the loopback at `upstream`. Returns it and
+/// the port it listens on. `cert` and `key` are PEM files; with neither, a self-signed certificate for localhost is made and kept.
+pub fn start_https(host: &str, port: u16, upstream: u16, cert: Option<&str>, key: Option<&str>, cwd: &Path) -> Result<(HttpsProxy, u16), String> {
+    use std::process::{Command, Stdio};
+    let dir = std::env::temp_dir().join(format!("rathkit-https-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos())));
+    let file = dir.join("https.mjs");
+    {
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder.create(&dir).map_err(|e| format!("cannot make {}: {e}", dir.display()))?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        options.open(&file).and_then(|mut f| f.write_all(HTTPS.as_bytes())).map_err(|e| format!("cannot write {}: {e}", file.display()))?;
+    }
+    let quote = crate::loader::quote;
+    let names = if matches!(host, "localhost" | "127.0.0.1" | "::1" | "0.0.0.0" | "::" | "[::]" | "[::1]") { String::new() } else { quote(host) };
+    let request = format!(
+        "{{\"host\":{},\"port\":{port},\"upstream\":{upstream},\"cert\":{},\"key\":{},\"names\":[{names}]}}",
+        quote(host),
+        cert.map_or("null".to_string(), |c| quote(&cwd.join(c).to_string_lossy())),
+        key.map_or("null".to_string(), |k| quote(&cwd.join(k).to_string_lossy())),
+    );
+    let spawned = Command::new(std::env::var_os("RATHKIT_NODE").unwrap_or_else(|| "node".into()))
+        .arg("--no-warnings")
+        .arg(&file)
+        .arg(&request)
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn();
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(format!("Node.js could not be started ({e}); --https needs it"));
+        }
+    };
+    let stdin = child.stdin.take().ok_or("no stdin")?;
+    let mut line = String::new();
+    let read = child.stdout.take().map(|out| BufReader::new(out).read_line(&mut line));
+    let _ = std::fs::remove_dir_all(&dir);
+    if !matches!(read, Some(Ok(n)) if n > 0) {
+        let _ = child.kill();
+        return Err("the HTTPS proxy did not start (is the certificate readable?)".to_string());
+    }
+    match line.trim().strip_prefix("listening ").and_then(|p| p.parse::<u16>().ok()) {
+        Some(public) => Ok((HttpsProxy { _child: child, _stdin: stdin }, public)),
+        None => {
+            let _ = child.kill();
+            Err(format!("the HTTPS proxy said: {}", line.trim()))
+        }
+    }
 }
 
 struct Request {

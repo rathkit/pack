@@ -529,6 +529,9 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     let mut outfile: Option<String> = None;
     let mut treeshake = true;
     let mut hmr = false;
+    let mut https = false;
+    let mut https_cert: Option<String> = None;
+    let mut https_key: Option<String> = None;
     let mut main_fields_set = false;
     let mut tsconfig_path: Option<String> = None;
     let mut outdir: Option<String> = None;
@@ -561,6 +564,16 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
             "--no-treeshake" => treeshake = false,
             // --hmr (serve): modules are replaced in the running page instead of reloading it.
             "--hmr" => hmr = true,
+            // --https [--https-cert FILE --https-key FILE] (serve): TLS in front of the dev server.
+            "--https" => https = true,
+            "--https-cert" => {
+                https = true;
+                https_cert = it.next().cloned();
+            }
+            "--https-key" => {
+                https = true;
+                https_key = it.next().cloned();
+            }
             "--original-paths" => bundle_options.original_paths = true,
             "--external" => options.external.extend(it.next().cloned()),
             "--condition" => options.resolve.conditions.extend(it.next().cloned()),
@@ -1038,6 +1051,10 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     } else {
         None
     };
+    if https && serve_state.is_none() {
+        eprintln!("error: --https is for rkp serve");
+        return Done::Exit(ExitCode::from(2));
+    }
     if hmr {
         if serve_state.is_none() {
             eprintln!("error: --hmr is for rkp serve");
@@ -1064,7 +1081,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     // Workers are scripts built on their own; the files they read and the files they copy are noted for the build that asked.
     let workers = std::sync::Arc::new(WorkerLog::default());
     options.worker_builder = Some(worker_builder(cwd.clone(), options.clone(), bundle_options.clone(), treeshake, workers.clone(), 0));
-    let job = std::sync::Arc::new(Job { cwd, entries, options, bundle_options, treeshake, outfile, outdir, host: plugin_host, config_file, watch, serve: serve_state, bind: (host_name, port), restart_files, workers, pages, metafile, dts: dts.then(|| (dts_dir, tsconfig_path.clone())) });
+    let job = std::sync::Arc::new(Job { cwd, entries, options, bundle_options, treeshake, outfile, outdir, host: plugin_host, config_file, watch, serve: serve_state, bind: (host_name, port), restart_files, workers, pages, metafile, dts: dts.then(|| (dts_dir, tsconfig_path.clone())), https: https.then(|| (https_cert, https_key)) });
     if let Some(host) = &job.host {
         // Child compilers of webpack plugins build one entry as a script that sets a global.
         let for_children = job.clone();
@@ -1105,6 +1122,8 @@ struct Job {
     metafile: Option<String>,
     /// `--dts`: with the folder to write the declarations to, or none for the output folder.
     dts: Option<(Option<String>, Option<String>)>,
+    /// `--https`: the certificate and key files, or none for a self-signed certificate.
+    https: Option<(Option<String>, Option<String>)>,
 }
 
 /// An html page given as an entry: its text, and the scripts in it with the files they come from.
@@ -1719,12 +1738,36 @@ fn watch_loop(job: std::sync::Arc<Job>) -> Done {
         host.set_watch_mode(true);
     }
     let config_path = job.config_file.as_ref().map(|f| job.cwd.join(f));
+    // Kept for as long as the server runs: dropping it ends the HTTPS proxy.
+    let mut _proxy = None;
     if let Some(state) = &job.serve {
-        match rathkit_pack::serve::start(state.clone(), &job.bind.0, job.bind.1) {
-            Ok(port) => println!("rkp serving at http://{}:{port}/", job.bind.0),
-            Err(e) => {
-                eprintln!("error: cannot listen on {}:{}: {e}", job.bind.0, job.bind.1);
-                return Done::Exit(ExitCode::FAILURE);
+        match &job.https {
+            None => match rathkit_pack::serve::start(state.clone(), &job.bind.0, job.bind.1) {
+                Ok(port) => println!("rkp serving at http://{}:{port}/", job.bind.0),
+                Err(e) => {
+                    eprintln!("error: cannot listen on {}:{}: {e}", job.bind.0, job.bind.1);
+                    return Done::Exit(ExitCode::FAILURE);
+                }
+            },
+            Some((cert, key)) => {
+                let upstream = match rathkit_pack::serve::start_behind_proxy(state.clone(), &job.bind.0) {
+                    Ok(port) => port,
+                    Err(e) => {
+                        eprintln!("error: cannot listen: {e}");
+                        return Done::Exit(ExitCode::FAILURE);
+                    }
+                };
+                match rathkit_pack::serve::start_https(&job.bind.0, job.bind.1, upstream, cert.as_deref(), key.as_deref(), &job.cwd) {
+                    Ok((proxy, port)) => {
+                        rathkit_pack::serve::configure(state, port, &job.bind.0);
+                        println!("rkp serving at https://{}:{port}/", job.bind.0);
+                        _proxy = Some(proxy);
+                    }
+                    Err(message) => {
+                        eprintln!("error: {message}");
+                        return Done::Exit(ExitCode::FAILURE);
+                    }
+                }
             }
         }
     }
