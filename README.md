@@ -174,6 +174,14 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   the new bindings (its exports object is the same one). No React Fast Refresh: a component module must accept updates
   itself. `--hmr` does not support top-level await, decorators or module federation (it says so), and keeps
   CommonJS packages as they are, so a package's own code is not replaced when it changes.
+- Plugins in the JS API: `build({ plugins: [...] })` and `serve({ plugins: [...] })` take plugin objects (Rollup's hooks,
+  and Vite's `config`, `configResolved`, `transformIndexHtml`, `handleHotUpdate`), which stay in your process: the plugin host
+  calls their hooks across a local socket, so what goes in and out is JSON (bytes as `Buffer`), a plugin keeps its own state as
+  usual, and `generateBundle` / `writeBundle` can change the `code` and `source` of the files or remove them. A hook's `this` has
+  `resolve`, `load`, `warn`, `info`, `debug`, `error` and `addWatchFile`; methods that answer at once from the build's own data
+  (`emitFile`, `parse`, `getModuleInfo`, ...) are not there and say so, and so is `configureServer`: such a plugin goes in a config
+  file, where it runs in the host itself. `{ module, export, options }` loads a plugin from a module where the build runs, with
+  everything a config file's plugin has. These come after the plugins of the config file, which still applies.
 - `rkp serve ... --https` (`https: true` in the JS API) serves over HTTPS: a Node.js process (so Node is needed, as for
   plugins) speaks TLS on the public port and passes requests, event streams included, to the dev server on the loopback.
   By default a self-signed certificate for `localhost`, `127.0.0.1`, `::1` (and `--host`, when it is a name or address) is

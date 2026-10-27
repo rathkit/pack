@@ -50,7 +50,7 @@ class BuildError extends Error {
   }
 }
 
-const KEYS = new Set(['entries', 'cwd', 'env', 'signal', 'outfile', 'outdir', 'format', 'globalName', 'globals', 'minify', 'keepNames', 'sourcemap', 'sourcesContent', 'splitting', 'treeShaking', 'platform', 'external', 'conditions', 'mainFields', 'alias', 'define', 'loader', 'assetNames', 'publicPath', 'jsx', 'jsxImportSource', 'jsxFactory', 'jsxFragment', 'decoratorMetadata', 'experimentalDecorators', 'strictNullChecks', 'tsconfig', 'config', 'mode', 'envDir', 'envPrefix', 'envFiles', 'banner', 'footer', 'drop', 'packages', 'resolveExtensions', 'preserveSymlinks', 'metafile', 'pure', 'entryNames', 'chunkNames', 'outExtension', 'legalComments', 'inject', 'jsxDev', 'tsconfigRaw', 'target', 'dts', 'dtsDir', 'hmr', 'https', 'federation', 'originalPaths', 'corsOrigins', 'port', 'host']);
+const KEYS = new Set(['entries', 'cwd', 'env', 'signal', 'outfile', 'outdir', 'format', 'globalName', 'globals', 'minify', 'keepNames', 'sourcemap', 'sourcesContent', 'splitting', 'treeShaking', 'platform', 'external', 'conditions', 'mainFields', 'alias', 'define', 'loader', 'assetNames', 'publicPath', 'jsx', 'jsxImportSource', 'jsxFactory', 'jsxFragment', 'decoratorMetadata', 'experimentalDecorators', 'strictNullChecks', 'tsconfig', 'config', 'mode', 'envDir', 'envPrefix', 'envFiles', 'banner', 'footer', 'drop', 'packages', 'resolveExtensions', 'preserveSymlinks', 'metafile', 'pure', 'entryNames', 'chunkNames', 'outExtension', 'legalComments', 'inject', 'jsxDev', 'tsconfigRaw', 'target', 'dts', 'dtsDir', 'hmr', 'https', 'plugins', 'federation', 'originalPaths', 'corsOrigins', 'port', 'host']);
 
 /** The command line for options. A key that is not an option is an error, so a typo is not ignored. */
 function toArgs(options, cleanups) {
@@ -172,12 +172,29 @@ function run(args, { cwd, env, signal } = {}) {
 }
 
 /**
+ * Plugins given as objects live in this process, so the build's plugin host reaches them over a local socket (see bridge.js): the options
+ * get the generated config that does it, and `cleanups` ends the socket.
+ */
+async function withPluginObjects(options, cleanups, command) {
+  if (!options.plugins || !options.plugins.length) return options;
+  const { startBridge } = require('./bridge.js');
+  const cwd = options.cwd ?? process.cwd();
+  let base = options.config;
+  if (base === undefined) base = ['rathkit.config.mjs', 'rathkit.config.js', 'rathkit.config.cjs'].find((f) => existsSync(join(cwd, f)));
+  else if (base === false) base = undefined;
+  const bridge = await startBridge(options.plugins, { base, cwd, command, mode: options.mode ?? (command === 'serve' ? 'development' : 'production') });
+  cleanups.push(() => bridge.close());
+  return { ...options, config: bridge.config };
+}
+
+/**
  * Builds. Resolves with the files written, or rejects with a BuildError that carries the errors.
  * `entries` are files or html pages; the rest is as the command's flags.
  */
 async function build(options = {}) {
   const cleanups = [];
   try {
+    options = await withPluginObjects(options, cleanups, 'build');
     const { entries, args } = toArgs(options, cleanups);
     if (!entries.length) throw new TypeError('rkp: build needs entries');
     const r = await run(['bundle', ...entries, ...args], options);
@@ -205,6 +222,7 @@ async function build(options = {}) {
 /** Starts the development server. Resolves once it is listening, with its address and a way to stop it. */
 async function serve(options = {}) {
   const cleanups = [];
+  options = await withPluginObjects(options, cleanups, 'serve');
   const { entries, args } = toArgs(options, cleanups);
   const child = spawn(binaryPath(), ['serve', ...entries, ...args], { cwd: options.cwd, env: options.env ? { ...process.env, ...options.env } : process.env, signal: options.signal, stdio: ['ignore', 'pipe', 'pipe'] });
   let stderr = '';
@@ -227,9 +245,13 @@ async function serve(options = {}) {
     /** Stops the server and waits for it to end. */
     close: () =>
       new Promise((done) => {
-        cleanups.forEach((c) => c());
-        if (child.exitCode !== null || child.signalCode !== null) return done();
-        child.once('close', () => done());
+        // The server first: it runs the plugins' last hooks, which need what the cleanups end (plugin objects' socket).
+        const finish = () => {
+          cleanups.forEach((c) => c());
+          done();
+        };
+        if (child.exitCode !== null || child.signalCode !== null) return finish();
+        child.once('close', finish);
         child.kill('SIGINT');
       }),
   };

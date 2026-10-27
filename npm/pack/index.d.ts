@@ -48,6 +48,8 @@ export interface Options {
   resolveExtensions?: string[];
   /** Keep a symbolic link's own path instead of the real file's. */
   preserveSymlinks?: boolean;
+  /** Plugins: objects with hooks (kept in this process; see `Plugin`), or `{ module }` to load one where the build runs. They come after those of the config file. */
+  plugins?: Array<Plugin | PluginModule | Array<Plugin | PluginModule>>;
   /** `serve` only: serve over HTTPS. `true` makes (and keeps) a self-signed certificate for localhost that the browser has to be told to trust; give `{ cert, key }` (PEM files) to use your own, such as one made by mkcert. Needs Node.js. */
   https?: boolean | { cert?: string; key?: string };
   /** `serve` only: replace changed modules in the open page (`import.meta.hot.accept`) instead of reloading it. The modules are a table of functions, not one scope-hoisted program; no top-level await, decorators or module federation. */
@@ -119,6 +121,56 @@ export interface Options {
 }
 
 /** What went into a build and what came out: the shape of esbuild's metafile. `bytesInOutput` is an estimate (the original sizes, scaled to the file's size). */
+/** What a hook of a plugin object can call. Only the methods that can answer later are here; ones that answer at once and need the build's own data (`emitFile`, `parse`, `getModuleInfo`) are not available to objects passed to the API: put such a plugin in a config file. */
+export interface PluginContext {
+  meta: { rollupVersion: string; watchMode: boolean };
+  resolve(source: string, importer?: string, options?: { skipSelf?: boolean; isEntry?: boolean; custom?: Record<string, unknown> }): Promise<{ id: string; external: boolean | 'absolute' | 'relative'; moduleSideEffects: boolean | 'no-treeshake'; meta: Record<string, unknown> } | null>;
+  load(options: { id: string } | string): Promise<{ id: string; code: string | null }>;
+  warn(message: string | { message: string }): void;
+  info(message: string | { message: string }): void;
+  debug(message: string | { message: string }): void;
+  error(message: string | { message: string; code?: string }): never;
+  addWatchFile(file: string): void;
+}
+
+type Hook<A extends unknown[], R> = ((this: PluginContext, ...args: A) => R | Promise<R>) | { order?: 'pre' | 'post' | null; handler: (this: PluginContext, ...args: A) => R | Promise<R> };
+
+/**
+ * A plugin written as an object (Rollup's hooks, Vite's `config`, `configResolved`, `transformIndexHtml`, `handleHotUpdate`), kept in this
+ * process: the build calls its hooks across a local socket, so what goes in and out is JSON (bytes as `Buffer`), and a hook can keep state in
+ * the plugin as usual. `generateBundle` and `writeBundle` see the files with their `code` and `source`, and what they change in those, or remove, is applied.
+ */
+export interface Plugin {
+  name: string;
+  enforce?: 'pre' | 'post';
+  apply?: 'build' | 'serve';
+  options?: Hook<[Record<string, unknown>], Record<string, unknown> | null | void>;
+  buildStart?: Hook<[Record<string, unknown>], void>;
+  resolveId?: Hook<[source: string, importer: string | undefined, options: { isEntry: boolean; kind?: string; custom?: Record<string, unknown> }], string | null | void | { id: string; external?: boolean | 'absolute' | 'relative'; moduleSideEffects?: boolean | 'no-treeshake' }>;
+  load?: Hook<[id: string], string | null | void | { code: string; map?: unknown }>;
+  transform?: Hook<[code: string, id: string], string | null | void | { code: string; map?: unknown }>;
+  buildEnd?: Hook<[error?: Error], void>;
+  renderChunk?: Hook<[code: string, chunk: Record<string, unknown>, options: Record<string, unknown>], string | null | void | { code: string; map?: unknown }>;
+  generateBundle?: Hook<[options: Record<string, unknown>, bundle: Record<string, { type: string; fileName: string; code?: string; source?: string | Uint8Array }>, isWrite: boolean], void>;
+  writeBundle?: Hook<[options: Record<string, unknown>, bundle: Record<string, { type: string; fileName: string; code?: string; source?: string | Uint8Array }>], void>;
+  closeBundle?: Hook<[], void>;
+  watchChange?: Hook<[id: string, change: { event: 'create' | 'update' | 'delete' }], void>;
+  banner?: Hook<[chunk: Record<string, unknown>], string>;
+  footer?: Hook<[chunk: Record<string, unknown>], string>;
+  config?: Hook<[config: Record<string, unknown>, env: { command: string; mode: string }], Record<string, unknown> | null | void>;
+  configResolved?: Hook<[config: Record<string, unknown>], void>;
+  transformIndexHtml?: Hook<[html: string, context: Record<string, unknown>], string | { html: string; tags: unknown[] } | void>;
+  handleHotUpdate?: Hook<[context: Record<string, unknown>], unknown[] | void>;
+  [hook: string]: unknown;
+}
+
+/** A plugin made by a module, loaded where the build runs (so it has everything a config file's plugin has): the module's `export` (default `default`), called with `options` if it is a function. */
+export interface PluginModule {
+  module: string;
+  export?: string;
+  options?: unknown;
+}
+
 export interface Metafile {
   inputs: Record<string, { bytes: number; imports: Array<{ path: string; kind: string; external?: boolean }>; format?: 'esm' | 'cjs' }>;
   outputs: Record<string, { bytes: number; inputs: Record<string, { bytesInOutput: number }>; imports: Array<{ path: string; kind: string; external?: boolean }>; exports: string[]; entryPoint?: string }>;

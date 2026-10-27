@@ -497,6 +497,16 @@ fn syntax_newer_than_the_target_is_rewritten_and_checked() {
 }
 
 #[test]
+fn plugin_objects_given_to_the_js_api_run_in_the_calling_process() {
+    if Command::new("node").arg("--version").output().is_err() {
+        return;
+    }
+    let output = Command::new("node").arg("tools/test-plugin-objects.mjs").env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rkp")).current_dir(env!("CARGO_MANIFEST_DIR")).output().expect("run the plugin objects script");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "plugin objects are wrong:\n{text}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+#[test]
 fn the_dev_server_speaks_https_with_a_certificate_of_its_own_or_a_given_one() {
     if Command::new("node").arg("--version").output().is_err() {
         return;

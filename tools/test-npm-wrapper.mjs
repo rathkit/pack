@@ -56,6 +56,7 @@ const lonely = join(tmp, 'lonely');
 mkdirSync(join(lonely, 'bin'), { recursive: true });
 cpSync(launcher, join(lonely, 'bin', 'rkp.js'));
 cpSync(join(scope, 'pack', 'index.js'), join(lonely, 'index.js'));
+cpSync(join(scope, 'pack', 'bridge.js'), join(lonely, 'bridge.js'));
 const none = run(process.execPath, [join(lonely, 'bin', 'rkp.js'), '--version'], { cwd: lonely });
 if (none.status === 0 || !/there is no build for/.test(none.stderr)) fail(`a missing platform package gave ${none.status} ${none.stderr}`);
 
