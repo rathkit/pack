@@ -163,7 +163,17 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   `transformIndexHtml` (strings, `{ html, tags }`, `order`) and `handleHotUpdate` (returning `[]` stops the
   reload; `server.ws.send` events reach `import.meta.hot.on`). `import.meta.hot` exists
   (`on`, `off`, `send`, `dispose`, `invalidate`, `data`; `accept` is accepted and unused). Replacing single
-  modules in a running page is not possible: the output is one scope-hoisted program, so scripts reload.
+  modules in a running page is not possible in this mode: the output is one scope-hoisted program, so scripts reload.
+  With `--hmr` (`rkp serve ... --hmr`; `hmr: true` in the JS API) the modules are a table of functions instead
+  (nothing is renamed, shaken or minified), and a rebuild sends the page only the modules whose text changed:
+  `import.meta.hot.accept()` (a module accepts its own new version), `accept("./dep", (mod) => ...)` and
+  `accept(["./a", "./b"], ([a, b]) => ...)` (an importer accepts the new version of what it imports), `dispose(data => ...)`,
+  `data` (kept between versions), `decline()` and `invalidate()` work as in Vite. A change walks up the importers to the
+  modules that accept it, those run again, and the page reloads when it reaches an entry that nothing accepts or when a file
+  that is not a module changes; style sheets are swapped as before. What an importer reads from a replaced ES module is
+  the new bindings (its exports object is the same one). No React Fast Refresh: a component module must accept updates
+  itself. `--hmr` does not support top-level await, decorators or module federation (it says so), and keeps
+  CommonJS packages as they are, so a package's own code is not replaced when it changes.
 - Module federation: an application offers modules to others (`exposes`), takes modules from other applications
   (`remotes`), and agrees with them on one copy of each package they have in common (`shared`). The options are
   those of `ModuleFederationPlugin`; give them as `--federation FILE.json`, as `federation` in `rathkit.config.*`, or

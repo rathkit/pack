@@ -4,8 +4,8 @@
 //! No dependencies: a `TcpListener`, a thread per connection, and server-sent events for the page. Plugins take part
 //! through the host (Vite's `configureServer`, `transformIndexHtml`, `handleHotUpdate`); this side does the HTTP.
 //!
-//! What a page cannot have is module-by-module hot replacement: the output is one scope-hoisted program, so a script
-//! change reloads the page. Style sheets are swapped without a reload, and `import.meta.hot` exists so code written
+//! Without `--hmr` a page cannot have module-by-module hot replacement: the output is one scope-hoisted program, so a script
+//! change reloads the page. (With it the build is a table of modules; see `bundle/registry.rs`.) Style sheets are swapped without a reload, and `import.meta.hot` exists so code written
 //! for it runs (its `accept` callbacks are not used; `dispose` callbacks run before the reload).
 
 use std::collections::HashMap;
@@ -33,11 +33,17 @@ pub struct ServeState {
     /// Origins other than this server that may read the build (module federation: a page of another
     /// dev server loads this one's files). `local` stands for any page on this machine.
     cors: Mutex<Vec<String>>,
+    /// With `--hmr`: the text of every module of the last build, to find the ones a rebuild changed.
+    modules: Mutex<Option<HashMap<String, String>>>,
+    /// The update for the pages, made when the modules of a build were published.
+    update: Mutex<Option<String>>,
+    /// The modules of the last two builds, so that a file that was one (and may be gone) is known to be a module.
+    known_ids: Mutex<std::collections::HashSet<String>>,
 }
 
 impl ServeState {
     pub fn new(cwd: PathBuf, host: Option<Arc<PluginHost>>) -> Arc<ServeState> {
-        Arc::new(ServeState { cwd, host, files: Mutex::new(HashMap::new()), entries: Mutex::new(Vec::new()), clients: Mutex::new(Vec::new()), middlewares: Mutex::new(false), last_error: Mutex::new(None), exposed: Mutex::new(false), bound_host: Mutex::new(String::new()), cors: Mutex::new(Vec::new()) })
+        Arc::new(ServeState { cwd, host, files: Mutex::new(HashMap::new()), entries: Mutex::new(Vec::new()), clients: Mutex::new(Vec::new()), middlewares: Mutex::new(false), last_error: Mutex::new(None), exposed: Mutex::new(false), bound_host: Mutex::new(String::new()), cors: Mutex::new(Vec::new()), modules: Mutex::new(None), update: Mutex::new(None), known_ids: Mutex::new(std::collections::HashSet::new()) })
     }
 
     /// The finished build: files by name, and which file holds which entry.
@@ -45,6 +51,45 @@ impl ServeState {
         *self.files.lock().unwrap() = files.into_iter().collect();
         *self.entries.lock().unwrap() = entries;
         *self.last_error.lock().unwrap() = None;
+    }
+
+    /// With `--hmr`: the modules of the build just published. What changed since the last one becomes the update for the pages.
+    pub fn publish_modules(&self, modules: &[crate::bundle::HmrModule]) {
+        let quote = crate::loader::quote;
+        let mut known = self.modules.lock().unwrap();
+        let next: HashMap<String, String> = modules.iter().map(|m| (m.id.clone(), m.code.clone())).collect();
+        let mut update = None;
+        if let Some(before) = known.as_ref() {
+            let mut entries = Vec::new();
+            for m in modules.iter().filter(|m| before.get(&m.id) != Some(&m.code)) {
+                let deps = m.deps.iter().map(|d| quote(d)).collect::<Vec<_>>().join(",");
+                let specs = m.specs.iter().map(|(s, t)| format!("{}:{}", quote(s), quote(t))).collect::<Vec<_>>().join(",");
+                entries.push(format!("{}:{{\"kind\":{},\"code\":{},\"deps\":[{deps}],\"specs\":{{{specs}}}}}", quote(&m.id), quote(m.kind), quote(&m.code)));
+            }
+            let removed: Vec<String> = before.keys().filter(|k| !next.contains_key(*k)).map(|k| quote(k)).collect();
+            if !entries.is_empty() || !removed.is_empty() {
+                update = Some(format!("{{\"type\":\"hmr\",\"modules\":{{{}}},\"removed\":[{}]}}", entries.join(","), removed.join(",")));
+            }
+        }
+        let mut ids: std::collections::HashSet<String> = next.keys().cloned().collect();
+        if let Some(before) = known.as_ref() {
+            ids.extend(before.keys().cloned());
+        }
+        *self.known_ids.lock().unwrap() = ids;
+        *known = Some(next);
+        *self.update.lock().unwrap() = update;
+    }
+
+    /// Whether the build is a table of modules that pages can update.
+    pub fn hmr_active(&self) -> bool {
+        self.modules.lock().unwrap().is_some()
+    }
+
+    /// The update since the last build (if any change), with the modules, when the build is a table of modules that pages can update, and if so the update since the last build (if any change) and
+    /// whether a file is one of its modules.
+    pub fn hmr_state(&self) -> Option<(Option<String>, std::collections::HashSet<String>)> {
+        self.modules.lock().unwrap().as_ref()?;
+        Some((self.update.lock().unwrap().take(), self.known_ids.lock().unwrap().clone()))
     }
 
     /// Adds files to the published build (they are replaced when the next build is published).

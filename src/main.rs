@@ -528,6 +528,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     let mut options = GraphOptions::default();
     let mut outfile: Option<String> = None;
     let mut treeshake = true;
+    let mut hmr = false;
     let mut main_fields_set = false;
     let mut tsconfig_path: Option<String> = None;
     let mut outdir: Option<String> = None;
@@ -558,6 +559,8 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
         match arg.as_str() {
             "--outfile" => outfile = it.next().cloned(),
             "--no-treeshake" => treeshake = false,
+            // --hmr (serve): modules are replaced in the running page instead of reloading it.
+            "--hmr" => hmr = true,
             "--original-paths" => bundle_options.original_paths = true,
             "--external" => options.external.extend(it.next().cloned()),
             "--condition" => options.resolve.conditions.extend(it.next().cloned()),
@@ -1035,6 +1038,18 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     } else {
         None
     };
+    if hmr {
+        if serve_state.is_none() {
+            eprintln!("error: --hmr is for rkp serve");
+            return Done::Exit(ExitCode::from(2));
+        }
+        if options.federation.is_some() {
+            eprintln!("error: --hmr does not work with module federation");
+            return Done::Exit(ExitCode::from(2));
+        }
+        bundle_options.hmr = true;
+        treeshake = false;
+    }
     if let (Some(state), Some(federation)) = (&serve_state, &options.federation) {
         // Declarations written after a rebuild are served as soon as they are there.
         let state = state.clone();
@@ -1240,6 +1255,7 @@ fn worker_builder(cwd: std::path::PathBuf, options: rathkit_pack::graph::GraphOp
         o.globals = Vec::new();
         o.federation = None;
         o.hot = false;
+        o.hmr = false;
         o.map_base = None;
         match rathkit_pack::bundle::bundle(&graph, &linked, &shaken, &o) {
             Ok(output) => {
@@ -1529,6 +1545,9 @@ fn run_build(job: &Job) -> Outcome {
                 }
                 let entries = output.chunks.iter().filter(|c| c.is_entry).filter_map(|c| c.facade_module.as_ref().map(|m| (std::path::PathBuf::from(m), c.file.clone()))).collect();
                 state.publish(files, entries);
+                if let Some(modules) = &output.hmr {
+                    state.publish_modules(modules);
+                }
                 outcome.ok = true;
             }
             Err(diagnostics) => {
@@ -1784,6 +1803,23 @@ fn watch_loop(job: std::sync::Arc<Job>) -> Done {
         if let Some(state) = &job.serve {
             match &outcome.error {
                 Some(message) => state.broadcast_error(message),
+                None if outcome.ok && !suppressed && state.hmr_active() => {
+                    // Modules are replaced in the page; style sheets are swapped; any other file reloads it.
+                    let (update, ids) = state.hmr_state().unwrap_or_default();
+                    let is_sheet = |p: &std::path::PathBuf| p.extension().is_some_and(|e| e == "css");
+                    if changed.iter().all(|(p, _)| is_sheet(p) || ids.contains(&p.to_string_lossy().into_owned())) {
+                        if let Some(json) = update {
+                            state.broadcast(&json);
+                        }
+                        if changed.iter().any(|(p, _)| is_sheet(p)) {
+                            let files: Vec<String> = state.style_sheets().iter().map(|f| format!("{f:?}")).collect();
+                            let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+                            state.broadcast(&format!("{{\"type\":\"css-update\",\"files\":[{}],\"t\":{t}}}", files.join(",")));
+                        }
+                    } else {
+                        state.broadcast("{\"type\":\"full-reload\"}");
+                    }
+                }
                 None if outcome.ok && !suppressed => {
                     // Style sheets are swapped in place; anything else reloads the page.
                     let sheets_only = changed.iter().all(|(p, _)| p.extension().is_some_and(|e| e == "css") && !p.to_string_lossy().ends_with(".module.css"));

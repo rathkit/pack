@@ -497,6 +497,16 @@ fn syntax_newer_than_the_target_is_rewritten_and_checked() {
 }
 
 #[test]
+fn changed_modules_are_replaced_in_the_page_with_hmr() {
+    if Command::new("node").arg("--version").output().is_err() {
+        return;
+    }
+    let output = Command::new("node").arg("tools/run-hmr.mjs").env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rkp")).current_dir(env!("CARGO_MANIFEST_DIR")).output().expect("run the hmr script");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "hmr is wrong:\n{text}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+#[test]
 fn declaration_files_are_written_for_the_entries_and_checked_by_a_consumer() {
     if Command::new("node").arg("--version").output().is_err() {
         return;

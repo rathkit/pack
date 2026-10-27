@@ -1,0 +1,312 @@
+// Tests for `rkp serve --hmr`: the served build is a table of modules; changing a file sends an update, and the table replaces the modules
+// in place (here in Node, with the page client's job done by this script): accepted by the module itself, by its importer, and not
+// accepted at all (the page would reload).
+//   node tools/run-hmr.mjs
+import { spawn, spawnSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { tmpdir, homedir } from 'node:os';
+import { existsSync, readdirSync, cpSync, symlinkSync } from 'node:fs';
+
+const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+const bin = process.env.RATHKIT_PACK_BIN ?? join(root, 'target', 'release', 'rkp');
+const dir = mkdtempSync(join(tmpdir(), 'hmr-'));
+const write = (name, text) => {
+  mkdirSync(dirname(join(dir, name)), { recursive: true });
+  writeFileSync(join(dir, name), text);
+};
+write('index.html', '<!doctype html><html><body><script type="module" src="/main.js"></script></body></html>\n');
+write('main.js', `
+import { value } from './counter.js';
+import { label } from './label.js';
+import def, { helper } from './lib.cjs';
+globalThis.log = globalThis.log || [];
+globalThis.log.push('main ran ' + value + ' ' + label() + ' ' + def.kind + ' ' + helper());
+if (import.meta.hot) {
+  import.meta.hot.accept('./counter.js', (mod) => globalThis.log.push('main saw counter ' + mod.value + ' ' + value));
+}
+`);
+write('counter.js', 'export const value = 1;\n');
+write('label.js', `
+export let count = (import.meta.hot?.data.count ?? 0) + 1;
+export const label = () => 'label' + count;
+if (import.meta.hot) {
+  import.meta.hot.dispose((data) => { data.count = count; globalThis.log.push('label disposed'); });
+  import.meta.hot.accept((mod) => globalThis.log.push('label accepted ' + mod.label()));
+}
+`);
+write('lib.cjs', 'exports.kind = "cjs"; exports.helper = () => "h"; module.exports.default = undefined; module.exports = Object.assign(module.exports, { kind: "cjs" });\n');
+
+const child = spawn(bin, ['serve', 'main.js', '--hmr', '--port', '0'], { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] });
+let output = '';
+child.stdout.on('data', (d) => (output += d));
+child.stderr.on('data', (d) => (output += d));
+let failed = 0;
+const check = (ok, what, detail = '') => {
+  if (!ok) {
+    failed++;
+    console.log(`FAIL ${what}${detail ? '\n  ' + detail : ''}`);
+  }
+};
+const until = async (condition, ms = 15000) => {
+  const started = Date.now();
+  while (Date.now() - started < ms) {
+    if (await condition()) return true;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return false;
+};
+const fetchBuilt = async (base) => {
+  let response;
+  await until(async () => {
+    response = await fetch(base + '/bundle.js').catch(() => null);
+    return response?.ok;
+  }, 60000);
+  if (!response?.ok) throw new Error('the build was not served');
+  return response.text();
+};
+try {
+  if (!(await until(() => /localhost:\d+|127\.0\.0\.1:\d+/.test(output)))) throw new Error('the server did not start: ' + output);
+  const port = /(?:localhost|127\.0\.0\.1):(\d+)/.exec(output)[1];
+  const base = `http://127.0.0.1:${port}`;
+  const built = await fetchBuilt(base);
+  check(/__r\.def\(/.test(built) && !/__toESM|var __cjs/.test(built), 'the build is a table of modules', built.slice(0, 300));
+
+  // The messages the page would get.
+  const messages = [];
+  const controller = new AbortController();
+  fetch(base + '/__rathkit/events', { signal: controller.signal }).then(async (response) => {
+    const reader = response.body.getReader();
+    let buffer = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) return;
+      buffer += Buffer.from(value).toString();
+      let at;
+      while ((at = buffer.indexOf('\n\n')) >= 0) {
+        const line = buffer.slice(0, at).replace(/^data: /, '');
+        buffer = buffer.slice(at + 2);
+        try {
+          messages.push(JSON.parse(line));
+        } catch {}
+      }
+    }
+  }).catch(() => {});
+
+  // The page: the build run in this process.
+  globalThis.location = { reload() { globalThis.reloaded = (globalThis.reloaded ?? 0) + 1; } };
+  const file = join(dir, 'page.mjs');
+  writeFileSync(file, built);
+  await import(pathToFileURL(file).href);
+  check(globalThis.log[0] === 'main ran 1 label1 cjs h', 'the modules ran', JSON.stringify(globalThis.log));
+
+  const next = async (type) => {
+    const before = messages.length;
+    const found = await until(() => messages.slice(before).some((m) => m.type === type));
+    return found ? messages.slice(before).find((m) => m.type === type) : undefined;
+  };
+
+  // 1. counter.js changes; main.js accepts it: main does not run again, its callback gets the new module.
+  const wait = next('hmr');
+  write('counter.js', 'export const value = 2;\n');
+  const first = await wait;
+  check(first && Object.keys(first.modules).length === 1 && Object.keys(first.modules)[0].endsWith('counter.js'), 'only the changed module is sent', JSON.stringify(first && Object.keys(first.modules)));
+  check(globalThis.__rathkit_hmr.update(first) === true, 'the update is applied');
+  check(globalThis.log.at(-1) === 'main saw counter 2 2' && globalThis.log.filter((l) => l.startsWith('main ran')).length === 1, 'the accepting importer is called, and does not run again', JSON.stringify(globalThis.log));
+
+  // 2. label.js accepts itself: it is disposed, runs again with its data, and its callback gets the new module.
+  const wait2 = next('hmr');
+  write('label.js', readFileSync(join(dir, 'label.js'), 'utf8').replace("'label'", "'LABEL'"));
+  const second = await wait2;
+  check(globalThis.__rathkit_hmr.update(second) === true, 'a self-accepting module is replaced');
+  check(globalThis.log.includes('label disposed') && globalThis.log.at(-1) === 'label accepted LABEL2', 'dispose ran, data carried over, the callback got the new module', JSON.stringify(globalThis.log.slice(-3)));
+
+  // A module that gains an import of a new file: both are sent, and the new one runs.
+  const wait2b = next('hmr');
+  write('extra.js', "export const extra = 'extra!';\n");
+  write('label.js', readFileSync(join(dir, 'label.js'), 'utf8').replace("export const label", "import { extra } from './extra.js';\nexport const extraLabel = () => extra;\nexport const label"));
+  const added = await wait2b;
+  check(added && Object.keys(added.modules).some((k) => k.endsWith('extra.js')) && Object.keys(added.modules).some((k) => k.endsWith('label.js')), 'a new module is sent with the one that imports it', JSON.stringify(added && Object.keys(added.modules)));
+  check(globalThis.__rathkit_hmr.update(added) === true && globalThis.log.at(-1).startsWith('label accepted'), 'and the update is applied');
+  // And one that loses it: the file is reported as removed.
+  const wait2c = next('hmr');
+  write('label.js', readFileSync(join(dir, 'label.js'), 'utf8').replace("import { extra } from './extra.js';\nexport const extraLabel = () => extra;\n", ''));
+  rmSync(join(dir, 'extra.js'));
+  const dropped = await wait2c;
+  check(dropped && dropped.removed.some((k) => k.endsWith('extra.js')), 'a module that is gone is reported', JSON.stringify(dropped));
+  check(globalThis.__rathkit_hmr.update(dropped) === true, 'and the update is applied without it');
+
+  // 3. lib.cjs is imported by main.js, which accepts nothing about it: the change reaches an entry, so the page reloads.
+  const wait3 = next('hmr');
+  write('lib.cjs', readFileSync(join(dir, 'lib.cjs'), 'utf8').replace('"h"', '"H"'));
+  const third = await wait3;
+  check(third && globalThis.__rathkit_hmr.update(third) === false, 'a change nothing accepts asks for a reload');
+
+  controller.abort();
+} catch (error) {
+  failed++;
+  console.log('FAIL ' + (error?.stack ?? error));
+} finally {
+  child.kill();
+}
+
+// The same program, run as a normal bundle and as the table: it must print the same.
+{
+  const app = join(root, 'tests', 'hmr', 'app');
+  const run = (file) => spawnSync('node', [file], { encoding: 'utf8' });
+  const normal = join(dir, 'normal.mjs');
+  const built = spawnSync(bin, ['bundle', 'main.js', '--outfile', normal, '--format', 'esm'], { cwd: app, encoding: 'utf8' });
+  check(built.status === 0, 'the normal bundle builds', built.stderr);
+  const want = run(normal);
+  const served = spawn(bin, ['serve', 'main.js', '--hmr', '--port', '0'], { cwd: app, stdio: ['ignore', 'pipe', 'pipe'] });
+  let log = '';
+  served.stdout.on('data', (d) => (log += d));
+  served.stderr.on('data', (d) => (log += d));
+  try {
+    if (!(await until(() => /(?:127\.0\.0\.1|localhost):\d+/.test(log)))) throw new Error('the server did not start: ' + log);
+    const port = /(?:localhost|127\.0\.0\.1):(\d+)/.exec(log)[1];
+    const table = await fetchBuilt('http://127.0.0.1:' + port);
+    const file = join(dir, 'table.mjs');
+    writeFileSync(file, table);
+    const got = run(file);
+    check(want.status === 0, 'the normal bundle runs', want.stderr);
+    check(got.status === 0, 'the table runs', got.stderr);
+    check(got.stdout === want.stdout, 'the table prints what the bundle prints', '--- bundle\n' + want.stdout + '--- table\n' + got.stdout);
+  } catch (error) {
+    failed++;
+    console.log('FAIL ' + (error?.stack ?? error));
+  } finally {
+    served.kill();
+  }
+}
+
+// React: JSX, named imports from CommonJS packages, CSS modules.
+if (existsSync(join(root, 'bench', 'node_modules', 'react-dom'))) {
+  const app = join(dir, 'react-app');
+  cpSync(join(root, 'tests', 'hmr', 'react'), app, { recursive: true });
+  symlinkSync(join(root, 'bench', 'node_modules'), join(app, 'node_modules'), 'dir');
+  const define = ['--define', 'process.env.NODE_ENV="development"'];
+  const normal = join(dir, 'react-normal.mjs');
+  const built = spawnSync(bin, ['bundle', 'main.jsx', '--outfile', normal, '--format', 'esm', ...define], { cwd: app, encoding: 'utf8' });
+  check(built.status === 0, 'the React bundle builds', built.stderr);
+  const want = spawnSync('node', [normal], { encoding: 'utf8' });
+  const served = spawn(bin, ['serve', 'main.jsx', '--hmr', '--port', '0', ...define], { cwd: app, stdio: ['ignore', 'pipe', 'pipe'] });
+  let log = '';
+  served.stdout.on('data', (d) => (log += d));
+  served.stderr.on('data', (d) => (log += d));
+  try {
+    if (!(await until(() => /(?:127\.0\.0\.1|localhost):\d+/.test(log)))) throw new Error('the server did not start: ' + log);
+    const port = /(?:localhost|127\.0\.0\.1):(\d+)/.exec(log)[1];
+    const table = await fetchBuilt('http://127.0.0.1:' + port);
+    const file = join(app, 'table.mjs');
+    writeFileSync(file, table);
+    const got = spawnSync('node', [file], { encoding: 'utf8', cwd: app });
+    check(want.status === 0 && want.stdout.includes('hello <!-- -->table'), 'the React bundle runs', want.stderr + want.stdout);
+    check(got.status === 0, 'the React table runs', got.stderr);
+    check(got.stdout === want.stdout, 'React prints the same from the table', '--- bundle\n' + want.stdout + '--- table\n' + got.stdout + got.stderr);
+  } catch (error) {
+    failed++;
+    console.log('FAIL ' + (error?.stack ?? error));
+  } finally {
+    served.kill();
+  }
+}
+
+// In a browser: the page client applies the updates, and the page is not reloaded.
+{
+  const findBrowser = () => {
+    if (process.env.CHROME) return process.env.CHROME;
+    const cache = join(homedir(), '.cache', 'ms-playwright');
+    if (existsSync(cache)) {
+      for (const d of readdirSync(cache).filter((d) => d.startsWith('chromium_headless_shell')).sort().reverse()) {
+        const found = join(cache, d, 'chrome-headless-shell-linux64', 'chrome-headless-shell');
+        if (existsSync(found)) return found;
+      }
+      for (const d of readdirSync(cache).filter((d) => d.startsWith('chromium-')).sort().reverse()) {
+        const found = join(cache, d, 'chrome-linux64', 'chrome');
+        if (existsSync(found)) return found;
+      }
+    }
+    for (const name of ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser', 'chrome']) if (spawnSync('which', [name], { encoding: 'utf8' }).status === 0) return name;
+    return null;
+  };
+  const browser = findBrowser();
+  if (!browser) {
+    console.log('hmr: no Chromium-based browser found (set CHROME); the browser checks are skipped');
+  } else {
+    const site = join(dir, 'site');
+    const put = (name, text) => {
+      mkdirSync(dirname(join(site, name)), { recursive: true });
+      writeFileSync(join(site, name), text);
+    };
+    put('index.html', '<!doctype html><html><head><script>window.__page = Math.random();</script></head><body><div id="out"></div><script type="module" src="/main.js"></script></body></html>\n');
+    put('main.js', "import './style.css';\nimport { text } from './view.js';\nimport { stamp } from './entry-only.js';\nconst show = () => (document.getElementById('out').textContent = text() + '|' + stamp);\nshow();\nif (import.meta.hot) import.meta.hot.accept('./view.js', () => show());\n");
+    put('view.js', "export const text = () => 'one';\n");
+    put('entry-only.js', "export const stamp = 'a';\n");
+    put('style.css', 'body { color: rgb(1, 2, 3); }\n');
+    const server = spawn(bin, ['serve', 'main.js', '--hmr', '--port', '0'], { cwd: site, stdio: ['ignore', 'pipe', 'pipe'] });
+    let log = '';
+    server.stdout.on('data', (d) => (log += d));
+    server.stderr.on('data', (d) => (log += d));
+    const profile = mkdtempSync(join(tmpdir(), 'hmr-profile-'));
+    const chrome = spawn(browser, ['--no-sandbox', '--disable-gpu', '--headless=new', `--user-data-dir=${profile}`, '--remote-debugging-port=0', 'about:blank'], { stdio: 'ignore' });
+    try {
+      if (!(await until(() => /(?:127\.0\.0\.1|localhost):\d+/.test(log)))) throw new Error('the server did not start: ' + log);
+      const port = /(?:localhost|127\.0\.0\.1):(\d+)/.exec(log)[1];
+      let targets;
+      await until(async () => {
+        const f = join(profile, 'DevToolsActivePort');
+        if (!existsSync(f)) return false;
+        targets = await fetch(`http://127.0.0.1:${readFileSync(f, 'utf8').split('\n')[0]}/json`).then((r) => r.json()).catch(() => undefined);
+        return Boolean(targets);
+      });
+      const ws = new WebSocket(targets.find((t) => t.type === 'page').webSocketDebuggerUrl);
+      await new Promise((r) => (ws.onopen = r));
+      let id = 0;
+      const pending = new Map();
+      ws.onmessage = (m) => {
+        const d = JSON.parse(m.data);
+        if (d.id && pending.has(d.id)) {
+          pending.get(d.id)(d.result);
+          pending.delete(d.id);
+        }
+      };
+      const send = (method, params = {}) => new Promise((r) => { const i = ++id; pending.set(i, r); ws.send(JSON.stringify({ id: i, method, params })); });
+      const evaluate = async (expression) => (await send('Runtime.evaluate', { expression, returnByValue: true })).result?.value;
+      await send('Runtime.enable');
+      await send('Page.enable');
+      await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
+      check(await until(async () => (await evaluate("document.getElementById('out')?.textContent")) === 'one|a'), 'the page runs the modules');
+      const page = await evaluate('window.__page');
+
+      write2(site, 'view.js', "export const text = () => 'two';\n");
+      check(await until(async () => (await evaluate("document.getElementById('out')?.textContent")) === 'two|a'), 'a module its importer accepts is replaced in the page');
+      check((await evaluate('window.__page')) === page, 'and the page was not reloaded');
+
+      write2(site, 'style.css', 'body { color: rgb(4, 5, 6); }\n');
+      check(await until(async () => (await evaluate("getComputedStyle(document.body).color")) === 'rgb(4, 5, 6)'), 'a style sheet is swapped');
+      check((await evaluate('window.__page')) === page, 'without a reload');
+
+      write2(site, 'entry-only.js', "export const stamp = 'b';\n");
+      check(await until(async () => (await evaluate("document.getElementById('out')?.textContent")) === 'two|b'), 'a change nothing accepts reloads the page');
+      check((await evaluate('window.__page')) !== page, 'it is a new page');
+      ws.close();
+    } catch (error) {
+      failed++;
+      console.log('FAIL ' + (error?.stack ?? error));
+    } finally {
+      server.kill();
+      chrome.kill();
+    }
+  }
+}
+function write2(base, name, text) {
+  writeFileSync(join(base, name), text);
+}
+if (failed) {
+  console.log(`${failed} failure(s)`);
+  process.exit(1);
+}
+rmSync(dir, { recursive: true, force: true });
+console.log('hmr: all checks pass');

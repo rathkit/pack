@@ -48,6 +48,8 @@ export interface Options {
   resolveExtensions?: string[];
   /** Keep a symbolic link's own path instead of the real file's. */
   preserveSymlinks?: boolean;
+  /** `serve` only: replace changed modules in the open page (`import.meta.hot.accept`) instead of reloading it. The modules are a table of functions, not one scope-hoisted program; no top-level await, decorators or module federation. */
+  hmr?: boolean;
   /** Write declaration files (`.d.ts`) for the entries with the project's own `typescript` package: one for each source file, laid out beside the output. */
   dts?: boolean;
   /** The folder for the declaration files, when not the output folder (implies `dts`). */

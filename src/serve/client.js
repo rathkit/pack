@@ -50,6 +50,11 @@ source.onmessage = (event) => {
       hideError();
       reload();
       break;
+    case 'hmr':
+      hideError();
+      // The page's module table swaps the modules in place; with none, or when a change reaches an entry nothing accepts, reload.
+      if (!(globalThis.__rathkit_hmr && globalThis.__rathkit_hmr.update(message))) reload();
+      break;
     case 'css-update':
       hideError();
       swapStyles(message.files, message.t);

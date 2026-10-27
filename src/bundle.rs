@@ -20,6 +20,7 @@
 
 mod lower;
 mod lower_class;
+mod registry;
 mod std_decorators;
 
 use std::collections::{HashMap, HashSet};
@@ -151,6 +152,8 @@ enum Code {
     /// Statements of an ES module, hoisted into the bundle scope.
     Esm(EsmCode),
     /// A CommonJS or JSON module: the whole file as a function body.
+    /// An ES module of the table `--hmr` builds: its text with the module statements gone, and the lines that stand for them.
+    Registry { edits: Vec<Edit>, header: String },
     Wrapped {
         edits: Vec<Edit>,
         json: bool,
@@ -207,6 +210,8 @@ pub struct Options {
     pub file_name: Option<String>,
     /// Serve mode: `import.meta.hot` is the page's hot API (`globalThis.__rathkit_hot`) instead of nothing.
     pub hot: bool,
+    /// Serve mode with module replacement: the modules are a table of functions (see `registry.rs`), not one scope-hoisted program.
+    pub hmr: bool,
     /// File names for entries, by position, where the name is not the entry file's own (`foo` or `foo.js`).
     pub entry_names: Vec<Option<String>>,
     /// Module federation: `import()` of a remote or a shared package asks the runtime.
@@ -245,7 +250,7 @@ pub enum SourceMapMode {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { splitting: false, format: Format::Esm, global_name: None, globals: Vec::new(), original_paths: false, minify: crate::minify::Options::default(), sourcemap: SourceMapMode::None, sources_content: true, map_base: None, file_name: None, hot: false, entry_names: Vec::new(), federation: None, banner_js: None, footer_js: None, banner_css: None, footer_css: None, drop_console: false, drop_debugger: false, entry_template: None, chunk_template: None, out_extensions: Vec::new(), legal_comments: crate::legal::LegalComments::Eof, target: crate::target::Target::ESNEXT }
+        Options { splitting: false, format: Format::Esm, global_name: None, globals: Vec::new(), original_paths: false, minify: crate::minify::Options::default(), sourcemap: SourceMapMode::None, sources_content: true, map_base: None, file_name: None, hot: false, hmr: false, entry_names: Vec::new(), federation: None, banner_js: None, footer_js: None, banner_css: None, footer_css: None, drop_console: false, drop_debugger: false, entry_template: None, chunk_template: None, out_extensions: Vec::new(), legal_comments: crate::legal::LegalComments::Eof, target: crate::target::Target::ESNEXT }
     }
 }
 
@@ -263,6 +268,8 @@ pub struct OutputFile {
 }
 
 /// The finished bundle.
+pub use registry::HmrModule;
+
 pub struct Output {
     /// The main file: the only one without splitting, otherwise the first entry's.
     pub code: String,
@@ -270,6 +277,8 @@ pub struct Output {
     pub files: Vec<OutputFile>,
     /// What each script chunk is made of, in the order of `files`.
     pub chunks: Vec<ChunkInfo>,
+    /// With `Options::hmr`: every module as a hot update sends it.
+    pub hmr: Option<Vec<HmrModule>>,
 }
 
 /// What a script chunk is made of, as plugins ask to know it.
@@ -364,6 +373,8 @@ struct Bundler<'a> {
     alias_values: Vec<(ModuleId, Key, Vec<Piece>)>,
     original_paths: bool,
     hot: bool,
+    registry: bool,
+    registry_externals: Vec<String>,
     drop_console: bool,
     drop_debugger: bool,
     out_extensions: Vec<(String, String)>,
@@ -475,6 +486,8 @@ impl<'a> Bundler<'a> {
             alias_values: Vec::new(),
             original_paths: false,
             hot: false,
+            registry: false,
+            registry_externals: Vec::new(),
             drop_console: false,
             drop_debugger: false,
             out_extensions: Vec::new(),
@@ -505,13 +518,14 @@ impl<'a> Bundler<'a> {
         self.original_paths = options.original_paths;
         self.entry_names = options.entry_names.clone();
         self.hot = options.hot;
+        self.registry = options.hmr;
         self.drop_console = options.drop_console;
         self.drop_debugger = options.drop_debugger;
         self.out_extensions = options.out_extensions.clone();
         self.target = options.target;
         self.federation = options.federation.clone();
         self.format = options.format;
-        self.splitting = options.splitting && options.format == Format::Esm;
+        self.splitting = options.splitting && options.format == Format::Esm && !options.hmr;
         self.global_name = options.global_name.clone();
         self.globals = options.globals.clone();
         let graph = self.graph;
@@ -526,6 +540,9 @@ impl<'a> Bundler<'a> {
         let included: Vec<ModuleId> = graph.modules.iter().filter(|m| self.included(m.id)).map(|m| m.id).collect();
         for id in included {
             self.scan(id);
+        }
+        if self.registry {
+            return self.run_registry(options);
         }
         // What each root (an entry, or with splitting a module loaded by `import()`) exports.
         let roots = self.roots();
@@ -642,7 +659,7 @@ impl<'a> Bundler<'a> {
         files.extend(legal);
         files.extend(self.style_and_asset_files(&settings, options)?);
         let code = files.first().map(|f| f.code.clone()).unwrap_or_default();
-        Ok(Output { code, files, chunks: chunk_infos })
+        Ok(Output { code, files, chunks: chunk_infos, hmr: None })
     }
 
     /// With module federation, what a chunk of the application reads from a shared package or a remote is there only once the
@@ -1953,8 +1970,8 @@ impl<'a> Bundler<'a> {
             self.code.insert(id, Code::Wrapped { edits: Vec::new(), json: true, require_cases: None });
             return;
         };
-        let mut scanner = Scanner { bundler: self, module, places: None, private_scopes: Vec::new(), private_refs: HashMap::new(), chain_members: HashSet::new(), ast: &parsed.ast, semantic: &parsed.semantic, edits: Vec::new(), shorthand: HashSet::new(), skip: HashSet::new(), written: HashSet::new(), fn_depth: 0, async_ctx: Vec::new(), site_next: HashMap::new(), has_tla: false, needs_require: false, top_decl: None, in_wrapper: false, name_hint: None, shared_names: None };
-        let code = if module.kind == ModuleKind::Esm { scanner.scan_esm(id) } else { scanner.scan_wrapped(id) };
+        let mut scanner = Scanner { bundler: self, module, places: None, private_scopes: Vec::new(), private_refs: HashMap::new(), chain_members: HashSet::new(), call_callees: HashSet::new(), ast: &parsed.ast, semantic: &parsed.semantic, edits: Vec::new(), shorthand: HashSet::new(), skip: HashSet::new(), written: HashSet::new(), fn_depth: 0, async_ctx: Vec::new(), site_next: HashMap::new(), has_tla: false, needs_require: false, top_decl: None, in_wrapper: false, name_hint: None, shared_names: None };
+        let code = if module.kind == ModuleKind::Esm && scanner.bundler.registry { scanner.scan_registry(id) } else if module.kind == ModuleKind::Esm { scanner.scan_esm(id) } else { scanner.scan_wrapped(id) };
         self.code.insert(id, code);
     }
 
@@ -2011,6 +2028,8 @@ struct Scanner<'b, 'a> {
     private_refs: HashMap<NodeId, lower_class::Private>,
     /// Private member nodes already rewritten (or left to a chain), so no other rewrite touches them.
     chain_members: HashSet<NodeId>,
+    /// Identifiers called as functions, which a table module reads from an exports object without making it `this`.
+    call_callees: HashSet<NodeId>,
     ast: &'a Ast,
     semantic: &'a Semantic,
     edits: Vec<Edit>,
@@ -2238,6 +2257,10 @@ impl<'a> Scanner<'_, 'a> {
             self.push_ident_edit(node, pieces);
             return;
         }
+        if self.bundler.registry && sym.kind == SymbolKind::Import {
+            self.registry_reference(node, sym_id);
+            return;
+        }
         if sym.scope != self.semantic.root_scope() || self.in_wrapper {
             return;
         }
@@ -2346,6 +2369,14 @@ impl<'a> Scanner<'_, 'a> {
         let Edge::Module(target) = module.edges[index] else { return None };
         let from = Some(module.id);
         let target_kind = self.bundler.graph.module(target).kind;
+        if self.bundler.registry {
+            let id = json_string(&self.bundler.graph.module(target).path.to_string_lossy());
+            return Some(vec![Piece::Text(match kind {
+                RequestKind::Dynamic => format!("__r.d({id})"),
+                RequestKind::Require => format!("__r.r({id})"),
+                _ => format!("__r.{}({id})", if target_kind == ModuleKind::Esm { "i" } else { "c" }),
+            })]);
+        }
         if self.bundler.splitting && kind == RequestKind::Dynamic && target_kind == ModuleKind::Esm {
             return Some(vec![Piece::DynamicChunk(target)]);
         }
@@ -2386,6 +2417,13 @@ impl<'a> Scanner<'_, 'a> {
     fn walk_in(&mut self, node: NodeId, wrapped: bool, this_bound: bool) {
         let ast = self.ast;
         self.note_name_hint(node);
+        if self.bundler.registry {
+            if let NodeKind::Call { callee, .. } | NodeKind::TaggedTemplate { tag: callee, .. } = ast[node].kind {
+                if matches!(ast[callee].kind, NodeKind::Ident(_)) {
+                    self.call_callees.insert(callee);
+                }
+            }
+        }
         if matches!(ast[node].kind, NodeKind::Class { .. }) && !self.bundler.graph.experimental_decorators && !self.skip.contains(&node) && self.needs_standard_lowering(node) {
             self.lower_nested_class(node);
         }
@@ -2492,7 +2530,8 @@ impl<'a> Scanner<'_, 'a> {
             // `import.meta.hot` in the dev server: the page's hot object for this module, or nothing before the client runs.
             NodeKind::Member { object, prop } if !wrapped && self.bundler.hot && !ast[node].has(flags::COMPUTED) && matches!(ast[object].kind, NodeKind::ImportMeta) && matches!(ast[prop].kind, NodeKind::PropName(p) if ast.atom(p) == "hot") => {
                 let id = json_string(&self.module.path.to_string_lossy());
-                self.push(node, vec![Piece::Text(format!("(globalThis.__rathkit_hot && globalThis.__rathkit_hot({id}))"))]);
+                let text = if self.bundler.registry { format!("__r.h({id})") } else { format!("(globalThis.__rathkit_hot && globalThis.__rathkit_hot({id}))") };
+                self.push(node, vec![Piece::Text(text)]);
                 return;
             }
             NodeKind::Member { object, prop } if !wrapped && !ast[node].has(flags::COMPUTED) && self.bundler.original_paths && matches!(ast[object].kind, NodeKind::ImportMeta) => {
@@ -2516,7 +2555,7 @@ impl<'a> Scanner<'_, 'a> {
                 self.push(node, vec![Piece::Text(text)]);
                 return;
             }
-            NodeKind::Member { object, prop } if !wrapped && !ast[node].has(flags::COMPUTED) => {
+            NodeKind::Member { object, prop } if !wrapped && !self.bundler.registry && !ast[node].has(flags::COMPUTED) => {
                 if let (NodeKind::Ident(_), NodeKind::PropName(name)) = (ast[object].kind, ast[prop].kind) {
                     if let Some(sym) = self.semantic.symbol_of(object) {
                         if let Some(Binding::Namespace(target)) = self.bundler.linked.binding(self.module.id, sym).cloned() {
@@ -3814,6 +3853,9 @@ impl Scanner<'_, '_> {
         let module = self.module;
         let graph = self.bundler.graph;
         if let Some(index) = module.record.jsx_runtime {
+            if self.bundler.registry && !matches!(module.edges[index], Edge::Unresolved) {
+                return vec![Piece::Text(format!("__rki{index}.{name}"))];
+            }
             match &module.edges[index] {
                 Edge::Module(target) => {
                     if let Some(binding) = resolve_export(graph, *target, name) {
