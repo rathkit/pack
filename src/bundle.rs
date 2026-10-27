@@ -375,6 +375,10 @@ struct Bundler<'a> {
     hot: bool,
     registry: bool,
     registry_externals: Vec<String>,
+    /// The target lacks top-level await and the output can hold the whole program in an async function (one chunk, nothing exported).
+    tla_possible: bool,
+    /// Some module does use top-level await, so the program is wrapped.
+    tla_wrap: bool,
     drop_console: bool,
     drop_debugger: bool,
     out_extensions: Vec<(String, String)>,
@@ -488,6 +492,8 @@ impl<'a> Bundler<'a> {
             hot: false,
             registry: false,
             registry_externals: Vec::new(),
+            tla_possible: false,
+            tla_wrap: false,
             drop_console: false,
             drop_debugger: false,
             out_extensions: Vec::new(),
@@ -536,6 +542,7 @@ impl<'a> Bundler<'a> {
         if self.mapping {
             self.markable = graph.modules.iter().map(|m| !m.source.contains(|c| ('\u{E000}'..='\u{E003}').contains(&c))).collect();
         }
+        self.tla_possible = !self.target.supports(crate::target::Feature::TopLevelAwait) && !self.splitting && !options.hmr && (self.format == Format::Esm || (self.format == Format::Iife && self.global_name.is_none()));
         // Scan every module that will be emitted, collecting edits and the names they need.
         let included: Vec<ModuleId> = graph.modules.iter().filter(|m| self.included(m.id)).map(|m| m.id).collect();
         for id in included {
@@ -547,6 +554,33 @@ impl<'a> Bundler<'a> {
         // What each root (an entry, or with splitting a module loaded by `import()`) exports.
         let roots = self.roots();
         let root_exports = self.root_exports(&roots);
+        if !self.target.supports(crate::target::Feature::TopLevelAwait) {
+            let modules_with_tla: Vec<&Module> = graph.modules.iter().filter(|m| self.included(m.id) && matches!(self.code.get(&m.id), Some(Code::Esm(code)) if code.has_tla)).collect();
+            if let Some(first) = modules_with_tla.first() {
+                let target = self.target.name();
+                let reason = if !self.tla_possible {
+                    Some("the output is split, or is not an ES module or an IIFE without a global name")
+                } else if root_exports.iter().any(|(_, list)| !list.is_empty()) {
+                    Some("an entry exports something, and an export cannot wait for the await")
+                } else {
+                    None
+                };
+                match reason {
+                    Some(reason) => self.errors.push(Diagnostic {
+                        severity: crate::graph::Severity::Error,
+                        message: format!("top-level await is not available in the target {target} (it came with es2022), and it can only be rewritten when the program is one file with nothing exported: {reason}"),
+                        file: Some(first.path.clone()),
+                        pos: None,
+                    }),
+                    None => {
+                        self.tla_wrap = true;
+                        if self.lowers_async_functions() {
+                            self.helpers.async_fn = true;
+                        }
+                    }
+                }
+            }
+        }
         // Namespace objects bring in the names of everything they expose.
         while let Some(id) = self.pending_ns.pop() {
             let mut entries = Vec::new();
@@ -583,7 +617,7 @@ impl<'a> Bundler<'a> {
             }
         }
         let forced = self.compute_wrapped();
-        if self.format != Format::Esm {
+        if self.format != Format::Esm && !self.tla_wrap {
             for module in &graph.modules {
                 if let Some(Code::Esm(code)) = self.code.get(&module.id) {
                     if code.has_tla && !self.wrapped.contains(&module.id) && self.included(module.id) {
@@ -716,6 +750,11 @@ impl<'a> Bundler<'a> {
             let pieces = self.binding_pieces(Some(first), &binding);
             self.ready_calls.insert(c, pieces);
         }
+    }
+
+    /// The target has no async functions, so `__async` runs a generator in their place.
+    fn lowers_async_functions(&self) -> bool {
+        !self.target.supports(crate::target::Feature::AsyncFunction)
     }
 
     /// The extension a kind of output file gets (`.js` by default; `--out-extension:.js=.mjs`).
@@ -3374,6 +3413,11 @@ impl Bundler<'_> {
                 }
             }
         }
+        // Top-level await for a target that lacks it: everything that runs is the body of an async function (the imports stay outside,
+        // as they must), or of a generator that `__async` runs when the target has no async functions either.
+        if self.tla_wrap {
+            out.push_str(if self.lowers_async_functions() { "__async(void 0, null, function* () {\n" } else { "(async () => {\n" });
+        }
         cuts.push(out.len());
         // CommonJS and JSON modules, each a lazy function.
         for module in &graph.modules {
@@ -3556,6 +3600,11 @@ impl Bundler<'_> {
             }
             let _ = writeln!(out, "var {} = {};", names[key], self.text_of(pieces, names));
             cuts.push(out.len());
+        }
+        if self.tla_wrap {
+            out.push_str(if self.lowers_async_functions() { "});\n" } else { "})();\n" });
+            // The pieces the minifier would take side by side cannot be cut inside the wrapper.
+            cuts.clear();
         }
         let mut tail = None;
         if format == Format::Iife {

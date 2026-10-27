@@ -79,8 +79,7 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   and methods) and object rest (`__objRest`) in a declaration, a function parameter (also of an arrow with an expression body)
   or a `for of`, and class fields, private members (`#x`, private methods and accessors, `#x in o`) and static blocks
   (`__publicField`, and a `WeakMap` or `WeakSet` per private name, as esbuild does), and async functions, methods and arrows (generators run by `__async`, each `await` a `yield`), `for await` loops and async generators (`__forAwait`, `__asyncGenerator`, and `yield*` through `__yieldStar`), and `super` inside an async method or arrow (read and written through accessors made where the `super` is valid). `es2015` is the lowest target. Anything the target cannot have and this
-  cannot rewrite stops the build with a message that names it and the target, never passes through: BigInt literals and top-level
-  await can never be rewritten, nor are decorators together with
+  cannot rewrite stops the build with a message that names it and the target, never passes through: BigInt literals can never be rewritten, and top-level await is rewritten only when the program is one file with nothing exported (an app: the whole program becomes the body of an async function, or of a generator run by `__async` below es2017, with the imports left outside), otherwise it stops the build. Not rewritten either: decorators together with
   class fields, `super` in a private method or a static initializer, a tagged template on a private member, or object rest anywhere else (nested in another pattern, in an assignment, in `catch`), or a `__proto__`
   property after a spread. Regular expression syntax and library functions are not looked at, and engine targets such
   as `chrome80` are not supported. Checked by running programs as written and rewritten for every target in plain, minified,

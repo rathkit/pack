@@ -75,8 +75,17 @@ impl Scanner<'_, '_> {
         FnCtx { kind, super_ok, owner }
     }
 
+    /// How an `await` here is written: by the function it is in, or, at the top of a module whose program becomes a function, by that one.
+    fn kind_here(&self) -> AsyncKind {
+        match self.async_ctx.last() {
+            Some(ctx) => ctx.kind,
+            None if self.fn_depth == 0 && self.bundler.tla_possible && self.lowers(Feature::AsyncFunction) => AsyncKind::Yield,
+            None => AsyncKind::Native,
+        }
+    }
+
     fn await_pieces(&mut self, inner: Vec<Piece>) -> Vec<Piece> {
-        let kind = self.async_ctx.last().map(|c| c.kind).unwrap_or_default();
+        let kind = self.kind_here();
         let (open, close) = match kind {
             AsyncKind::Native => ("(await ", ")"),
             AsyncKind::Yield => ("(yield ", ")"),
@@ -206,7 +215,7 @@ impl Scanner<'_, '_> {
             }
             NodeKind::ClassMethod { key, value, .. } if self.is_async_method(value) => self.lower_async_method(node, key, value),
             NodeKind::Property { key, value, kind: crate::ast::PropKind::Method } if self.is_async_method(value) => self.lower_async_method(node, key, value),
-            NodeKind::Await(arg) if self.fn_depth > 0 && self.async_ctx.last().is_some_and(|c| c.kind != AsyncKind::Native) => {
+            NodeKind::Await(arg) if self.kind_here() != AsyncKind::Native => {
                 let (start, end) = self.span(node);
                 let (a, b) = self.span(arg);
                 let pieces = self.await_pieces(vec![Piece::Range(a, b)]);
@@ -230,7 +239,7 @@ impl Scanner<'_, '_> {
                 self.lower_for_await(inner, left, right, body, Some(label_span));
             }
             NodeKind::ForOf { left, right, body } if ast[node].flags & crate::ast::flags::AWAIT != 0 && self.lowers(Feature::AsyncIteration) && !self.skip.contains(&node) => {
-                if self.fn_depth == 0 {
+                if self.fn_depth == 0 && !self.bundler.tla_possible {
                     self.lower_error(Feature::TopLevelAwait, node);
                 } else {
                     self.lower_for_await(node, left, right, body, None);
@@ -240,7 +249,7 @@ impl Scanner<'_, '_> {
             NodeKind::ObjectPattern(_) if self.has_object_rest(node) && self.lowers(Feature::ObjectRest) && !self.skip.contains(&node) => self.lower_error(Feature::ObjectRest, node),
             // Fields, private members and static blocks are rewritten with the class that has them.
             NodeKind::Class { .. } if self.lowers(Feature::ClassField) && self.class_needs_lowering(node) => self.lower_class(node),
-            NodeKind::Await(_) if self.fn_depth == 0 && self.lowers(Feature::TopLevelAwait) => self.lower_error(Feature::TopLevelAwait, node),
+            NodeKind::Await(_) if self.fn_depth == 0 && self.lowers(Feature::TopLevelAwait) && !self.bundler.tla_possible => self.lower_error(Feature::TopLevelAwait, node),
             _ => {}
         }
     }

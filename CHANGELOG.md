@@ -40,6 +40,7 @@ First release.
   `--preserve-symlinks`, `--pure`, `--metafile`, `--entry-names`, `--chunk-names`, `--out-extension`, `--legal-comments`, `--inject`, `--jsx-dev`, `--tsconfig-raw`; an unknown option is an error.
 - Module federation: `getPublicPath`, `dts` `outputDir`, `generateAPITypes`, `additionalFilesToCompile`, `abortOnError`, `timeout`, `maxRetries`, `remoteTypeUrls` and `dev.disableLiveReload` / `disableHotTypesReload` are used; what is not carried out is named in a warning.
 - Module federation: `compilerInstance`, `extractThirdParty`, `extractRemoteTypes`, `afterGenerate`, `family`, `remoteTypesFolder`, `consumeAPITypes`, `runtimePkgs` and the router `bridge` are carried out; only `dts.implementation` is named in a warning.
+- `--target`: top-level await is rewritten for targets that lack it when the program is one file with nothing exported (the whole program becomes an async function, or a generator run by `__async` below es2017).
 - JS API: `plugins` takes plugin objects (their hooks run in the calling process, across a local socket) and `{ module }` descriptors.
 - `rkp serve --https` (with `--https-cert` and `--https-key`, or a self-signed certificate it makes and keeps): TLS through a Node.js proxy in front of the dev server.
 - `rkp serve --hmr`: changed modules are replaced in the open page (`import.meta.hot.accept`, `dispose`, `data`, `decline`, `invalidate`), with the page reloading only when a change reaches an entry nothing accepts.

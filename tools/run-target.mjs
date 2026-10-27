@@ -37,8 +37,10 @@ for (const name of names) {
   }
   // `targets.txt`: the targets to try, when the program uses something that only the later ones can have.
   const list = existsSync(join(dir, 'targets.txt')) ? readFileSync(join(dir, 'targets.txt'), 'utf8').split(/\s+/).filter(Boolean) : targets;
+  // `modes.txt`: the modes to try, one a line (`plain` for none), when the program cannot be built in all of them (top-level await needs ESM or an IIFE).
+  const modeList = existsSync(join(dir, 'modes.txt')) ? readFileSync(join(dir, 'modes.txt'), 'utf8').split('\n').map((l) => l.trim()).filter(Boolean).map((l) => (l === 'plain' ? [] : l.split(/\s+/))) : modes;
   for (const target of list) {
-    for (const mode of modes) {
+    for (const mode of modeList) {
       const format = mode.includes('cjs') ? 'cjs' : mode.includes('iife') ? 'iife' : 'esm';
       const out = join(tmp, `${name}-${target}-${mode.join('') || 'plain'}.${format === 'esm' ? 'mjs' : 'cjs'}`);
       const b = spawnSync(bin, ['bundle', 'main.js', '--outfile', out, '--target', target, ...mode], { cwd: dir, encoding: 'utf8' });

@@ -547,7 +547,7 @@ fn what_a_target_cannot_have_stops_the_build_and_is_named() {
     for (source, target, words) in [
         ("export const f = 1n;", "es2019", "a BigInt literal is not available in the target es2019"),
         ("export const t = await Promise.resolve(1);", "es2021", "top-level await is not available in the target es2021"),
-        ("for await (const x of y) {}", "es2017", "top-level await is not available in the target es2017"),
+        ("export const q = 1; for await (const x of y) {}", "es2017", "top-level await is not available in the target es2017"),
         ("const o = { ...a, __proto__: null }; export { o };", "es2017", "a __proto__ property after a spread cannot be rewritten"),
         ("const [x, { ...r }] = y; export { x, r };", "es2017", "object rest in a pattern ({ a, ...rest }) is not available in the target es2017"),
         ("let a, r; ({ a, ...r } = y); export { a, r };", "es2017", "object rest in a pattern"),
@@ -563,6 +563,13 @@ fn what_a_target_cannot_have_stops_the_build_and_is_named() {
     }
     // The same text is fine for a target that has it, and the target must be one.
     assert_eq!(rkp("export const f = 1n;", "es2020").0, Some(0));
+    // Top-level await is rewritten when the program is one file with nothing exported, and refused otherwise.
+    assert_eq!(rkp("const t = await Promise.resolve(1); console.log(t);", "es2021").0, Some(0));
+    assert_eq!(rkp("const t = await Promise.resolve(1); console.log(t);", "es2015").0, Some(0));
+    std::fs::write(dir.join("main.js"), "const t = await Promise.resolve(1); console.log(t);").unwrap();
+    let split = Command::new(env!("CARGO_BIN_EXE_rkp")).current_dir(&dir).args(["bundle", "main.js", "--outdir", "out", "--splitting", "--target", "es2021"]).output().expect("rkp starts");
+    assert_eq!(split.status.code(), Some(1), "{}", String::from_utf8_lossy(&split.stderr));
+    assert!(String::from_utf8_lossy(&split.stderr).contains("the output is split"), "{}", String::from_utf8_lossy(&split.stderr));
     for bad in ["es5", "chrome80", "es2099"] {
         let (code, stderr) = rkp("export const x = 1;", bad);
         assert_eq!(code, Some(2), "{bad}: {stderr}");
