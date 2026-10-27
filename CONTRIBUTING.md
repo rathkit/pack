@@ -115,8 +115,8 @@ Do not report security problems in issues. Follow the [security policy](https://
 ## License
 
 By contributing you certify the [DCO](DCO) and agree that your contribution is licensed under the
-same license as the project, Apache-2.0 (see [LICENSE](LICENSE)). Copyright in the project belongs
-to Rathkit LLC, see [NOTICE](NOTICE) where present. You keep the copyright in your own
+same license as the project, Apache-2.0 (see [LICENSE](LICENSE)). The copyright holder is named
+in [NOTICE](NOTICE). You keep the copyright in your own
 contribution.
 
 ## Questions
