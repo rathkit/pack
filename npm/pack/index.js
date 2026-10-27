@@ -50,7 +50,7 @@ class BuildError extends Error {
   }
 }
 
-const KEYS = new Set(['entries', 'cwd', 'env', 'signal', 'outfile', 'outdir', 'format', 'globalName', 'globals', 'minify', 'keepNames', 'sourcemap', 'sourcesContent', 'splitting', 'treeShaking', 'platform', 'external', 'conditions', 'mainFields', 'alias', 'define', 'loader', 'assetNames', 'publicPath', 'jsx', 'jsxImportSource', 'jsxFactory', 'jsxFragment', 'decoratorMetadata', 'experimentalDecorators', 'strictNullChecks', 'tsconfig', 'config', 'mode', 'envDir', 'envPrefix', 'envFiles', 'banner', 'footer', 'drop', 'packages', 'resolveExtensions', 'preserveSymlinks', 'metafile', 'pure', 'entryNames', 'chunkNames', 'outExtension', 'legalComments', 'inject', 'jsxDev', 'tsconfigRaw', 'target', 'dts', 'dtsDir', 'hmr', 'https', 'plugins', 'federation', 'originalPaths', 'corsOrigins', 'port', 'host']);
+const KEYS = new Set(['entries', 'cwd', 'env', 'signal', 'outfile', 'outdir', 'format', 'globalName', 'globals', 'minify', 'keepNames', 'sourcemap', 'sourcesContent', 'splitting', 'treeShaking', 'platform', 'external', 'conditions', 'mainFields', 'alias', 'define', 'loader', 'assetNames', 'publicPath', 'jsx', 'jsxImportSource', 'jsxFactory', 'jsxFragment', 'decoratorMetadata', 'experimentalDecorators', 'strictNullChecks', 'tsconfig', 'config', 'mode', 'envDir', 'envPrefix', 'envFiles', 'banner', 'footer', 'drop', 'packages', 'resolveExtensions', 'preserveSymlinks', 'metafile', 'pure', 'entryNames', 'chunkNames', 'outExtension', 'legalComments', 'inject', 'jsxDev', 'tsconfigRaw', 'target', 'dts', 'dtsDir', 'hmr', 'reactRefresh', 'https', 'plugins', 'federation', 'originalPaths', 'corsOrigins', 'port', 'host']);
 
 /** The command line for options. A key that is not an option is an error, so a typo is not ignored. */
 function toArgs(options, cleanups) {
@@ -65,6 +65,7 @@ function toArgs(options, cleanups) {
   add('--format', options.format);
   add('--target', options.target);
   if (options.hmr) args.push('--hmr');
+  if (options.reactRefresh !== undefined) args.push(options.reactRefresh ? '--react-refresh' : '--no-react-refresh');
   if (options.https) {
     args.push('--https');
     if (typeof options.https === 'object') {

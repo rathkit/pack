@@ -54,6 +54,8 @@ export interface Options {
   https?: boolean | { cert?: string; key?: string };
   /** `serve` only: replace changed modules in the open page (`import.meta.hot.accept`) instead of reloading it. The modules are a table of functions, not one scope-hoisted program; it does not work with module federation. */
   hmr?: boolean;
+  /** With `hmr`: React Fast Refresh, so components keep their state when their module is replaced. On by default when the project has `react` and `react-refresh` installed; `true` requires them, `false` turns it off. */
+  reactRefresh?: boolean;
   /** Write declaration files (`.d.ts`) for the entries with the project's own `typescript` package: one for each source file, laid out beside the output. */
   dts?: boolean;
   /** The folder for the declaration files, when not the output folder (implies `dts`). */

@@ -39,11 +39,13 @@ pub struct ServeState {
     update: Mutex<Option<String>>,
     /// The modules of the last two builds, so that a file that was one (and may be gone) is known to be a module.
     known_ids: Mutex<std::collections::HashSet<String>>,
+    /// With React Fast Refresh: the runtime of the project's `react-refresh`, as a script for the page.
+    refresh_runtime: Mutex<Option<String>>,
 }
 
 impl ServeState {
     pub fn new(cwd: PathBuf, host: Option<Arc<PluginHost>>) -> Arc<ServeState> {
-        Arc::new(ServeState { cwd, host, files: Mutex::new(HashMap::new()), entries: Mutex::new(Vec::new()), clients: Mutex::new(Vec::new()), middlewares: Mutex::new(false), last_error: Mutex::new(None), exposed: Mutex::new(false), bound_host: Mutex::new(String::new()), cors: Mutex::new(Vec::new()), modules: Mutex::new(None), update: Mutex::new(None), known_ids: Mutex::new(std::collections::HashSet::new()) })
+        Arc::new(ServeState { cwd, host, files: Mutex::new(HashMap::new()), entries: Mutex::new(Vec::new()), clients: Mutex::new(Vec::new()), middlewares: Mutex::new(false), last_error: Mutex::new(None), exposed: Mutex::new(false), bound_host: Mutex::new(String::new()), cors: Mutex::new(Vec::new()), modules: Mutex::new(None), update: Mutex::new(None), known_ids: Mutex::new(std::collections::HashSet::new()), refresh_runtime: Mutex::new(None) })
     }
 
     /// The finished build: files by name, and which file holds which entry.
@@ -51,6 +53,17 @@ impl ServeState {
         *self.files.lock().unwrap() = files.into_iter().collect();
         *self.entries.lock().unwrap() = entries;
         *self.last_error.lock().unwrap() = None;
+    }
+
+    /// The page gets the runtime of React Fast Refresh, from this file of the `react-refresh` package. It is read now and made into a
+    /// script that runs before the page's own, so React finds the hook it injects into.
+    pub fn use_react_refresh(&self, runtime_file: &Path) -> std::io::Result<()> {
+        let source = std::fs::read_to_string(runtime_file)?;
+        let script = format!(
+            "(function () {{\nvar process = {{ env: {{ NODE_ENV: 'development' }} }};\nvar module = {{ exports: {{}} }};\nvar exports = module.exports;\n{source}\nvar runtime = module.exports;\nruntime.injectIntoGlobalHook(window);\nwindow.__rathkit_refresh = runtime;\nwindow.$RefreshReg$ = function () {{}};\nwindow.$RefreshSig$ = function () {{ return function (type) {{ return type; }}; }};\n}})();\n"
+        );
+        *self.refresh_runtime.lock().unwrap() = Some(script);
+        Ok(())
     }
 
     /// With `--hmr`: the modules of the build just published. What changed since the last one becomes the update for the pages.
@@ -64,7 +77,7 @@ impl ServeState {
             for m in modules.iter().filter(|m| before.get(&m.id) != Some(&m.code)) {
                 let deps = m.deps.iter().map(|d| quote(d)).collect::<Vec<_>>().join(",");
                 let specs = m.specs.iter().map(|(s, t)| format!("{}:{}", quote(s), quote(t))).collect::<Vec<_>>().join(",");
-                entries.push(format!("{}:{{\"kind\":{},\"code\":{},\"deps\":[{deps}],\"specs\":{{{specs}}}}}", quote(&m.id), quote(m.kind), quote(&m.code)));
+                entries.push(format!("{}:{{\"kind\":{},\"code\":{},\"deps\":[{deps}],\"specs\":{{{specs}}},\"refresh\":{}}}", quote(&m.id), quote(m.kind), quote(&m.code), m.refresh));
             }
             let removed: Vec<String> = before.keys().filter(|k| !next.contains_key(*k)).map(|k| quote(k)).collect();
             if !entries.is_empty() || !removed.is_empty() {
@@ -414,6 +427,10 @@ fn handle(mut stream: TcpStream, state: &Arc<ServeState>) -> std::io::Result<()>
         return respond(&mut stream, 204, &with_cors(vec![("access-control-allow-methods".into(), "GET, HEAD, OPTIONS".into()), ("access-control-allow-headers".into(), "*".into()), ("access-control-max-age".into(), "600".into())]), b"");
     }
     match path {
+        "/__rathkit/react-refresh.js" if state.refresh_runtime.lock().unwrap().is_some() => {
+            let script = state.refresh_runtime.lock().unwrap().clone().unwrap_or_default();
+            return respond(&mut stream, 200, &[("content-type".into(), "text/javascript; charset=utf-8".into()), ("cache-control".into(), "no-store".into())], script.as_bytes());
+        }
         "/__rathkit/client.js" => return respond(&mut stream, 200, &[("content-type".into(), "text/javascript; charset=utf-8".into()), ("cache-control".into(), "no-store".into())], CLIENT.as_bytes()),
         "/__rathkit/events" => {
             // A page that stops reading must not hold up every broadcast.
@@ -528,6 +545,9 @@ fn prepare_page(html: &str, state: &ServeState) -> String {
         if !out.contains(&format!("/{sheet}")) {
             extra.push_str(&format!("<link rel=\"stylesheet\" href=\"/{sheet}\">\n"));
         }
+    }
+    if state.refresh_runtime.lock().unwrap().is_some() {
+        extra.push_str("<script src=\"/__rathkit/react-refresh.js\"></script>\n");
     }
     extra.push_str("<script type=\"module\" src=\"/__rathkit/client.js\"></script>\n");
     match out.to_ascii_lowercase().find("</head>") {

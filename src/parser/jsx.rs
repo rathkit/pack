@@ -322,16 +322,19 @@ impl<'a> Parser<'a> {
 /// React's reading of the text between tags: lines are trimmed, blank lines dropped, and the
 /// rest joined with single spaces. Returns `None` if nothing is left.
 fn clean_jsx_text(raw: &str) -> Option<String> {
+    // As Babel does it: tabs are spaces, the lines are trimmed (the first keeps its start, the last its end), and the empty ones go. A text of
+    // only spaces on one line is kept: `<a/> <b/>` has a space between the elements.
+    let raw = raw.replace('\t', " ");
     let lines: Vec<&str> = raw.split(['\n']).map(|l| l.strip_suffix('\r').unwrap_or(l)).collect();
-    let last_non_empty = lines.iter().rposition(|l| l.contains(|c: char| c != ' ' && c != '\t'))?;
+    let last_non_empty = lines.iter().rposition(|l| l.contains(|c: char| c != ' ')).unwrap_or(0);
     let mut out = String::new();
     for (i, line) in lines.iter().enumerate() {
         let mut text = *line;
         if i != 0 {
-            text = text.trim_start_matches([' ', '\t']);
+            text = text.trim_start_matches(' ');
         }
         if i != lines.len() - 1 {
-            text = text.trim_end_matches([' ', '\t']);
+            text = text.trim_end_matches(' ');
         }
         if text.is_empty() {
             continue;
@@ -405,4 +408,20 @@ fn named_entity(name: &str) -> Option<char> {
         "Uacute" => 'Ú', "Ucirc" => 'Û', "Uuml" => 'Ü', "Yacute" => 'Ý',
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clean_jsx_text;
+
+    #[test]
+    fn text_between_elements_is_cleaned_as_babel_does() {
+        // A space on one line is a space; lines are trimmed and joined; tabs are spaces; empty text is nothing.
+        assert_eq!(clean_jsx_text(" ").as_deref(), Some(" "));
+        assert_eq!(clean_jsx_text("  \t ").as_deref(), Some("    "));
+        assert_eq!(clean_jsx_text("\n   \n").as_deref(), None);
+        assert_eq!(clean_jsx_text("\n  one\n  two \n").as_deref(), Some("one two"));
+        assert_eq!(clean_jsx_text("a\tb").as_deref(), Some("a b"));
+        assert_eq!(clean_jsx_text(" x ").as_deref(), Some(" x "));
+    }
 }

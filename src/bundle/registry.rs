@@ -20,6 +20,8 @@ pub struct HmrModule {
     pub deps: Vec<String>,
     /// Each specifier it uses and the module it names, for `import.meta.hot.accept("./dep")` and `require`.
     pub specs: Vec<(String, String)>,
+    /// It registers components with React Fast Refresh.
+    pub refresh: bool,
 }
 
 fn member(name: &ImportName) -> String {
@@ -36,7 +38,10 @@ impl Scanner<'_, '_> {
     /// and namespaces), with the `export` keywords gone and the names as written. The imports and exports are a header, made at the end.
     pub(super) fn scan_registry(&mut self, id: ModuleId) -> Code {
         match self.scan_esm(id) {
-            Code::Esm(code) => Code::Registry(code),
+            Code::Esm(mut code) => {
+                let refresh = if self.bundler.react_refresh { self.react_refresh(&mut code) } else { None };
+                Code::Registry(code, refresh)
+            }
             other => other,
         }
     }
@@ -113,11 +118,11 @@ impl Bundler<'_> {
     /// The modules that wait for something: those with top-level await, and the ones that import them.
     fn registry_async_modules(&self) -> HashSet<ModuleId> {
         let graph = self.graph;
-        let mut waits: HashSet<ModuleId> = graph.modules.iter().filter(|m| self.included(m.id) && matches!(self.code.get(&m.id), Some(Code::Registry(code)) if code.has_tla)).map(|m| m.id).collect();
+        let mut waits: HashSet<ModuleId> = graph.modules.iter().filter(|m| self.included(m.id) && matches!(self.code.get(&m.id), Some(Code::Registry(code, _)) if code.has_tla)).map(|m| m.id).collect();
         loop {
             let mut grew = false;
             for module in &graph.modules {
-                if waits.contains(&module.id) || !self.included(module.id) || !matches!(self.code.get(&module.id), Some(Code::Registry(_))) {
+                if waits.contains(&module.id) || !self.included(module.id) || !matches!(self.code.get(&module.id), Some(Code::Registry(..))) {
                     continue;
                 }
                 let imports_waiter = module.record.requests.iter().zip(&module.edges).any(|(r, e)| r.kind == RequestKind::Static && matches!(e, Edge::Module(t) if waits.contains(t)));
@@ -154,16 +159,19 @@ impl Bundler<'_> {
                 continue;
             }
             let path = module.path.to_string_lossy().into_owned();
-            let header = if matches!(self.code.get(&module.id), Some(Code::Registry(_))) { self.registry_header(module, &asyncs) } else { String::new() };
+            let mut is_refreshable = false;
+            let header = if matches!(self.code.get(&module.id), Some(Code::Registry(..))) { self.registry_header(module, &asyncs) } else { String::new() };
             let Some(code) = self.code.get(&module.id) else { continue };
             // The temporaries of the module's rewrites for the target, declared where they are used.
             let temps: Vec<&str> = self.temps.iter().filter(|(m, _)| *m == module.id).map(|(_, n)| n.as_str()).collect();
             let declare = if temps.is_empty() { String::new() } else { format!("var {};\n", temps.join(", ")) };
             let (kind, text) = match code {
-                Code::Registry(code) => {
+                Code::Registry(code, refresh) => {
                     let body: String = code.stmts.iter().map(|stmt| self.render_stmt(module.id, stmt, names) + "\n").collect();
                     let waits = asyncs.contains(&module.id);
-                    ("esm", format!("{}function (exports, module, __r) {{\n\"use strict\";\n{declare}{header}{body}\n}}", if waits { "async " } else { "" }))
+                    let (before, after) = refresh.as_ref().map_or((String::new(), String::new()), |r| (r.prefix.clone(), format!("{}\n", r.suffix)));
+                    is_refreshable = refresh.is_some();
+                    ("esm", format!("{}function (exports, module, __r) {{\n\"use strict\";\n{declare}{before}{header}{body}{after}\n}}", if waits { "async " } else { "" }))
                 }
                 Code::Wrapped { edits, json, .. } => {
                     let body = if *json {
@@ -196,8 +204,8 @@ impl Bundler<'_> {
             }
             let list = deps.iter().map(|d| json_string(d)).collect::<Vec<_>>().join(", ");
             let table = specs.iter().map(|(s, t)| format!("{}: {}", json_string(s), json_string(t))).collect::<Vec<_>>().join(", ");
-            let _ = write!(definitions, "__r.def({}, {}, {text}, [{list}], {{ {table} }});\n", json_string(&path), json_string(kind));
-            modules.push(HmrModule { id: path, kind, code: strip_tags(&text).into_owned(), deps, specs });
+            let _ = write!(definitions, "__r.def({}, {}, {text}, [{list}], {{ {table} }}{});\n", json_string(&path), json_string(kind), if is_refreshable { ", true" } else { "" });
+            modules.push(HmrModule { id: path, kind, code: strip_tags(&text).into_owned(), deps, specs, refresh: is_refreshable });
         }
         let mut out = String::new();
         // External modules are ES imports of the script itself; the table reads them as namespaces.

@@ -14,6 +14,7 @@ const __r = (() => {
   const accepts = Object.create(null);
   const disposers = Object.create(null);
   const declined = Object.create(null);
+  const refreshable = Object.create(null);
   const tag = typeof Symbol === 'function' ? Symbol.toStringTag : '@@toStringTag';
   const client = (id) => globalThis.__rathkit_hot && globalThis.__rathkit_hot(id);
 
@@ -42,6 +43,14 @@ const __r = (() => {
     cache[id] = module;
     delete accepts[id];
     delete declined[id];
+    // A module that registers components tells the Fast Refresh runtime which module they are from while it runs (and, with no runtime in
+    // the page, its registrations do nothing).
+    const runtime = refreshable[id] ? globalThis.__rathkit_refresh : undefined;
+    const outer = refreshable[id] ? [globalThis.$RefreshReg$, globalThis.$RefreshSig$] : undefined;
+    if (refreshable[id]) {
+      globalThis.$RefreshReg$ = runtime ? (type, name) => runtime.register(type, id + ' ' + name) : () => {};
+      globalThis.$RefreshSig$ = runtime ? runtime.createSignatureFunctionForTransform : () => (type) => type;
+    }
     let result;
     try {
       result = fn.call(esm ? undefined : exports, exports, module, api, (spec) => {
@@ -57,6 +66,11 @@ const __r = (() => {
     } catch (error) {
       delete cache[id];
       throw error;
+    } finally {
+      if (outer) {
+        globalThis.$RefreshReg$ = outer[0];
+        globalThis.$RefreshSig$ = outer[1];
+      }
     }
     // A module with top-level await is an async function: its record holds the promise of its having run.
     if (result && typeof result.then === 'function') {
@@ -150,6 +164,28 @@ const __r = (() => {
       },
     });
 
+  // A module whose exports are all components can be replaced without losing the state of the components (React Fast Refresh).
+  const components = (exports) => {
+    const runtime = globalThis.__rathkit_refresh;
+    if (!runtime || !exports) return false;
+    let any = false;
+    for (const key of Object.keys(exports)) {
+      if (key === '__esModule') continue;
+      if (!runtime.isLikelyComponentType(exports[key])) return false;
+      any = true;
+    }
+    return any;
+  };
+  let refreshTimer;
+  const scheduleRefresh = () => {
+    const runtime = globalThis.__rathkit_refresh;
+    if (!runtime || refreshTimer) return;
+    refreshTimer = setTimeout(() => {
+      refreshTimer = undefined;
+      runtime.performReactRefresh();
+    }, 16);
+  };
+
   // The modules that must run again for the changed ones to take effect, up to the ones that accept the change. False when a change
   // reaches an entry that nothing accepts, and the page has to reload.
   const propagate = (changed) => {
@@ -159,9 +195,10 @@ const __r = (() => {
       if (!cache[id]) return true;
       if (declined[id]) return false;
       const accepted = accepts[id];
-      if (accepted && accepted.self) {
+      const refreshing = refreshable[id] && components(cache[id].exports);
+      if ((accepted && accepted.self) || refreshing) {
         rerun.add(id);
-        boundaries.push({ module: id, self: true, callbacks: accepted.callbacks.slice() });
+        boundaries.push({ module: id, self: true, callbacks: accepted && accepted.self ? accepted.callbacks.slice() : [], refresh: refreshing });
         return true;
       }
       const parents = importers[id];
@@ -201,6 +238,15 @@ const __r = (() => {
             callback(many ? list.map((spec) => (((specs[b.module] || {})[spec] === b.dep) ? cache[b.dep].exports : undefined)) : cache[b.dep].exports);
           }
       }
+      // A module that was a component module and no longer is cannot be replaced alone: what imports it runs again.
+      const notAny = boundaries.filter((b) => b.refresh && !components(cache[b.module] && cache[b.module].exports)).map((b) => b.module);
+      if (notAny.length) {
+        const parents = new Set();
+        for (const id of notAny) for (const parent of importers[id] || []) parents.add(parent);
+        if (!parents.size) return false;
+        return propagate([...parents]);
+      }
+      if (boundaries.some((b) => b.refresh)) scheduleRefresh();
       console.log('[rkp] hot updated: ' + [...rerun].join(', '));
       return true;
     };
@@ -223,11 +269,12 @@ const __r = (() => {
   };
 
   const api = {
-    def(id, kind, fn, dependencies, table) {
+    def(id, kind, fn, dependencies, table, refresh) {
       defs[id] = fn;
       kinds[id] = kind;
       deps[id] = dependencies;
       specs[id] = table;
+      refreshable[id] = Boolean(refresh);
     },
     i: (id) => load(id).exports,
     c: view,
@@ -274,7 +321,7 @@ const __r = (() => {
           console.error('[rkp] cannot read the new ' + id, error);
           return false;
         }
-        api.def(id, m.kind, fn, m.deps, m.specs);
+        api.def(id, m.kind, fn, m.deps, m.specs, m.refresh);
         changed.push(id);
       }
       for (const id of message.removed || []) {

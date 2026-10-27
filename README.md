@@ -170,8 +170,12 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   `data` (kept between versions), `decline()` and `invalidate()` work as in Vite. A change walks up the importers to the
   modules that accept it, those run again, and the page reloads when it reaches an entry that nothing accepts or when a file
   that is not a module changes; style sheets are swapped as before. What an importer reads from a replaced ES module is
-  the new bindings (its exports object is the same one). No React Fast Refresh: a component module must accept updates
-  itself. Top-level await works (a module that awaits, and the ones that import it, run as async functions, and an update
+  the new bindings (its exports object is the same one). React Fast Refresh is built in, and on when the project has `react` and
+  `react-refresh` installed (`--react-refresh` asks for it and says so if the package is missing, `--no-react-refresh` turns it off): modules
+  of the project that use React register their components and the hooks of their functions as Babel's `react-refresh` plugin does,
+  the page gets the runtime of the project's own package before its scripts, and a module whose exports are all components is
+  replaced in place with the state of its components kept (a change to the hooks of a component, or `// @refresh reset`, starts its state again). A module that
+  also exports something that is not a component is replaced with the modules that import it. Top-level await works (a module that awaits, and the ones that import it, run as async functions, and an update
   of one is applied when it has run), as do decorators, enums and namespaces. `--hmr` does not work with module federation (it
   says so), and keeps CommonJS packages as they are, so a package's own code is not replaced when it changes.
 - Plugins in the JS API: `build({ plugins: [...] })` and `serve({ plugins: [...] })` take plugin objects (Rollup's hooks,

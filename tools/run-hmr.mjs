@@ -59,6 +59,7 @@ const until = async (condition, ms = 15000) => {
   }
   return false;
 };
+const until60 = (condition) => until(condition, 60000);
 const fetchBuilt = async (base) => {
   let response;
   await until(async () => {
@@ -332,6 +333,39 @@ if (existsSync(join(root, 'bench', 'node_modules', 'react-dom'))) {
       write2(site, 'entry-only.js', "export const stamp = 'b';\n");
       check(await until(async () => (await evaluate("document.getElementById('out')?.textContent")) === 'two|b'), 'a change nothing accepts reloads the page');
       check((await evaluate('window.__page')) !== page, 'it is a new page');
+      // React Fast Refresh: the state of a component survives its module being replaced.
+      if (existsSync(join(root, 'bench', 'node_modules', 'react-refresh'))) {
+        const app = join(dir, 'refresh-app');
+        cpSync(join(root, 'tests', 'hmr', 'refresh'), app, { recursive: true });
+        symlinkSync(join(root, 'bench', 'node_modules'), join(app, 'node_modules'), 'dir');
+        const react = spawn(bin, ['serve', 'main.jsx', '--hmr', '--port', '0', '--define', 'process.env.NODE_ENV="development"'], { cwd: app, stdio: ['ignore', 'pipe', 'pipe'] });
+        let reactLog = '';
+        react.stdout.on('data', (d) => (reactLog += d));
+        react.stderr.on('data', (d) => (reactLog += d));
+        try {
+          if (!(await until(() => /(?:127\.0\.0\.1|localhost):\d+/.test(reactLog)))) throw new Error('the React server did not start: ' + reactLog);
+          const reactPort = /(?:localhost|127\.0\.0\.1):(\d+)/.exec(reactLog)[1];
+          // The page is opened once the build is there to be served.
+          await fetchBuilt(`http://127.0.0.1:${reactPort}`);
+          await send('Page.navigate', { url: `http://127.0.0.1:${reactPort}/` });
+          const text = () => evaluate("document.getElementById('out')?.textContent");
+          check(await until60(async () => (await text()) === 'Hello count 0'), 'the React app renders', String(await text()));
+          const first = await evaluate('window.__page');
+          await evaluate("document.querySelector('button').click()");
+          await evaluate("document.querySelector('button').click()");
+          check(await until60(async () => (await text()) === 'Hello count 2'), 'and its state changes');
+          write2(app, 'App.jsx', readFileSync(join(app, 'App.jsx'), 'utf8').replace('Hello', 'Howdy'));
+          check(await until60(async () => (await text()) === 'Howdy count 2'), 'an edited component is replaced with its state kept', String(await text()));
+          check((await evaluate('window.__page')) === first, 'without a reload');
+          write2(app, 'App.jsx', readFileSync(join(app, 'App.jsx'), 'utf8').replace('useState(0)', 'useState(10)'));
+          check(await until60(async () => (await text()) === 'Howdy count 10'), 'when its hooks change the state starts again', String(await text()));
+          check((await evaluate('window.__page')) === first, 'and still no reload');
+          write2(app, 'App.jsx', readFileSync(join(app, 'App.jsx'), 'utf8') + 'export const notAComponent = 1;\n');
+          check(await until60(async () => (await evaluate('window.__page')) !== first), 'a module that exports more than components reloads the page');
+        } finally {
+          react.kill();
+        }
+      }
       ws.close();
     } catch (error) {
       failed++;

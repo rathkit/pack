@@ -529,6 +529,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     let mut outfile: Option<String> = None;
     let mut treeshake = true;
     let mut hmr = false;
+    let mut react_refresh: Option<bool> = None;
     let mut https = false;
     let mut https_cert: Option<String> = None;
     let mut https_key: Option<String> = None;
@@ -564,6 +565,9 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
             "--no-treeshake" => treeshake = false,
             // --hmr (serve): modules are replaced in the running page instead of reloading it.
             "--hmr" => hmr = true,
+            // --react-refresh / --no-react-refresh (with --hmr): components keep their state; by default on when the project has react-refresh.
+            "--react-refresh" => react_refresh = Some(true),
+            "--no-react-refresh" => react_refresh = Some(false),
             // --https [--https-cert FILE --https-key FILE] (serve): TLS in front of the dev server.
             "--https" => https = true,
             "--https-cert" => {
@@ -1066,6 +1070,23 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
         }
         bundle_options.hmr = true;
         treeshake = false;
+        // React Fast Refresh needs the runtime of the project's own `react-refresh`.
+        let runtime = cwd.ancestors().map(|d| d.join("node_modules").join("react-refresh").join("cjs").join("react-refresh-runtime.development.js")).find(|f| f.is_file());
+        let has_react = cwd.ancestors().any(|d| d.join("node_modules").join("react").join("package.json").is_file());
+        let wanted = react_refresh.unwrap_or(runtime.is_some() && has_react);
+        if wanted {
+            let Some(runtime) = runtime else {
+                eprintln!("error: --react-refresh needs the react-refresh package (install it in the project)");
+                return Done::Exit(ExitCode::from(2));
+            };
+            if let Some(state) = &serve_state {
+                if let Err(e) = state.use_react_refresh(&runtime) {
+                    eprintln!("error: cannot read {}: {e}", runtime.display());
+                    return Done::Exit(ExitCode::from(2));
+                }
+            }
+            bundle_options.react_refresh = true;
+        }
     }
     if let (Some(state), Some(federation)) = (&serve_state, &options.federation) {
         // Declarations written after a rebuild are served as soon as they are there.
@@ -1275,6 +1296,7 @@ fn worker_builder(cwd: std::path::PathBuf, options: rathkit_pack::graph::GraphOp
         o.federation = None;
         o.hot = false;
         o.hmr = false;
+        o.react_refresh = false;
         o.map_base = None;
         match rathkit_pack::bundle::bundle(&graph, &linked, &shaken, &o) {
             Ok(output) => {

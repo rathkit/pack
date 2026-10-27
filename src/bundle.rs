@@ -20,6 +20,7 @@
 
 mod lower;
 mod lower_class;
+mod refresh;
 mod registry;
 mod std_decorators;
 
@@ -153,7 +154,7 @@ enum Code {
     Esm(EsmCode),
     /// A CommonJS or JSON module: the whole file as a function body.
     /// An ES module of the table `--hmr` builds: its statements as the usual output has them; the imports and exports are written at the end.
-    Registry(EsmCode),
+    Registry(EsmCode, Option<refresh::RefreshText>),
     Wrapped {
         edits: Vec<Edit>,
         json: bool,
@@ -212,6 +213,8 @@ pub struct Options {
     pub hot: bool,
     /// Serve mode with module replacement: the modules are a table of functions (see `registry.rs`), not one scope-hoisted program.
     pub hmr: bool,
+    /// With `hmr`: components keep their state when their module is replaced (React Fast Refresh; the page needs the runtime).
+    pub react_refresh: bool,
     /// File names for entries, by position, where the name is not the entry file's own (`foo` or `foo.js`).
     pub entry_names: Vec<Option<String>>,
     /// Module federation: `import()` of a remote or a shared package asks the runtime.
@@ -250,7 +253,7 @@ pub enum SourceMapMode {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { splitting: false, format: Format::Esm, global_name: None, globals: Vec::new(), original_paths: false, minify: crate::minify::Options::default(), sourcemap: SourceMapMode::None, sources_content: true, map_base: None, file_name: None, hot: false, hmr: false, entry_names: Vec::new(), federation: None, banner_js: None, footer_js: None, banner_css: None, footer_css: None, drop_console: false, drop_debugger: false, entry_template: None, chunk_template: None, out_extensions: Vec::new(), legal_comments: crate::legal::LegalComments::Eof, target: crate::target::Target::ESNEXT }
+        Options { splitting: false, format: Format::Esm, global_name: None, globals: Vec::new(), original_paths: false, minify: crate::minify::Options::default(), sourcemap: SourceMapMode::None, sources_content: true, map_base: None, file_name: None, hot: false, hmr: false, react_refresh: false, entry_names: Vec::new(), federation: None, banner_js: None, footer_js: None, banner_css: None, footer_css: None, drop_console: false, drop_debugger: false, entry_template: None, chunk_template: None, out_extensions: Vec::new(), legal_comments: crate::legal::LegalComments::Eof, target: crate::target::Target::ESNEXT }
     }
 }
 
@@ -374,6 +377,7 @@ struct Bundler<'a> {
     original_paths: bool,
     hot: bool,
     registry: bool,
+    react_refresh: bool,
     registry_externals: Vec<String>,
     /// The target lacks top-level await and the output can hold the whole program in an async function (one chunk, nothing exported).
     tla_possible: bool,
@@ -491,6 +495,7 @@ impl<'a> Bundler<'a> {
             original_paths: false,
             hot: false,
             registry: false,
+            react_refresh: false,
             registry_externals: Vec::new(),
             tla_possible: false,
             tla_wrap: false,
@@ -525,6 +530,7 @@ impl<'a> Bundler<'a> {
         self.entry_names = options.entry_names.clone();
         self.hot = options.hot;
         self.registry = options.hmr;
+        self.react_refresh = options.hmr && options.react_refresh;
         self.drop_console = options.drop_console;
         self.drop_debugger = options.drop_debugger;
         self.out_extensions = options.out_extensions.clone();
