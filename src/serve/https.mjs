@@ -1,4 +1,4 @@
-// The HTTPS side of `rkp serve --https`: this process owns the public port, speaks TLS, and passes every request to the dev server
+// The HTTPS side of `rkp serve --https`: this process owns the public port, speaks TLS (HTTP/2, or HTTP/1.1 to clients that ask for it), and passes every request to the dev server
 // (plain HTTP on the loopback), streams included, so server-sent events and hot updates work as they do without TLS.
 //
 // The certificate is the one given (`cert` and `key` files) or a self-signed one for localhost, made here and kept in the user's cache
@@ -7,7 +7,7 @@
 // The request is JSON in the first argument: { host, port, upstream, cert, key, names }. It prints `listening <port>` when it is ready.
 import fs from 'node:fs';
 import http from 'node:http';
-import https from 'node:https';
+import http2 from 'node:http2';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -103,9 +103,19 @@ function credentials() {
 
 const { cert, key } = credentials();
 const upstream = { host: '127.0.0.1', port: options.upstream };
-const server = https.createServer({ cert, key }, (req, res) => {
-  const forward = http.request({ ...upstream, method: req.method, path: req.url, headers: { ...req.headers, 'x-forwarded-proto': 'https' } }, (answer) => {
-    res.writeHead(answer.statusCode, answer.statusMessage, answer.headers);
+// What belongs to one HTTP/1.1 connection only, which HTTP/2 does not carry.
+const hopByHop = new Set(['connection', 'keep-alive', 'proxy-connection', 'transfer-encoding', 'upgrade', 'te']);
+// HTTP/2 and HTTP/1.1 on the same port: browsers take HTTP/2 (many module requests share a connection), other clients stay on HTTP/1.1.
+const server = http2.createSecureServer({ cert, key, allowHTTP1: true }, (req, res) => {
+  const headers = {};
+  for (const [name, value] of Object.entries(req.headers)) if (!name.startsWith(':') && !hopByHop.has(name)) headers[name] = value;
+  // HTTP/2 names the host in :authority.
+  if (req.headers[':authority'] && !headers.host) headers.host = req.headers[':authority'];
+  headers['x-forwarded-proto'] = 'https';
+  const forward = http.request({ ...upstream, method: req.method, path: req.url, headers }, (answer) => {
+    const out = {};
+    for (const [name, value] of Object.entries(answer.headers)) if (req.httpVersionMajor < 2 || !hopByHop.has(name)) out[name] = value;
+    res.writeHead(answer.statusCode, out);
     answer.pipe(res);
   });
   forward.on('error', (error) => {
@@ -117,6 +127,7 @@ const server = https.createServer({ cert, key }, (req, res) => {
   res.on('close', () => forward.destroy());
 });
 server.on('clientError', (_error, socket) => socket.destroy());
+server.on('sessionError', () => {});
 server.listen(options.port, options.host, () => process.stdout.write(`listening ${server.address().port}\n`));
 server.on('error', (error) => {
   process.stdout.write(`error ${error.message}\n`);

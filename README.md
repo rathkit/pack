@@ -186,7 +186,8 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   By default a self-signed certificate for `localhost`, `127.0.0.1`, `::1` (and `--host`, when it is a name or address) is
   made and kept in the cache folder (`$XDG_CACHE_HOME/rathkit` or `~/.cache/rathkit`; `RATHKIT_CERT_DIR` changes it),
   valid for a year and made again when it is about to end; the browser asks you to trust it once. `--https-cert FILE
-  --https-key FILE` (PEM; `https: { cert, key }`) use your own, such as one from mkcert. HTTP/2 is not used.
+  --https-key FILE` (PEM; `https: { cert, key }`) use your own, such as one from mkcert. Browsers get HTTP/2 (the many module requests share one connection, and the event stream is a
+  stream of it); other clients stay on HTTP/1.1.
 - Module federation: an application offers modules to others (`exposes`), takes modules from other applications
   (`remotes`), and agrees with them on one copy of each package they have in common (`shared`). The options are
   those of `ModuleFederationPlugin`; give them as `--federation FILE.json`, as `federation` in `rathkit.config.*`, or

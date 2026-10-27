@@ -4,6 +4,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, readFileSync, copyFileSync, rmSync, existsSync } from 'node:fs';
 import https from 'node:https';
+import http2 from 'node:http2';
 import crypto from 'node:crypto';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -80,6 +81,34 @@ try {
   writeFileSync(join(dir, 'main.js'), 'console.log("changed");\n');
   check(await until(() => messages.some((m) => m.type === 'full-reload' || m.type === 'hmr')), 'and carries a rebuild as it happens', JSON.stringify(messages));
   events.destroy();
+
+  // HTTP/2 for clients that take it: requests share one connection, and the event stream is one of its streams.
+  {
+    const session = http2.connect(`https://localhost:${server.port}`, { ca: pem });
+    const request = (path) => new Promise((resolve, reject) => {
+      const stream = session.request({ ':path': path });
+      let status;
+      let body = '';
+      stream.on('response', (headers) => (status = headers[':status']));
+      stream.on('data', (d) => (body += d));
+      stream.on('end', () => resolve({ status, body }));
+      stream.on('error', reject);
+      stream.end();
+    });
+    const [page2, bundle2, missing] = await Promise.all([request('/'), request('/bundle.js'), request('/nope.txt')]);
+    check(session.alpnProtocol === 'h2', 'a client that asks for HTTP/2 gets it', String(session.alpnProtocol));
+    check(page2.status === 200 && page2.body.includes('/__rathkit/client.js') && bundle2.status === 200 && bundle2.body.includes('changed') && missing.status === 404, 'and its requests are answered, side by side', JSON.stringify([page2.status, bundle2.status, missing.status]));
+    const seen = [];
+    const events2 = session.request({ ':path': '/__rathkit/events' });
+    events2.on('data', (d) => {
+      for (const part of d.toString().split('\n\n')) if (part.startsWith('data: ')) seen.push(JSON.parse(part.slice(6)));
+    });
+    check(await until(() => seen.some((m) => m.type === 'connected')), 'the event stream is a stream of the same connection', JSON.stringify(seen));
+    writeFileSync(join(dir, 'main.js'), 'console.log("changed again");\n');
+    check(await until(() => seen.some((m) => m.type === 'full-reload' || m.type === 'hmr')), 'and it carries a rebuild', JSON.stringify(seen));
+    events2.close();
+    session.close();
+  }
   // Plain HTTP to the same port is not served.
   const plain = await fetch(`http://127.0.0.1:${server.port}/`).then((r) => `status ${r.status}`, () => 'refused');
   check(plain === 'refused', 'plain HTTP is not answered on the TLS port', plain);
