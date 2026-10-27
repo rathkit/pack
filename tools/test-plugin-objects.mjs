@@ -86,10 +86,33 @@ try {
   await build({ cwd: dir, entries: ['main.js'], outfile: 'x.mjs', plugins: [{ name: 'boom', transform() { throw new Error('boom from a hook'); } }] }).catch((e) => (failure = e.message + '\n' + e.stderr));
   check(/boom from a hook/.test(failure), 'an error in a hook is the build\'s error', failure);
 
+  // The context methods that answer at once: the hook waits for the build.
+  {
+    const seen = {};
+    const blocking = {
+      name: 'blocking',
+      buildStart() {
+        seen.ref = this.emitFile({ type: 'asset', fileName: 'emitted.txt', source: 'from a plugin object' });
+        seen.name = this.getFileName(seen.ref);
+        seen.ast = this.parse('const a = 1;').body[0].type;
+      },
+      buildEnd() {
+        const info = this.getModuleInfo(join(dir, 'main.js'));
+        seen.info = Boolean(info) && info.id === join(dir, 'main.js');
+        seen.ids = [...this.getModuleIds()].length > 0;
+      },
+    };
+    await build({ cwd: dir, entries: ['main.js'], outfile: 'blocking.mjs', format: 'esm', define: { __WHO__: '"d"' }, plugins: [first, second, blocking] });
+    check(seen.name === 'emitted.txt' && typeof seen.ref === 'string', 'this.emitFile and this.getFileName answer at once', JSON.stringify(seen));
+    check(readFileSync(join(dir, 'emitted.txt'), 'utf8') === 'from a plugin object', 'and what is emitted is written');
+    check(seen.ast === 'VariableDeclaration', 'this.parse returns the tree', JSON.stringify(seen));
+    check(seen.info === true && seen.ids === true, 'this.getModuleInfo and this.getModuleIds answer', JSON.stringify(seen));
+  }
+
   // What needs the build's own objects says so.
   failure = '';
-  await build({ cwd: dir, entries: ['main.js'], outfile: 'x.mjs', plugins: [{ name: 'emitter', buildStart() { this.emitFile({ type: 'asset', fileName: 'a.txt', source: 'x' }); } }] }).catch((e) => (failure = e.message + '\n' + e.stderr));
-  check(/emitFile is not available to a plugin object/.test(failure), 'this.emitFile says it is not available', failure);
+  await build({ cwd: dir, entries: ['main.js'], outfile: 'x.mjs', plugins: [{ name: 'emitter', buildStart() { this.addWatchFiles; this.getCombinedSourcemap(); } }] }).catch((e) => (failure = e.message + '\n' + e.stderr));
+  check(/getCombinedSourcemap is not available to a plugin object/.test(failure), 'a method that cannot cross says it is not available', failure);
   failure = '';
   await build({ cwd: dir, entries: ['main.js'], outfile: 'x.mjs', plugins: [{ name: 'server', configureServer() {} }] }).catch((e) => (failure = e.message + '\n' + e.stderr));
   check(/configureServer/.test(failure) && /config file/.test(failure), 'configureServer is refused with a pointer to config files', failure);

@@ -3,12 +3,12 @@
 // process, are reached over a local socket. The host gets a generated config file with one stand-in plugin for each object, whose hooks
 // call this process and wait for the answer.
 //
-// What crosses is JSON (bytes as base64). A hook gets a `this` with the context methods that can be asynchronous: `resolve`, `load`,
-// `warn`, `info`, `debug`, `error`, `addWatchFile`. The ones that answer at once and need the build's own data (`emitFile`, `parse`,
-// `getModuleInfo`, ...) are not there, and say so; a plugin that needs them goes in a config file, where it runs in the host itself.
-// `generateBundle` and `writeBundle` get the output files with their text, and what the plugin changes in `code` and `source`, or removes, is
-// applied.
-const net = require('node:net');
+// What crosses is JSON (bytes as base64). A hook gets a `this` with the build's context methods. `resolve` and `load` are asynchronous, as in
+// Rollup. The ones that answer at once (`emitFile`, `getFileName`, `setAssetSource`, `parse`, `getModuleInfo`, `getModuleIds`,
+// `getWatchFiles`) have to block the hook until the build has answered, so the socket is held by a worker thread and the hook waits on
+// a shared flag (`Atomics.wait`) while the worker asks. `generateBundle` and `writeBundle` get the output files with their text, and what
+// the plugin changes in `code` and `source`, or removes, is applied.
+const { Worker, MessageChannel, receiveMessageOnPort } = require('node:worker_threads');
 const crypto = require('node:crypto');
 const { mkdtempSync, writeFileSync, rmSync } = require('node:fs');
 const { join, resolve } = require('node:path');
@@ -69,9 +69,11 @@ socket.on('data', async (chunk) => {
       let answer;
       try {
         if (!context) throw new Error('the hook has ended');
-        if (!['resolve', 'load', 'warn', 'info', 'debug', 'addWatchFile'].includes(message.method)) throw new Error('this.' + message.method + ' is not available to plugin objects passed to the API');
+        if (!['resolve', 'load', 'warn', 'info', 'debug', 'addWatchFile', 'emitFile', 'getFileName', 'setAssetSource', 'parse', 'getModuleInfo', 'getModuleIds', 'getWatchFiles'].includes(message.method)) throw new Error('this.' + message.method + ' is not available to plugin objects passed to the API');
         // JSON turns an argument that was not given (undefined) into null.
-        answer = { result: await context[message.method](...message.args.map((a) => (a === null ? undefined : a))) };
+        let value = await context[message.method](...message.args.map((a) => (a === null ? undefined : a)));
+        if (message.method === 'getModuleIds') value = Array.from(value);
+        answer = { result: value };
       } catch (error) {
         answer = { error: { message: error.message } };
       }
@@ -170,6 +172,74 @@ async function flatten(list) {
   return out;
 }
 
+// The thread that holds the socket. It passes the host's calls to the main thread, writes what the main thread sends, and answers the main
+// thread's questions to the host: asynchronously by a message, or, for a question the main thread is blocked on, through a port and a flag.
+const WORKER = `
+const { parentPort, workerData } = require('node:worker_threads');
+const net = require('node:net');
+const encode = ${encode.toString()};
+const decode = ${decode.toString()};
+const { token, flag: flagBuffer, port } = workerData;
+const flag = new Int32Array(flagBuffer);
+const blocked = new Set();
+let socket = null;
+const server = net.createServer((client) => {
+  if (socket) return client.destroy();
+  let buffer = '';
+  let authorized = false;
+  client.on('error', () => {});
+  client.on('close', () => {
+    if (socket === client) socket = null;
+  });
+  client.on('data', (chunk) => {
+    buffer += chunk;
+    let at;
+    while ((at = buffer.indexOf('\\n')) >= 0) {
+      const line = buffer.slice(0, at);
+      buffer = buffer.slice(at + 1);
+      const message = decode(line);
+      if (!authorized) {
+        if (message.token !== token) return client.destroy();
+        authorized = true;
+        socket = client;
+        continue;
+      }
+      if (message.t === 'ctxret' && blocked.delete(message.rid)) {
+        port.postMessage(message.error ? { error: message.error.message } : { result: message.result });
+        Atomics.store(flag, 0, 1);
+        Atomics.notify(flag, 0);
+      } else if (message.t === 'ctxret') parentPort.postMessage({ t: 'answer', rid: message.rid, result: message.result, error: message.error && message.error.message });
+      else parentPort.postMessage(message);
+    }
+  });
+});
+parentPort.on('message', (m) => {
+  if (m.t === 'send') {
+    if (socket) socket.write(encode(m.message) + '\\n');
+  } else if (m.t === 'ask') {
+    if (m.sync) blocked.add(m.rid);
+    if (!socket) {
+      if (m.sync) {
+        blocked.delete(m.rid);
+        port.postMessage({ error: 'the build has gone' });
+        Atomics.store(flag, 0, 1);
+        Atomics.notify(flag, 0);
+      }
+      return;
+    }
+    socket.write(encode({ t: 'ctx', call: m.call, rid: m.rid, method: m.method, args: m.args }) + '\\n');
+  } else if (m.t === 'close') {
+    if (socket) socket.destroy();
+    server.close();
+    process.exit(0);
+  }
+});
+server.listen(0, '127.0.0.1', () => parentPort.postMessage({ t: 'listening', port: server.address().port }));
+`;
+
+// The context methods that answer at once, which the hook blocks for.
+const BLOCKING = ['emitFile', 'getFileName', 'setAssetSource', 'parse', 'getModuleInfo', 'getModuleIds', 'getWatchFiles'];
+
 /**
  * Starts the socket for these plugin objects and writes the config the host loads. `base` is the config file the build would have used,
  * which the generated one continues. Returns the config's path and a way to end it all.
@@ -182,99 +252,92 @@ async function startBridge(list, { base, cwd, command, mode }) {
     const value = plugins[index][hook];
     return typeof value === 'function' ? value : value?.handler;
   };
-  const sockets = new Set();
-  const server = net.createServer((socket) => {
-    sockets.add(socket);
-    socket.on('close', () => sockets.delete(socket));
-    socket.on('error', () => {});
-    let buffer = '';
-    let authorized = false;
-    const waiting = new Map();
-    let requests = 0;
-    const send = (message) => socket.write(encode(message) + '\n');
-    const contextFor = (callId, meta) => {
-      const ask = (method, args, wait) =>
-        new Promise((done, fail) => {
-          const rid = wait ? ++requests : 0;
-          if (wait) waiting.set(rid, { done, fail });
-          send({ t: 'ctx', call: callId, rid, method, args });
-          if (!wait) done();
-        });
-      const unavailable = (name) => () => {
-        throw new Error(`this.${name} is not available to a plugin object passed to the API; put the plugin in a config file`);
-      };
-      const message = (m) => (typeof m === 'function' ? m() : m && typeof m === 'object' ? m.message ?? String(m) : m);
-      const base = {
-        meta,
-        resolve: (source, importer, options) => ask('resolve', [source, importer, options], true),
-        load: (options) => ask('load', [options], true),
-        warn: (m) => ask('warn', [message(m)], false),
-        info: (m) => ask('info', [message(m)], false),
-        debug: (m) => ask('debug', [message(m)], false),
-        addWatchFile: (file) => ask('addWatchFile', [file], false),
-        error: (m) => {
-          throw Object.assign(new Error(message(m)), typeof m === 'object' && m ? { code: m.code, loc: m.loc, id: m.id } : {});
-        },
-      };
-      return new Proxy(base, {
-        get(target, key) {
-          if (key in target || typeof key === 'symbol' || key === 'then' || key === 'toJSON') return target[key];
-          return unavailable(String(key));
-        },
-      });
+  const flag = new Int32Array(new SharedArrayBuffer(4));
+  const { port1, port2 } = new MessageChannel();
+  const worker = new Worker(WORKER, { eval: true, workerData: { token, flag: flag.buffer, port: port2 }, transferList: [port2] });
+  const waiting = new Map();
+  let requests = 0;
+  const send = (message) => worker.postMessage({ t: 'send', message });
+  // A question to the host that a hook can wait for: an answer is a message.
+  const askLater = (call, method, args) =>
+    new Promise((done, fail) => {
+      const rid = ++requests;
+      waiting.set(rid, { done, fail });
+      worker.postMessage({ t: 'ask', rid, call, method, args });
+    });
+  const askNow = (call, method, args) => {
+    worker.postMessage({ t: 'ask', rid: ++requests, call, method, args, sync: true });
+    Atomics.store(flag, 0, 0);
+    Atomics.wait(flag, 0, 0);
+    const answer = receiveMessageOnPort(port1)?.message;
+    if (!answer || answer.error) throw new Error(answer ? answer.error : 'the build did not answer');
+    return answer.result;
+  };
+  const tell = (call, method, args) => worker.postMessage({ t: 'ask', rid: 0, call, method, args });
+  const contextFor = (callId, meta) => {
+    const message = (m) => (typeof m === 'function' ? m() : m && typeof m === 'object' ? m.message ?? String(m) : m);
+    const own = {
+      meta,
+      resolve: (source, importer, options) => askLater(callId, 'resolve', [source, importer, options]),
+      load: (options) => askLater(callId, 'load', [options]),
+      warn: (m) => tell(callId, 'warn', [message(m)]),
+      info: (m) => tell(callId, 'info', [message(m)]),
+      debug: (m) => tell(callId, 'debug', [message(m)]),
+      addWatchFile: (file) => tell(callId, 'addWatchFile', [file]),
+      error: (m) => {
+        throw Object.assign(new Error(message(m)), typeof m === 'object' && m ? { code: m.code, loc: m.loc, id: m.id } : {});
+      },
     };
-    const handle = async (message) => {
-      if (message.t === 'ctxret') {
-        const entry = waiting.get(message.rid);
-        waiting.delete(message.rid);
-        if (entry) message.error ? entry.fail(new Error(message.error.message)) : entry.done(message.result);
-        return;
+    for (const name of BLOCKING) own[name] = (...args) => askNow(callId, name, args);
+    // The build's list of modules is an iterator, as in Rollup.
+    own.getModuleIds = (...args) => askNow(callId, 'getModuleIds', args)[Symbol.iterator]();
+    return new Proxy(own, {
+      get(target, key) {
+        if (key in target || typeof key === 'symbol' || key === 'then' || key === 'toJSON') return target[key];
+        return () => {
+          throw new Error(`this.${String(key)} is not available to a plugin object passed to the API; put the plugin in a config file`);
+        };
+      },
+    });
+  };
+  const handle = async (message) => {
+    const plugin = plugins[message.plugin];
+    try {
+      const fn = hooks(message.plugin, message.hook);
+      const result = await fn.apply(contextFor(message.id, message.meta), message.args);
+      const reply = { t: 'ret', id: message.id, result };
+      if (message.hook === 'generateBundle' || message.hook === 'writeBundle') {
+        reply.bundle = Object.fromEntries(Object.entries(message.args[1] ?? {}).map(([key, value]) => [key, { code: value.code, source: value.source }]));
       }
-      if (message.t !== 'call') return;
-      const plugin = plugins[message.plugin];
-      try {
-        const fn = hooks(message.plugin, message.hook);
-        const result = await fn.apply(contextFor(message.id, message.meta), message.args);
-        const reply = { t: 'ret', id: message.id, result };
-        if (message.hook === 'generateBundle' || message.hook === 'writeBundle') {
-          reply.bundle = Object.fromEntries(Object.entries(message.args[1] ?? {}).map(([key, value]) => [key, { code: value.code, source: value.source }]));
-        }
-        send(reply);
-      } catch (error) {
-        send({ t: 'ret', id: message.id, error: { message: String(error?.message ?? error), plugin: error?.plugin ?? plugin?.name, code: error?.code, loc: error?.loc, id: error?.id } });
-      }
-    };
-    socket.on('data', (chunk) => {
-      buffer += chunk;
-      let at;
-      while ((at = buffer.indexOf('\n')) >= 0) {
-        const line = buffer.slice(0, at);
-        buffer = buffer.slice(at + 1);
-        const message = decode(line);
-        if (!authorized) {
-          if (message.token !== token) return socket.destroy();
-          authorized = true;
-          continue;
-        }
-        handle(message);
+      send(reply);
+    } catch (error) {
+      send({ t: 'ret', id: message.id, error: { message: String(error?.message ?? error), plugin: error?.plugin ?? plugin?.name, code: error?.code, loc: error?.loc, id: error?.id } });
+    }
+  };
+  const listening = new Promise((done, fail) => {
+    worker.on('message', (m) => {
+      if (m.t === 'listening') done(m.port);
+      else if (m.t === 'call') handle(m);
+      else if (m.t === 'answer') {
+        const entry = waiting.get(m.rid);
+        waiting.delete(m.rid);
+        if (entry) m.error ? entry.fail(new Error(m.error)) : entry.done(m.result);
       }
     });
+    worker.once('error', fail);
   });
-  await new Promise((done, fail) => {
-    server.once('error', fail);
-    server.listen(0, '127.0.0.1', done);
-  });
+  const port = await listening;
   const dir = mkdtempSync(join(tmpdir(), 'rkp-plugins-'));
   const file = join(dir, 'rkp-plugin-objects.mjs');
-  const info = { port: server.address().port, token, items: descriptions, base: base ? resolve(cwd ?? process.cwd(), base) : null, command, mode };
+  const info = { port, token, items: descriptions, base: base ? resolve(cwd ?? process.cwd(), base) : null, command, mode };
   // The info is in the file as a template string (a JSON text with no backquote or ${ in it, which JSON.stringify keeps out of the way).
   const text = JSON.stringify(info).replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$\{/g, '\\${');
   writeFileSync(file, HOST_SIDE.replace('__INFO__', () => text));
   return {
     config: file,
     close() {
-      for (const socket of sockets) socket.destroy();
-      server.close();
+      worker.postMessage({ t: 'close' });
+      setTimeout(() => worker.terminate(), 200).unref();
       rmSync(dir, { recursive: true, force: true });
     },
   };

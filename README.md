@@ -178,9 +178,11 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   and Vite's `config`, `configResolved`, `transformIndexHtml`, `handleHotUpdate`), which stay in your process: the plugin host
   calls their hooks across a local socket, so what goes in and out is JSON (bytes as `Buffer`), a plugin keeps its own state as
   usual, and `generateBundle` / `writeBundle` can change the `code` and `source` of the files or remove them. A hook's `this` has
-  `resolve`, `load`, `warn`, `info`, `debug`, `error` and `addWatchFile`; methods that answer at once from the build's own data
-  (`emitFile`, `parse`, `getModuleInfo`, ...) are not there and say so, and so is `configureServer`: such a plugin goes in a config
-  file, where it runs in the host itself. `{ module, export, options }` loads a plugin from a module where the build runs, with
+  `resolve` and `load` (asynchronous, as in Rollup), and `emitFile`, `getFileName`, `setAssetSource`, `parse`, `getModuleInfo`,
+  `getModuleIds`, `getWatchFiles`, `warn`, `info`, `debug`, `error` and `addWatchFile`. The ones that answer at once make the hook wait
+  for the build (the objects are held by a worker thread of your process, and the hook blocks on a shared flag while it asks).
+  Other methods and `configureServer` are not there and say so: such a plugin goes in a config file, where it runs in the host
+  itself. `{ module, export, options }` loads a plugin from a module where the build runs, with
   everything a config file's plugin has. These come after the plugins of the config file, which still applies.
 - `rkp serve ... --https` (`https: true` in the JS API) serves over HTTPS: a Node.js process (so Node is needed, as for
   plugins) speaks TLS on the public port and passes requests, event streams included, to the dev server on the loopback.

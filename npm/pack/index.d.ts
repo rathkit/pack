@@ -121,7 +121,7 @@ export interface Options {
 }
 
 /** What went into a build and what came out: the shape of esbuild's metafile. `bytesInOutput` is an estimate (the original sizes, scaled to the file's size). */
-/** What a hook of a plugin object can call. Only the methods that can answer later are here; ones that answer at once and need the build's own data (`emitFile`, `parse`, `getModuleInfo`) are not available to objects passed to the API: put such a plugin in a config file. */
+/** What a hook of a plugin object can call. `resolve` and `load` are asynchronous; the rest answer at once, and the hook waits for the build while they do (the plugin object lives in another thread of the build, so a hook blocks on them). Methods that are not listed here are not available to objects passed to the API: put such a plugin in a config file. */
 export interface PluginContext {
   meta: { rollupVersion: string; watchMode: boolean };
   resolve(source: string, importer?: string, options?: { skipSelf?: boolean; isEntry?: boolean; custom?: Record<string, unknown> }): Promise<{ id: string; external: boolean | 'absolute' | 'relative'; moduleSideEffects: boolean | 'no-treeshake'; meta: Record<string, unknown> } | null>;
@@ -131,6 +131,13 @@ export interface PluginContext {
   debug(message: string | { message: string }): void;
   error(message: string | { message: string; code?: string }): never;
   addWatchFile(file: string): void;
+  emitFile(file: { type: 'asset'; fileName?: string; name?: string; source: string | Uint8Array } | { type: 'chunk'; id: string; fileName?: string; name?: string; importer?: string }): string;
+  getFileName(reference: string): string;
+  setAssetSource(reference: string, source: string | Uint8Array): void;
+  parse(code: string, options?: Record<string, unknown>): Record<string, unknown>;
+  getModuleInfo(id: string): Record<string, unknown> | null;
+  getModuleIds(): IterableIterator<string>;
+  getWatchFiles(): string[];
 }
 
 type Hook<A extends unknown[], R> = ((this: PluginContext, ...args: A) => R | Promise<R>) | { order?: 'pre' | 'post' | null; handler: (this: PluginContext, ...args: A) => R | Promise<R> };
