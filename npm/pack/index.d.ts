@@ -140,6 +140,34 @@ export interface PluginContext {
   getWatchFiles(): string[];
 }
 
+/** The `server` a plugin object's `configureServer` gets: the middlewares are called with the whole request (body buffered) and write the whole response, and what the `ws` sends reaches the open pages. Other parts of Vite's server (`watcher`, `httpServer`, `moduleGraph`) are not there. */
+export interface MiddlewareRequest {
+  method?: string;
+  url?: string;
+  headers: Record<string, string | string[] | undefined>;
+  on(event: 'data' | 'end' | 'error', listener: (...args: any[]) => void): unknown;
+  [Symbol.asyncIterator](): AsyncIterator<Uint8Array>;
+}
+
+export interface MiddlewareResponse {
+  statusCode: number;
+  setHeader(name: string, value: string | string[]): unknown;
+  getHeader(name: string): string | undefined;
+  writeHead(status: number, headers?: Record<string, string>): unknown;
+  write(chunk: string | Uint8Array): boolean;
+  end(chunk?: string | Uint8Array): unknown;
+}
+
+export interface DevServer {
+  root: string;
+  config: { root: string; mode: string; command: string };
+  middlewares: {
+    use(handler: (req: MiddlewareRequest, res: MiddlewareResponse, next: (error?: unknown) => void) => void | Promise<void>): unknown;
+    use(route: string, handler: (req: MiddlewareRequest, res: MiddlewareResponse, next: (error?: unknown) => void) => void | Promise<void>): unknown;
+  };
+  ws: { send(event: string, data?: unknown): void; send(payload: Record<string, unknown>): void };
+}
+
 type Hook<A extends unknown[], R> = ((this: PluginContext, ...args: A) => R | Promise<R>) | { order?: 'pre' | 'post' | null; handler: (this: PluginContext, ...args: A) => R | Promise<R> };
 
 /**
@@ -168,6 +196,7 @@ export interface Plugin {
   configResolved?: Hook<[config: Record<string, unknown>], void>;
   transformIndexHtml?: Hook<[html: string, context: Record<string, unknown>], string | { html: string; tags: unknown[] } | void>;
   handleHotUpdate?: Hook<[context: Record<string, unknown>], unknown[] | void>;
+  configureServer?: Hook<[server: DevServer], (() => void) | void>;
   [hook: string]: unknown;
 }
 

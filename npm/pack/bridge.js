@@ -6,7 +6,8 @@
 // What crosses is JSON (bytes as base64). A hook gets a `this` with the build's context methods. `resolve` and `load` are asynchronous, as in
 // Rollup. The ones that answer at once (`emitFile`, `getFileName`, `setAssetSource`, `parse`, `getModuleInfo`, `getModuleIds`,
 // `getWatchFiles`) have to block the hook until the build has answered, so the socket is held by a worker thread and the hook waits on
-// a shared flag (`Atomics.wait`) while the worker asks. `generateBundle` and `writeBundle` get the output files with their text, and what
+// a shared flag (`Atomics.wait`) while the worker asks. `configureServer` gets a `server` with `middlewares.use` (the requests it handles are
+// passed here whole, bodies buffered), `ws.send`, `config` and `root`. `generateBundle` and `writeBundle` get the output files with their text, and what
 // the plugin changes in `code` and `source`, or removes, is applied.
 const { Worker, MessageChannel, receiveMessageOnPort } = require('node:worker_threads');
 const crypto = require('node:crypto');
@@ -14,8 +15,8 @@ const { mkdtempSync, writeFileSync, rmSync } = require('node:fs');
 const { join, resolve } = require('node:path');
 const { tmpdir } = require('node:os');
 
-const HOOKS = ['options', 'resolveId', 'resolveDynamicImport', 'load', 'transform', 'moduleParsed', 'buildStart', 'buildEnd', 'renderChunk', 'generateBundle', 'writeBundle', 'closeBundle', 'closeWatcher', 'watchChange', 'resolveFileUrl', 'renderStart', 'banner', 'footer', 'intro', 'outro', 'config', 'configResolved', 'transformIndexHtml', 'handleHotUpdate'];
-const UNSUPPORTED = ['configureServer', 'configurePreviewServer', 'buildApplication', 'setup'];
+const HOOKS = ['options', 'resolveId', 'resolveDynamicImport', 'load', 'transform', 'moduleParsed', 'buildStart', 'buildEnd', 'renderChunk', 'generateBundle', 'writeBundle', 'closeBundle', 'closeWatcher', 'watchChange', 'resolveFileUrl', 'renderStart', 'banner', 'footer', 'intro', 'outro', 'config', 'configResolved', 'transformIndexHtml', 'handleHotUpdate', 'configureServer'];
+const UNSUPPORTED = ['configurePreviewServer', 'buildApplication', 'setup'];
 
 const encode = (value) =>
   JSON.stringify(value, (key, v) => {
@@ -68,6 +69,17 @@ socket.on('data', async (chunk) => {
       const context = contexts.get(message.call);
       let answer;
       try {
+        if (message.method === 'server.use') {
+          const [route, middleware] = message.args;
+          const handler = (req, res, next) => forwardRequest(middleware, req, res, next);
+          if (route) serverRef.middlewares.use(route, handler);
+          else serverRef.middlewares.use(handler);
+          continue;
+        }
+        if (message.method === 'server.wsSend') {
+          serverRef.ws.send(...message.args);
+          continue;
+        }
         if (!context) throw new Error('the hook has ended');
         if (!['resolve', 'load', 'warn', 'info', 'debug', 'addWatchFile', 'emitFile', 'getFileName', 'setAssetSource', 'parse', 'getModuleInfo', 'getModuleIds', 'getWatchFiles'].includes(message.method)) throw new Error('this.' + message.method + ' is not available to plugin objects passed to the API');
         // JSON turns an argument that was not given (undefined) into null.
@@ -81,6 +93,27 @@ socket.on('data', async (chunk) => {
     }
   }
 });
+let serverRef = null;
+// A request for a middleware of a plugin object: the whole request is passed over, and what comes back is the response, or "next".
+async function forwardRequest(middleware, req, res, next) {
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  await ready;
+  const id = ++calls;
+  const reply = new Promise((resolve, reject) => waiting.set(id, { resolve, reject }));
+  socket.write(encode({ t: 'req', id, middleware, request: { method: req.method, url: req.url, headers: req.headers, body: Buffer.concat(chunks) } }) + '\\n');
+  let answer;
+  try {
+    answer = (await reply).response;
+  } catch (error) {
+    return next(error);
+  }
+  if (answer.next) return next(answer.error ? new Error(answer.error) : undefined);
+  res.statusCode = answer.status;
+  for (const [name, value] of Object.entries(answer.headers ?? {})) res.setHeader(name, value);
+  res.end(answer.body && answer.body.length ? answer.body : undefined);
+}
+
 async function call(plugin, hook, args, context) {
   await ready;
   if (socket.destroyed) throw new Error('the process that holds the plugin objects ended');
@@ -131,6 +164,10 @@ for (const item of info.items) {
   for (const [hook, shape] of Object.entries(item.hooks)) {
     const forward = async function (...args) {
       if (hook === 'config' || hook === 'configResolved') args = [{ ...args[0], plugins: undefined }, ...args.slice(1)];
+      if (hook === 'configureServer') {
+        serverRef = args[0];
+        args = [{ root: serverRef.root, mode: info.mode, command: info.command }];
+      }
       return call(item.index, hook, args, this);
     };
     plugin[hook] = shape ? { ...shape, handler: forward } : forward;
@@ -300,11 +337,93 @@ async function startBridge(list, { base, cwd, command, mode }) {
       },
     });
   };
+  const middlewares = new Map();
+  const serverFor = (callId, shape) => {
+    const unavailable = (name) => () => {
+      throw new Error(`server.${name} is not available to a plugin object passed to the API; put the plugin in a config file`);
+    };
+    const use = function (route, fn) {
+      if (typeof route === 'function') [route, fn] = [null, route];
+      const id = ++requests;
+      middlewares.set(id, fn);
+      tell(callId, 'server.use', [route, id]);
+      return this;
+    };
+    const server = {
+      root: shape.root,
+      config: { root: shape.root, mode: shape.mode, command: shape.command, logger: console },
+      middlewares: { use },
+      ws: { send: (...a) => tell(callId, 'server.wsSend', a), on() {}, off() {} },
+      httpServer: null,
+    };
+    return new Proxy(server, {
+      get(target, key) {
+        if (key in target || typeof key === 'symbol' || key === 'then' || key === 'toJSON') return target[key];
+        return unavailable(String(key));
+      },
+    });
+  };
+  // A request for one of the middlewares: it sees a request with its body, and what it writes comes back whole.
+  const serveRequest = async (message) => {
+    const fn = middlewares.get(message.middleware);
+    const { Readable } = require('node:stream');
+    const request = message.request;
+    const req = Object.assign(Readable.from(request.body && request.body.length ? [Buffer.from(request.body)] : []), { method: request.method, url: request.url, originalUrl: request.url, headers: request.headers ?? {} });
+    const headers = new Map();
+    const chunks = [];
+    let done = false;
+    const reply = (response) => {
+      if (done) return;
+      done = true;
+      send({ t: 'ret', id: message.id, response });
+    };
+    const res = Object.assign(new (require('node:events'))(), {
+      statusCode: 200,
+      headersSent: false,
+      setHeader(name, value) {
+        headers.set(String(name).toLowerCase(), Array.isArray(value) ? value.join(', ') : String(value));
+        return res;
+      },
+      getHeader: (name) => headers.get(String(name).toLowerCase()),
+      hasHeader: (name) => headers.has(String(name).toLowerCase()),
+      removeHeader: (name) => headers.delete(String(name).toLowerCase()),
+      writeHead(status, a, b) {
+        res.statusCode = status;
+        for (const [k, v] of Object.entries((typeof a === 'object' && a) || b || {})) res.setHeader(k, v);
+        res.headersSent = true;
+        return res;
+      },
+      write(chunk) {
+        if (chunk !== undefined && chunk !== null) chunks.push(Buffer.from(chunk));
+        res.headersSent = true;
+        return true;
+      },
+      end(chunk) {
+        if (chunk !== undefined && chunk !== null && typeof chunk !== 'function') res.write(chunk);
+        reply({ status: res.statusCode, headers: Object.fromEntries(headers), body: Buffer.concat(chunks) });
+        res.emit('finish');
+        return res;
+      },
+    });
+    const next = (error) => reply({ next: true, error: error ? String(error.message ?? error) : undefined });
+    try {
+      const out = fn(req, res, next);
+      if (out && typeof out.then === 'function') await out;
+    } catch (error) {
+      next(error);
+    }
+  };
   const handle = async (message) => {
     const plugin = plugins[message.plugin];
     try {
       const fn = hooks(message.plugin, message.hook);
-      const result = await fn.apply(contextFor(message.id, message.meta), message.args);
+      const args = message.hook === 'configureServer' ? [serverFor(message.id, message.args[0])] : message.args;
+      let result = await fn.apply(contextFor(message.id, message.meta), args);
+      // A function returned by configureServer adds middlewares after the built-in ones; here it runs at once.
+      if (message.hook === 'configureServer') {
+        if (typeof result === 'function') await result();
+        result = undefined;
+      }
       const reply = { t: 'ret', id: message.id, result };
       if (message.hook === 'generateBundle' || message.hook === 'writeBundle') {
         reply.bundle = Object.fromEntries(Object.entries(message.args[1] ?? {}).map(([key, value]) => [key, { code: value.code, source: value.source }]));
@@ -318,6 +437,7 @@ async function startBridge(list, { base, cwd, command, mode }) {
     worker.on('message', (m) => {
       if (m.t === 'listening') done(m.port);
       else if (m.t === 'call') handle(m);
+      else if (m.t === 'req') serveRequest(m);
       else if (m.t === 'answer') {
         const entry = waiting.get(m.rid);
         waiting.delete(m.rid);

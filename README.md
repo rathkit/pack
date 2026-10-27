@@ -181,8 +181,9 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   `resolve` and `load` (asynchronous, as in Rollup), and `emitFile`, `getFileName`, `setAssetSource`, `parse`, `getModuleInfo`,
   `getModuleIds`, `getWatchFiles`, `warn`, `info`, `debug`, `error` and `addWatchFile`. The ones that answer at once make the hook wait
   for the build (the objects are held by a worker thread of your process, and the hook blocks on a shared flag while it asks).
-  Other methods and `configureServer` are not there and say so: such a plugin goes in a config file, where it runs in the host
-  itself. `{ module, export, options }` loads a plugin from a module where the build runs, with
+  `configureServer(server)` gets `middlewares.use` (the whole request, body buffered, goes to your process and the whole response comes
+  back), `ws.send`, `config` and `root`. Other methods and the rest of Vite's server (`watcher`, `httpServer`, `moduleGraph`) are not there
+  and say so: such a plugin goes in a config file, where it runs in the host itself. `{ module, export, options }` loads a plugin from a module where the build runs, with
   everything a config file's plugin has. These come after the plugins of the config file, which still applies.
 - `rkp serve ... --https` (`https: true` in the JS API) serves over HTTPS: a Node.js process (so Node is needed, as for
   plugins) speaks TLS on the public port and passes requests, event streams included, to the dev server on the loopback.

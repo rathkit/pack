@@ -114,8 +114,65 @@ try {
   await build({ cwd: dir, entries: ['main.js'], outfile: 'x.mjs', plugins: [{ name: 'emitter', buildStart() { this.addWatchFiles; this.getCombinedSourcemap(); } }] }).catch((e) => (failure = e.message + '\n' + e.stderr));
   check(/getCombinedSourcemap is not available to a plugin object/.test(failure), 'a method that cannot cross says it is not available', failure);
   failure = '';
-  await build({ cwd: dir, entries: ['main.js'], outfile: 'x.mjs', plugins: [{ name: 'server', configureServer() {} }] }).catch((e) => (failure = e.message + '\n' + e.stderr));
-  check(/configureServer/.test(failure) && /config file/.test(failure), 'configureServer is refused with a pointer to config files', failure);
+  await build({ cwd: dir, entries: ['main.js'], outfile: 'x.mjs', plugins: [{ name: 'server', configurePreviewServer() {} }] }).catch((e) => (failure = e.message + '\n' + e.stderr));
+  check(/configurePreviewServer/.test(failure) && /config file/.test(failure), 'a hook that needs the build\'s own objects is refused with a pointer to config files', failure);
+
+  // configureServer: middlewares (the request and its body go across; next() passes it on) and ws.send.
+  {
+    const dev = {
+      name: 'dev',
+      configureServer(server) {
+        server.middlewares.use('/api', (req, res, next) => {
+          if (req.url === '/hello') {
+            res.setHeader('content-type', 'text/plain');
+            res.end('hello ' + req.method + ' ' + server.config.mode);
+          } else if (req.url === '/ping') {
+            server.ws.send('ping', { n: 1 });
+            res.end('sent');
+          } else if (req.url === '/echo') {
+            let body = '';
+            req.on('data', (d) => (body += d));
+            req.on('end', () => res.end(JSON.stringify({ body, type: req.headers['content-type'] })));
+          } else next();
+        });
+        return () => {};
+      },
+    };
+    const live = await serve({ cwd: dir, entries: ['main.js'], port: 0, plugins: [dev] });
+    const get = (path, init) => fetch(new URL(path, live.url), init).then(async (r) => ({ status: r.status, text: await r.text() }));
+    const hello = await get('api/hello');
+    check(hello.status === 200 && hello.text === 'hello GET development', 'a middleware of a plugin object answers', JSON.stringify(hello));
+    const echo = await get('api/echo', { method: 'POST', body: 'posted', headers: { 'content-type': 'text/x-test' } });
+    check(echo.text === '{"body":"posted","type":"text/x-test"}', 'and sees the body of a request', echo.text);
+    const other = await get('api/other');
+    check(other.status === 404, 'next() passes a request on', JSON.stringify(other));
+    const messages = [];
+    const controller = new AbortController();
+    fetch(new URL('__rathkit/events', live.url), { signal: controller.signal }).then(async (response) => {
+      const reader = response.body.getReader();
+      let buffer = '';
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) return;
+        buffer += Buffer.from(value).toString();
+        for (let at; (at = buffer.indexOf('\n\n')) >= 0; buffer = buffer.slice(at + 2)) {
+          try {
+            messages.push(JSON.parse(buffer.slice(0, at).replace(/^data: /, '')));
+          } catch {}
+        }
+      }
+    }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 300));
+    await get('api/ping');
+    let found = false;
+    for (let tries = 0; tries < 50 && !found; tries++) {
+      found = messages.some((m) => m.type === 'custom' && m.event === 'ping' && m.data.n === 1);
+      if (!found) await new Promise((r) => setTimeout(r, 100));
+    }
+    check(found, 'server.ws.send reaches the page', JSON.stringify(messages));
+    controller.abort();
+    await live.close();
+  }
 
   // And the development server takes them too.
   const server = await serve({ cwd: dir, entries: ['main.js'], port: 0, plugins: [first, second] });
