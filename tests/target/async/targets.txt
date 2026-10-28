@@ -1,2 +1,5 @@
 es2015
 es2016
+chrome50
+safari10
+node6

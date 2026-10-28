@@ -19,7 +19,7 @@ export interface Options {
   globalName?: string;
   /** For an `iife`: the global each external module is read from, `{ react: 'React' }`. */
   globals?: Record<string, string>;
-  /** The version of JavaScript the output may use: `es2015` to `es2025`, or `esnext` (the default; nothing is rewritten). Newer syntax is rewritten, or the build stops saying what could not be: BigInt literals and top-level await cannot be, and some others are not yet. */
+  /** The version of JavaScript the output may use: `es2015` to `es2025`, `esnext` (the default; nothing is rewritten), or engines with versions (`chrome80`, `safari13.1`, `node18`, `firefox78`, `ios14.5`, `edge90`, `opera70`), alone or in a comma-separated list with years: only what one of them lacks is rewritten. Newer syntax is rewritten, or the build stops saying what could not be: BigInt literals cannot be, top-level await only in a single file that exports nothing, and some others are not yet. */
   target?: string;
   /** `true` is whitespace, identifiers and syntax together. */
   minify?: boolean | { whitespace?: boolean; identifiers?: boolean; syntax?: boolean };

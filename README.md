@@ -73,6 +73,9 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   `import.meta.env` alone is an object of all of these. `--no-env-files` reads no files; a change to a `.env` file starts a
   build again when watching.
 - `--target=es2015` ... `es2025` (or `esnext`, the default, which rewrites nothing): the version of JavaScript the output may use.
+  A target can also name engines with versions, `--target=chrome80,safari13.1,node18` (engines: `chrome`, `edge`, `firefox`, `safari`,
+  `ios`, `node`, `opera`; years and engines mix), and then only what one of them lacks is rewritten: Chrome 80 has `?.` and `??`
+  but not `??=`, private members or top-level await. The versions come from MDN's compatibility tables.
   Syntax newer than it is rewritten, as `--target` does in esbuild: `a ** b` and `**=` (`Math.pow`), `?.`, `??`, `||=` `&&=` `??=`
   (a value used twice goes in a temporary `var` declared once at the top of the file), numeric separators, `catch` without a
   binding, a trailing comma in a call or parameter list, and object spread (`__spreadValues` and `__spreadProps`, which keep getters
@@ -81,8 +84,7 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   (`__publicField`, and a `WeakMap` or `WeakSet` per private name, as esbuild does), and async functions, methods and arrows (generators run by `__async`, each `await` a `yield`), `for await` loops and async generators (`__forAwait`, `__asyncGenerator`, and `yield*` through `__yieldStar`), and `super` inside an async method or arrow (read and written through accessors made where the `super` is valid). `es2015` is the lowest target. Anything the target cannot have and this
   cannot rewrite stops the build with a message that names it and the target, never passes through: BigInt literals can never be rewritten, and top-level await is rewritten only when the program is one file with nothing exported (an app: the whole program becomes the body of an async function, or of a generator run by `__async` below es2017, with the imports left outside), otherwise it stops the build. Not rewritten either: decorators together with
   class fields, `super` in a private method or a static initializer, a tagged template on a private member, or object rest anywhere else (nested in another pattern, in an assignment, in `catch`), or a `__proto__`
-  property after a spread. Regular expression syntax and library functions are not looked at, and engine targets such
-  as `chrome80` are not supported. Checked by running programs as written and rewritten for every target in plain, minified,
+  property after a spread. Regular expression syntax and library functions are not looked at. Checked by running programs as written and rewritten for every target in plain, minified,
   CommonJS and IIFE form, and by parsing each result as the language of its target (`tools/run-target.mjs`).
 - `--dts` (and `--dts-dir=DIR`, for a folder other than the output's): declaration files for the entries, written with the project's own
   `typescript` package (run by Node; it is an error if it is not installed). They are what `tsc --declaration --emitDeclarationOnly`

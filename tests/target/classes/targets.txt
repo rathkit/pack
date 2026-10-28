@@ -5,3 +5,8 @@ es2018
 es2019
 es2020
 es2021
+chrome80
+safari13
+firefox78
+node14
+ios14.5

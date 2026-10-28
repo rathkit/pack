@@ -248,7 +248,8 @@ impl Scanner<'_, '_> {
             NodeKind::ForOf { left, body, .. } if self.lowers(Feature::ObjectRest) && self.for_of_rest(left).is_some() => self.lower_rest_for_of(node, left, body),
             NodeKind::ObjectPattern(_) if self.has_object_rest(node) && self.lowers(Feature::ObjectRest) && !self.skip.contains(&node) => self.lower_error(Feature::ObjectRest, node),
             // Fields, private members and static blocks are rewritten with the class that has them.
-            NodeKind::Class { .. } if self.lowers(Feature::ClassField) && self.class_needs_lowering(node) => self.lower_class(node),
+            // Fields, private members and static blocks are rewritten together: an engine can have some and lack the others.
+            NodeKind::Class { .. } if (self.lowers(Feature::ClassField) || self.lowers(Feature::ClassPrivate) || self.lowers(Feature::ClassStaticBlock)) && self.class_needs_lowering(node) => self.lower_class(node),
             NodeKind::Await(_) if self.fn_depth == 0 && self.lowers(Feature::TopLevelAwait) && !self.bundler.tla_possible => self.lower_error(Feature::TopLevelAwait, node),
             _ => {}
         }

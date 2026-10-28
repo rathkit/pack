@@ -20,7 +20,7 @@ try {
   console.log('target: acorn is not installed (pnpm install --dir bench): the leftover-syntax check is skipped');
 }
 // The targets that lower something; `esnext` and `es2022` leave the programs as they are.
-const targets = ['es2015', 'es2016', 'es2017', 'es2018', 'es2019', 'es2020', 'es2021', 'es2022', 'esnext'];
+const targets = ['es2015', 'es2016', 'es2017', 'es2018', 'es2019', 'es2020', 'es2021', 'es2022', 'esnext', 'chrome80', 'safari13', 'firefox78', 'node14', 'ios14.5', 'chrome60,safari12'];
 const modes = [[], ['--minify'], ['--format', 'cjs'], ['--format', 'iife']];
 const only = process.argv.slice(2);
 const names = readdirSync(base).filter((n) => statSync(join(base, n)).isDirectory() && (!only.length || only.includes(n)));
@@ -51,7 +51,8 @@ for (const name of names) {
         const r = spawnSync('node', ['--no-warnings', out], { cwd: dir, encoding: 'utf8' });
         if (r.status !== 0 || r.stdout !== original.stdout) problem = `output differs\n--- expected\n${original.stdout}--- got (exit ${r.status})\n${r.stdout}${r.stderr}`;
         else if (acorn && target !== 'esnext') {
-          const year = Number(target.slice(2));
+          // An engine target keeps what the engine has, which may be newer than the syntax it lacks; only a year is checked strictly.
+          const year = /^es\d+$/.test(target) ? Number(target.slice(2)) : 'latest';
           try {
             acorn.parse(readFileSync(out, 'utf8'), { ecmaVersion: year, sourceType: format === 'esm' ? 'module' : 'script' });
           } catch (e) {

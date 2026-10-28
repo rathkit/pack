@@ -563,6 +563,17 @@ fn what_a_target_cannot_have_stops_the_build_and_is_named() {
     }
     // The same text is fine for a target that has it, and the target must be one.
     assert_eq!(rkp("export const f = 1n;", "es2020").0, Some(0));
+    // An engine target says the same by version: Chrome 80 has `??` and `?.` but not `??=`, and Safari 13.0 has neither.
+    for (engine, source) in [("chrome80", "let a, b; a ??= b; export { a };"), ("safari13", "export const f = 1n;")] {
+        let (code, stderr) = rkp(source, engine);
+        let expected_error = engine == "safari13";
+        assert_eq!(code, Some(if expected_error { 1 } else { 0 }), "{engine}: {stderr}");
+        if expected_error {
+            assert!(stderr.contains("a BigInt literal is not available in the target safari13"), "{stderr}");
+        }
+    }
+    let (code, stderr) = rkp("export const a = null ?? 1; export const b = a?.x;", "chrome80,safari12");
+    assert_eq!(code, Some(0), "{stderr}");
     // Top-level await is rewritten when the program is one file with nothing exported, and refused otherwise.
     assert_eq!(rkp("const t = await Promise.resolve(1); console.log(t);", "es2021").0, Some(0));
     assert_eq!(rkp("const t = await Promise.resolve(1); console.log(t);", "es2015").0, Some(0));
@@ -570,7 +581,7 @@ fn what_a_target_cannot_have_stops_the_build_and_is_named() {
     let split = Command::new(env!("CARGO_BIN_EXE_rkp")).current_dir(&dir).args(["bundle", "main.js", "--outdir", "out", "--splitting", "--target", "es2021"]).output().expect("rkp starts");
     assert_eq!(split.status.code(), Some(1), "{}", String::from_utf8_lossy(&split.stderr));
     assert!(String::from_utf8_lossy(&split.stderr).contains("the output is split"), "{}", String::from_utf8_lossy(&split.stderr));
-    for bad in ["es5", "chrome80", "es2099"] {
+    for bad in ["es5", "chrome", "netscape4", "es2099"] {
         let (code, stderr) = rkp("export const x = 1;", bad);
         assert_eq!(code, Some(2), "{bad}: {stderr}");
     }
