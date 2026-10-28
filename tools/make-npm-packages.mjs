@@ -65,14 +65,17 @@ for (const p of platforms) {
   const manifest = {
     name,
     version,
-    description: `The rathkit-pack program for ${p.os} ${p.cpu}`,
+    description: `The rathkit-pack program for ${p.os} ${p.cpu}${p.libc ? ` (${p.libc})` : ''} (alpha)`,
     license: base.license,
     repository: { ...base.repository, directory: undefined },
+    homepage: base.homepage,
+    bugs: base.bugs,
+    keywords: base.keywords,
     os: [p.os],
     cpu: [p.cpu],
     ...(p.libc ? { libc: [p.libc] } : {}),
     files: ['bin', 'README.md', 'LICENSE'],
-    publishConfig: { access: 'public' },
+    publishConfig: { access: 'public', provenance: true },
   };
   writeFileSync(join(dir, 'package.json'), JSON.stringify(manifest, null, 2) + '\n');
   made.push({ name, dir });

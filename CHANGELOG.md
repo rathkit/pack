@@ -12,6 +12,10 @@ version in which it happened, and the minor number is raised for it (0.1 to 0.2)
 fix bugs only. Versions with a suffix (`-alpha.N`) are published as pre-releases, never as the
 latest release, and promise nothing but what the README says is tested.
 
+What an alpha does promise, and checks on every change (`tools/check-promises.mjs`): no dependencies and no install
+scripts in any package, a build that needs no network, provenance and checksums on every release. It promises nothing
+about stability.
+
 ## 0.1.0-alpha.0
 
 First release.

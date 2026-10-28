@@ -10,6 +10,14 @@
   },
   "homepage": "https://github.com/rathkit/pack#readme",
   "bugs": "https://github.com/rathkit/pack/issues",
+  "keywords": [
+    "bundler",
+    "javascript",
+    "typescript",
+    "rust",
+    "zero-dependency",
+    "alpha"
+  ],
   "bin": {
     "rkp": "bin/rkp.js"
   },
@@ -26,7 +34,8 @@
   },
   "optionalDependencies": {},
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "provenance": true
   },
   "main": "index.js",
   "types": "index.d.ts",
