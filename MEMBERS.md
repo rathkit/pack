@@ -6,7 +6,7 @@ Who holds each role. See [GOVERNANCE.md](GOVERNANCE.md) for what the roles mean 
 
 | GitHub | Organization |
 | --- | --- |
-| [@rathpc](https://github.com/rathpc) | Rathkit |
+| [@rathpc](https://github.com/rathpc) | Rathkit LLC |
 
 ## Maintainers
 

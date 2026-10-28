@@ -1,6 +1,6 @@
 # Governance
 
-Rathkit Pack is run by its owner through the maintainer listed in
+Rathkit Pack is run by its owner, Rathkit LLC, through the maintainer listed in
 [MEMBERS.md](MEMBERS.md). While the project is young the owner decides, and this page says how
 that is done so it is not a surprise.
 
