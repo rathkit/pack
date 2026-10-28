@@ -1,6 +1,6 @@
 // Scans the repository for words that must never appear in it (the private project plan, names of other products that are not ours to mention).
 // The word list is NOT stored in the repo. It comes from the RATHKIT_DENYLIST environment variable (comma or newline separated), set from
-// CI secrets; RTE_DENYLIST is read when that one is not set, so one list serves both repositories. (This repository names other bundlers on
+// CI secrets; the same name is used by the other Rathkit repositories. (This repository names other bundlers on
 // purpose, in the benchmarks and in what plugins it runs; the list is of words that are not allowed anywhere in it.)
 //   node tools/check-denylist.mjs            the files now
 //   node tools/check-denylist.mjs --history  every commit on every branch and tag: messages, author names and every added line and path
@@ -14,7 +14,7 @@ const split = (value) =>
     .map((word) => word.trim().toLowerCase())
     .filter(Boolean);
 
-const denied = split(process.env.RATHKIT_DENYLIST || process.env.RTE_DENYLIST);
+const denied = split(process.env.RATHKIT_DENYLIST);
 
 if (denied.length === 0) {
   if (process.env.CI) {

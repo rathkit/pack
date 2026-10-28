@@ -76,7 +76,6 @@ jobs:
     timeout-minutes: 10
     env:
       RATHKIT_DENYLIST: ${{ secrets.RATHKIT_DENYLIST }}
-      RTE_DENYLIST: ${{ secrets.RTE_DENYLIST }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -89,12 +88,12 @@ jobs:
       - run: node --test tools/scan-secrets.test.mjs
       - run: node tools/scan-secrets.mjs
       - name: Word check
-        if: env.RATHKIT_DENYLIST != '' || env.RTE_DENYLIST != ''
+        if: env.RATHKIT_DENYLIST != ''
         run: node tools/check-denylist.mjs
         env:
           CI: "true"
       - name: The word check did not run (no list set)
-        if: env.RATHKIT_DENYLIST == '' && env.RTE_DENYLIST == ''
+        if: env.RATHKIT_DENYLIST == ''
         run: echo "::warning::RATHKIT_DENYLIST is not set; the word check was skipped"
 
   # The musl build (Alpine): the program has no C dependencies, so it runs there as it is built; this checks it does.
