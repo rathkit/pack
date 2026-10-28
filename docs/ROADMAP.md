@@ -10,7 +10,7 @@ Items marked *(maintainer)* need an action on GitHub, npm or elsewhere that only
 
 Everything else waits on this: provenance needs a public source repository, and outside feedback needs a release.
 
-- [ ] 0.1 Scan the full history and working tree for secrets, stray files and anything that does not belong in a public repository. (The secret scan is clean over all commits; the word check over history runs in CI, `history-scan` workflow, on the day before the flip.)
+- [x] 0.1 Scan the full history and working tree for secrets, stray files and anything that does not belong in a public repository.
 - [x] 0.2 Package metadata for `@rathkit/pack` and the platform packages (`repository`, `bugs`, `homepage`, `keywords`, `engines`, `publishConfig`, README, LICENSE in each).
 - [x] 0.3 Each promise on the security page backed by a CI check: no runtime dependencies, no install scripts, no network use by default, SBOM with zero components, checksums and provenance on every release.
 - [x] 0.4 Document what "alpha" promises and the version policy for 0.x; first release `0.1.0-alpha.0` on the `next` tag, never `latest`.
