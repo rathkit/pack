@@ -79,11 +79,11 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   Syntax newer than it is rewritten, as `--target` does in esbuild: `a ** b` and `**=` (`Math.pow`), `?.`, `??`, `||=` `&&=` `??=`
   (a value used twice goes in a temporary `var` declared once at the top of the file), numeric separators, `catch` without a
   binding, a trailing comma in a call or parameter list, and object spread (`__spreadValues` and `__spreadProps`, which keep getters
-  and methods) and object rest (`__objRest`) in a declaration, a function parameter (also of an arrow with an expression body)
-  or a `for of`, and class fields, private members (`#x`, private methods and accessors, `#x in o`) and static blocks
+  and methods) and object rest (`__objRest`) in a declaration, a function parameter (also of an arrow with an expression body), a `for of`, `catch`
+  or an assignment, nested in other patterns or after computed keys (a nested pattern is read after the outer one is done), and class fields, private members (`#x`, private methods and accessors, `#x in o`) and static blocks
   (`__publicField`, and a `WeakMap` or `WeakSet` per private name, as esbuild does), and async functions, methods and arrows (generators run by `__async`, each `await` a `yield`), `for await` loops and async generators (`__forAwait`, `__asyncGenerator`, and `yield*` through `__yieldStar`), and `super` inside an async method or arrow (read and written through accessors made where the `super` is valid). `es2015` is the lowest target. Anything the target cannot have and this
   cannot rewrite stops the build with a message that names it and the target, never passes through: BigInt literals can never be rewritten, and top-level await is rewritten only when the program is one file with nothing exported (an app: the whole program becomes the body of an async function, or of a generator run by `__async` below es2017, with the imports left outside), otherwise it stops the build. Not rewritten either: decorators together with
-  class fields, `super` in a private method or a static initializer, a tagged template on a private member, or object rest anywhere else (nested in another pattern, in an assignment, in `catch`), or a `__proto__`
+  class fields, `super` in a private method or a static initializer, a tagged template on a private member, or a `__proto__`
   property after a spread. Regular expression syntax and library functions are not looked at. Checked by running programs as written and rewritten for every target in plain, minified,
   CommonJS and IIFE form, and by parsing each result as the language of its target (`tools/run-target.mjs`).
 - `--dts` (and `--dts-dir=DIR`, for a folder other than the output's): declaration files for the entries, written with the project's own
@@ -347,6 +347,7 @@ agrees with them:
 | Linking | Node's own module linker (link only) | 1,100 real closures, 32,000 random programs |
 | TypeScript parser | `tsc`'s parser | 12,000 `.d.ts` files, 8,000 source files |
 | Bundles | the same program run unbundled | 32 fixtures in nine output modes, 5 code-splitting programs, 6,000+ random multi-module programs, 570 real packages, real libraries doing real work (TypeScript, Prettier, Terser, Babel, React DOM) |
+| `--target` | the same program as written (Node has all of it), rewritten for a target in four output forms | 21 programs for 7 years and 6 engines (357 builds), and 1,600+ random programs of optional chains, `??`, logical assignment, `**`, spread and rest in every position, classes with private members, async functions, `for await`, async generators, `super` and top-level await (`tools/fuzz-target.mjs`) |
 | Minifier | the same program under other names and spellings (same trees up to the syntax rewrites it is allowed, same literals, every identifier denotes the same binding), and the same output when run | 37,779 real modules; every bundle test above also runs minified; 1,000 random programs built from the constructs the rewrites touch (`tools/fuzz-syntax.mjs`) |
 | Plugins | the same program with the plugins' effects, run by Node: virtual modules, aliases, transforms, hooks in order, emitted files and chunks, module info, `this.parse`, esbuild namespaces, webpack loaders with pitch and inline requests, webpack compiler hooks (lifecycle order, assets, stats, child compiler, built-in plugins), Parcel plugins of every kind, source maps through a transform (Node's own stack traces) | 10 programs x 3-4 output modes (`tools/run-plugins.mjs`); `--watch` (`tools/run-watch.mjs`); the ESTree of every `.js` file in a project's `node_modules` against acorn's (`tools/check-estree.mjs`; 223,000 files on the development machine); real packages as listed under "What is covered by tests" |
 | Loaders, style sheets | the values a program reads from imported text, base64, data URLs, bytes and copied files; CSS text snapshots; every CSS source map segment leads back to the same token in the source | 3 programs x 7 output modes (`tools/run-loaders.mjs`); every style sheet in a project's `node_modules` maps correctly (76 on the development machine) |
@@ -376,6 +377,7 @@ node tools/run-sourcemaps.mjs                 # stack traces through source maps
 node tools/check-pieces.mjs                    # minifying in pieces vs in one pass (add --packages PROJECT for every package)
 node tools/check-sourcemap.mjs OUT.js         # one bundle's map against both ends
 python3 tools/fuzz-bundle.py --seed 1         # random programs vs Node
+node tools/fuzz-target.mjs --seed 1            # random programs using what --target rewrites, as written vs rewritten for a target
 node tools/diff-packages.mjs PROJECT          # every package in PROJECT/node_modules
 node tools/diff-real.mjs PROJECT              # real library workloads
 ```

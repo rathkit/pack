@@ -64,3 +64,59 @@ for (const { id, ...more } of [{ id: 1, v: 'a' }, { id: 2, v: 'b', w: 'c' }]) ou
 for (let { id, ...more } of [{ id: 3 }]) { id += 10; out.push([id, more]); }
 for (var { id: vid, ...vmore } of [{ id: 4, k: 'k' }]) out.push([vid, vmore]);
 show('forof', out);
+
+// Object rest nested in other patterns, after computed keys, behind defaults, and in async arrows.
+{
+  const src = { a: 1, b: { c: 2, d: 3, e: 4 }, e: 5, f: 6, [Symbol.for('s')]: 7 };
+  const { a, b: { c, ...bRest }, ...rest } = src;
+  console.log('nested', a, c, bRest, rest, Object.getOwnPropertySymbols(rest).length);
+  const { x: [first, { y, ...inArray }] = [1, { y: 2, w: 3, v: 4 }], ...others } = { z: 9 };
+  console.log('in array', first, y, inArray, others);
+  const [p, { q, ...afterQ }, ...tail] = [1, { q: 2, r: 3 }, 4, 5];
+  console.log('array pattern', p, q, afterQ, tail);
+  const key = 'k1';
+  const log = [];
+  const k = (name) => (log.push(name), name);
+  const { [k('k1')]: v1 = 'dflt', [k('k2')]: v2, ...afterKeys } = { k1: undefined, k2: 'two', k3: 'three', 1: 'num' };
+  console.log('computed', v1, v2, afterKeys, log);
+  const { [1]: numeric, ...withoutOne } = { 1: 'one', 2: 'two' };
+  console.log('numeric key', numeric, withoutOne);
+  function f1({ a, ...r2 }, [x, { y2, ...z }] = [1, { y2: 2, w: 3 }]) { return [a, r2, x, y2, z]; }
+  console.log('params', f1(src), f1({ a: 0 }, [5, { y2: 6, w: 7, v: 8 }]));
+  const g = ({ a, b: { c, ...bb }, ...r3 }) => [a, c, bb, r3];
+  console.log('arrow', g(src));
+  for (const { b: { c, ...bb }, ...r4 } of [src, { b: { c: 0, z: 1 }, q: 1 }]) console.log('for of', c, bb, r4);
+  const h = async ({ a, ...r5 }) => [a, r5];
+  const h2 = async ({ b: { ...copy } }) => copy;
+  Promise.all([h(src), h2(src)]).then((r) => console.log('async', r));
+  let n1 = 0;
+  const { w = (n1++, 'dflt'), ...r6 } = { u: 1 };
+  console.log('default once', w, r6, n1);
+}
+
+// ... in assignments and in catch.
+{
+  let a, r, t;
+  const o2 = {};
+  const out = ({ a, ...r } = { a: 1, b: 2, c: 3 });
+  console.log('assign', a, r, out.b);
+  ({ a: o2.x, ...o2.rest } = { a: 5, z: 6 });
+  console.log('assign to members', o2);
+  [t, { ...r }] = [1, { q: 2 }];
+  console.log('array assign', t, r);
+  ({ k: { a, ...r } } = { k: { a: 7, s: 8 } });
+  console.log('nested assign', a, r);
+  const keyed = 'dyn';
+  ({ [keyed]: a, ...r } = { dyn: 'D', other: 1, 3: 'x' });
+  console.log('computed assign', a, r);
+  try {
+    throw { code: 1, msg: 'x', extra: true };
+  } catch ({ code, ...info }) {
+    console.log('catch', code, info);
+  }
+  try {
+    throw { deep: { n: 1, m: 2 } };
+  } catch ({ deep: { n, ...others } }) {
+    console.log('catch nested', n, others);
+  }
+}

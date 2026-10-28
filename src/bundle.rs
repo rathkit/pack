@@ -3010,8 +3010,8 @@ fn json_string(text: &str) -> String {
 const HELPER_CJS: &str = "var __cjs = (fn, req) => { var m; return () => m ? m.exports : (m = { exports: {} }, fn.call(m.exports, m.exports, m, req), m.exports); };\n";
 const HELPER_ASYNC: &str = "var __async = (__this, __arguments, generator) => new Promise((resolve, reject) => { var fulfilled = (value) => { try { step(generator.next(value)); } catch (e) { reject(e); } }; var rejected = (value) => { try { step(generator.throw(value)); } catch (e) { reject(e); } }; var step = (x) => x.done ? resolve(x.value) : Promise.resolve(x.value).then(fulfilled, rejected); step((generator = generator.apply(__this, __arguments)).next()); });\n";
 const HELPER_FOR_AWAIT: &str = "var __forAwait = (obj) => { var method = obj[Symbol.asyncIterator]; if (method != null) return method.call(obj); var it = obj[Symbol.iterator](); var wrap = (k) => (v) => { var r = it[k](v); return Promise.resolve(r.value).then((value) => ({ value, done: r.done })); }; return { next: wrap('next'), return: it.return && wrap('return') }; };\n";
-const HELPER_ASYNC_GEN: &str = "var __await = function (v) { this.v = v; };\nvar __asyncGenerator = (__this, __arguments, fn) => { var gen = fn.apply(__this, __arguments), queue = [], busy = false, it = {}; var next = () => { if (busy || !queue.length) return; busy = true; var job = queue.shift(); step(job.k, job.v, job); }; var settle = (job, ok, v) => { busy = false; ok ? job.yes(v) : job.no(v); next(); }; var step = (k, v, job) => { var r; try { r = gen[k](v); } catch (e) { return settle(job, false, e); } var value = r.value; if (!r.done && value instanceof __await) Promise.resolve(value.v).then((x) => step('next', x, job), (e) => step('throw', e, job)); else Promise.resolve(value).then((x) => settle(job, true, { value: x, done: r.done }), (e) => r.done ? settle(job, false, e) : step('throw', e, job)); }; var method = (k) => it[k] = (v) => new Promise((yes, no) => { queue.push({ k, v, yes, no }); next(); }); method('next'); method('throw'); method('return'); it[Symbol.asyncIterator] = () => it; it[Symbol.toStringTag] = 'AsyncGenerator'; return it; };\nvar __yieldStar = function* (value) { var it = __forAwait(value), k = 'next', v, r, finished = false; try { for (;;) { try { r = yield new __await(it[k](v)); } catch (e) { finished = true; throw e; } if (r.done) { finished = true; return r.value; } try { v = yield r.value; k = 'next'; } catch (e) { if (!it.throw) throw e; k = 'throw'; v = e; } } } finally { if (!finished && it.return) yield new __await(it.return()); } };\n";
-const HELPER_SPREAD: &str = "var __hasOwn = Object.prototype.hasOwnProperty;\nvar __propIsEnum = Object.prototype.propertyIsEnumerable;\nvar __defNormal = (obj, key, value) => key in obj ? Object.defineProperty(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;\nvar __spreadValues = (a, b) => { for (var prop in b || (b = {})) if (__hasOwn.call(b, prop)) __defNormal(a, prop, b[prop]); if (Object.getOwnPropertySymbols) for (var prop of Object.getOwnPropertySymbols(b)) { if (__propIsEnum.call(b, prop)) __defNormal(a, prop, b[prop]); } return a; };\nvar __spreadProps = (a, b) => { for (var key of Reflect.ownKeys(b)) Object.defineProperty(a, key, Object.getOwnPropertyDescriptor(b, key)); return a; };\nvar __objRest = (source, exclude) => { var target = {}; for (var prop in source) if (__hasOwn.call(source, prop) && exclude.indexOf(prop) < 0) target[prop] = source[prop]; if (source != null && Object.getOwnPropertySymbols) for (var prop of Object.getOwnPropertySymbols(source)) { if (exclude.indexOf(prop) < 0 && __propIsEnum.call(source, prop)) target[prop] = source[prop]; } return target; };\n";
+const HELPER_ASYNC_GEN: &str = "var __await = function (v, close) { this.v = v; this.close = close; };\nvar __asyncGenerator = (__this, __arguments, fn) => { var gen = fn.apply(__this, __arguments), queue = [], busy = false, it = {}; var next = () => { if (busy || !queue.length) return; busy = true; var job = queue.shift(); step(job.k, job.v, job); }; var settle = (job, ok, v) => { busy = false; ok ? job.yes(v) : job.no(v); next(); }; var step = (k, v, job) => { var r; try { r = gen[k](v); } catch (e) { return settle(job, false, e); } var value = r.value; if (!r.done && value instanceof __await) Promise.resolve(value.v).then((x) => value.close && k === 'return' ? step('return', v, job) : step('next', x, job), (e) => step('throw', e, job)); else Promise.resolve(value).then((x) => settle(job, true, { value: x, done: r.done }), (e) => r.done ? settle(job, false, e) : step('throw', e, job)); }; var method = (k) => it[k] = (v) => new Promise((yes, no) => { queue.push({ k, v, yes, no }); next(); }); method('next'); method('throw'); method('return'); it[Symbol.asyncIterator] = () => it; it[Symbol.toStringTag] = 'AsyncGenerator'; return it; };\nvar __yieldStar = function* (value) { var it = __forAwait(value), k = 'next', v, r, finished = false; try { for (;;) { try { r = yield new __await(it[k](v)); } catch (e) { finished = true; throw e; } if (r.done) { finished = true; return r.value; } try { v = yield r.value; k = 'next'; } catch (e) { if (!it.throw) throw e; k = 'throw'; v = e; } } } finally { if (!finished && it.return) yield new __await(it.return(), true); } };\n";
+const HELPER_SPREAD: &str = "var __hasOwn = Object.prototype.hasOwnProperty;\nvar __propIsEnum = Object.prototype.propertyIsEnumerable;\nvar __defNormal = (obj, key, value) => key in obj ? Object.defineProperty(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;\nvar __spreadValues = (a, b) => { for (var prop in b || (b = {})) if (__hasOwn.call(b, prop)) __defNormal(a, prop, b[prop]); if (Object.getOwnPropertySymbols) for (var prop of Object.getOwnPropertySymbols(b)) { if (__propIsEnum.call(b, prop)) __defNormal(a, prop, b[prop]); } return a; };\nvar __spreadProps = (a, b) => { for (var key of Reflect.ownKeys(b)) Object.defineProperty(a, key, Object.getOwnPropertyDescriptor(b, key)); return a; };\nvar __objRest = (source, exclude) => { exclude = exclude.map((k) => typeof k === 'symbol' ? k : '' + k); var target = {}; for (var prop in source) if (__hasOwn.call(source, prop) && exclude.indexOf(prop) < 0) target[prop] = source[prop]; if (source != null && Object.getOwnPropertySymbols) for (var prop of Object.getOwnPropertySymbols(source)) { if (exclude.indexOf(prop) < 0 && __propIsEnum.call(source, prop)) target[prop] = source[prop]; } return target; };\n";
 const HELPER_CLASS_PRIVATE: &str = "var __typeError = (msg) => { throw TypeError(msg); };\nvar __defNormalProp = (obj, key, value) => key in obj ? Object.defineProperty(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;\nvar __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== \"symbol\" ? key + \"\" : key, value);\nvar __accessCheck = (obj, member, msg) => member.has(obj) || __typeError(\"Cannot \" + msg);\nvar __privateGet = (obj, member, getter) => (__accessCheck(obj, member, \"read from private field\"), getter ? getter.call(obj) : member.get(obj));\nvar __privateAdd = (obj, member, value) => member.has(obj) ? __typeError(\"Cannot add the same private member more than once\") : member instanceof WeakSet ? member.add(obj) : member.set(obj, value);\nvar __privateSet = (obj, member, value, setter) => (__accessCheck(obj, member, \"write to private field\"), setter ? setter.call(obj, value) : member.set(obj, value), value);\nvar __privateMethod = (obj, member, method) => (__accessCheck(obj, member, \"access private method\"), method);\nvar __privateWrapper = (obj, member, setter, getter) => ({ set _(value) { __privateSet(obj, member, value, setter); }, get _() { return __privateGet(obj, member, getter); } });\nvar __privateIn = (member, obj) => Object(obj) !== obj ? __typeError('Cannot use the \"in\" operator on this value') : member.has(obj);\n";
 const HELPER_TO_DEFAULT: &str = "var __toDefault = (e, node) => e && !node && e.__esModule ? e.default : e;\n";
 const HELPER_TO_NS: &str = "var __toNs = (e, node) => { if (!node && e && e.__esModule) return e; var t = Object.create(null, { [Symbol.toStringTag]: { value: \"Module\" } }); if (e && (typeof e == \"object\" || typeof e == \"function\")) for (let k of new Set(e.__esModule ? [...Object.keys(e), \"__esModule\"] : Object.keys(e))) if (k != \"default\") Object.defineProperty(t, k, { get: () => e[k], enumerable: true }); return Object.defineProperty(t, \"default\", { value: e, enumerable: true }); };\n";
@@ -3051,12 +3051,16 @@ impl Bundler<'_> {
 
     /// The source between `start` and `end` with `edits` applied.
     fn render(&self, id: ModuleId, start: u32, end: u32, edits: &[Edit], names: &HashMap<Key, String>) -> String {
-        self.render_skipping(id, start, end, edits, names, &[])
+        self.render_skipping(id, start, end, edits, names, &[], None)
     }
 
     /// As `render`, leaving out the edits in `skip`: the ones whose replacement is being
     /// written, whose own text refers back into the range they replace.
-    fn render_skipping(&self, id: ModuleId, start: u32, end: u32, edits: &[Edit], names: &HashMap<Key, String>, skip: &[*const Edit]) -> String {
+    ///
+    /// `owner` is the span of the replacement the text is read back for. An insertion that has no width and sits on the edge of such a range
+    /// is not part of it: on the replacement's own edges the text around the replacement has it, and on the end of a range the next range
+    /// (which has it as its start) or the text after it. Otherwise the range and its neighbors would both write it.
+    fn render_skipping(&self, id: ModuleId, start: u32, end: u32, edits: &[Edit], names: &HashMap<Key, String>, skip: &[*const Edit], owner: Option<(u32, u32)>) -> String {
         // Inside a range read back from a replacement, the edits that cut text out of the
         // statement do not apply.
         let inside_range = !skip.is_empty();
@@ -3070,13 +3074,18 @@ impl Bundler<'_> {
             if edit.start < at || edit.end > end {
                 continue; // inside an edit already applied
             }
+            if let Some((owner_start, owner_end)) = owner {
+                if edit.start == edit.end && ((edit.start == start && start == owner_start) || (edit.start == end && end == owner_end)) {
+                    continue;
+                }
+            }
             self.copy(&mut out, id, at, edit.start);
             let mut inner_skip: Vec<*const Edit> = skip.to_vec();
             inner_skip.push(edit as *const Edit);
             let mut text = String::new();
             for piece in &edit.pieces {
                 match piece {
-                    Piece::Range(from, to) => text.push_str(&self.render_skipping(id, *from, *to, edits, names, &inner_skip)),
+                    Piece::Range(from, to) => text.push_str(&self.render_skipping(id, *from, *to, edits, names, &inner_skip, Some((edit.start, edit.end)))),
                     other => text.push_str(&self.text_of(std::slice::from_ref(other), names)),
                 }
             }
@@ -3228,7 +3237,7 @@ impl Bundler<'_> {
         let sentinel = [std::ptr::null::<Edit>()];
         for piece in &stmt.trailer {
             match piece {
-                Piece::Range(from, to) => out.push_str(&self.render_skipping(id, *from, *to, &stmt.edits, names, &sentinel)),
+                Piece::Range(from, to) => out.push_str(&self.render_skipping(id, *from, *to, &stmt.edits, names, &sentinel, None)),
                 other => out.push_str(&self.text_of(std::slice::from_ref(other), names)),
             }
         }

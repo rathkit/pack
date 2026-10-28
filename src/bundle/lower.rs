@@ -230,7 +230,7 @@ impl Scanner<'_, '_> {
             // Not rewritten yet: stop instead of writing what the target cannot run.
             NodeKind::Object(props) if self.lowers(Feature::ObjectSpread) && ast.list(props).iter().any(|&p| matches!(ast[p].kind, NodeKind::Spread(_))) => self.lower_object_spread(node, props),
             // A pattern with `...rest` is rewritten where its parent does it (a declaration, a parameter, a `for of`); anywhere else it is refused.
-            NodeKind::VarDeclarator { target, init: Some(init) } if self.has_object_rest(target) && self.lowers(Feature::ObjectRest) => self.lower_rest_declarator(node, target, init),
+            NodeKind::VarDeclarator { target, init: Some(init) } if self.contains_object_rest(target) && self.lowers(Feature::ObjectRest) => self.lower_rest_declarator(node, target, init),
             NodeKind::Labeled { body, .. } if self.fn_depth > 0 && self.lowers(Feature::AsyncIteration) && self.labeled_for_await(body).is_some_and(|i| !self.skip.contains(&i)) => {
                 let inner = self.labeled_for_await(body).unwrap();
                 let NodeKind::ForOf { left, right, body } = ast[inner].kind else { return };
@@ -246,6 +246,8 @@ impl Scanner<'_, '_> {
                 }
             }
             NodeKind::ForOf { left, body, .. } if self.lowers(Feature::ObjectRest) && self.for_of_rest(left).is_some() => self.lower_rest_for_of(node, left, body),
+            NodeKind::Assign { op: AssignOp::Assign, target, value } if self.lowers(Feature::ObjectRest) && matches!(ast[target].kind, NodeKind::ObjectPattern(_) | NodeKind::ArrayPattern(_)) && self.contains_object_rest(target) && !self.skip.contains(&target) => self.lower_rest_assignment(node, target, value),
+            NodeKind::Catch { param: Some(param), body } if self.lowers(Feature::ObjectRest) && self.contains_object_rest(param) => self.lower_rest_catch(param, body),
             NodeKind::ObjectPattern(_) if self.has_object_rest(node) && self.lowers(Feature::ObjectRest) && !self.skip.contains(&node) => self.lower_error(Feature::ObjectRest, node),
             // Fields, private members and static blocks are rewritten with the class that has them.
             // Fields, private members and static blocks are rewritten together: an engine can have some and lack the others.
@@ -643,60 +645,195 @@ impl Scanner<'_, '_> {
         }
     }
 
-    /// The parts of `{ a, b: x, ...rest }`: the span of the plain properties, the keys that are left out of the rest, and the rest's name.
-    /// `None` after an error (a computed key, or something this does not handle).
-    fn rest_parts(&mut self, pattern: NodeId) -> Option<(Option<(u32, u32)>, Vec<String>, NodeId)> {
+    /// Whether a pattern has an object rest anywhere in it: `{ ...r }`, `{ a: { ...r } }`, `[{ ...r }]`, `{ a: [x, { ...r }] = d }`.
+    fn contains_object_rest(&self, pattern: NodeId) -> bool {
         let ast = self.ast;
-        let NodeKind::ObjectPattern(props) = ast[pattern].kind else { return None };
-        let mut plain: Option<(u32, u32)> = None;
-        let mut keys = Vec::new();
-        let mut rest = None;
-        for &p in ast.list(props) {
-            match ast[p].kind {
-                NodeKind::Rest(target) if matches!(ast[target].kind, NodeKind::BindingIdent(_)) => rest = Some(target),
-                NodeKind::PatternProp { key, .. } if ast[p].flags & crate::ast::flags::COMPUTED == 0 => {
-                    let name = match ast[key].kind {
-                        NodeKind::PropName(a) | NodeKind::Str(a) => json_string(ast.atom(a)),
+        match ast[pattern].kind {
+            NodeKind::ObjectPattern(props) => ast.list(props).iter().any(|&p| match ast[p].kind {
+                NodeKind::Rest(_) => true,
+                NodeKind::PatternProp { value, .. } => self.contains_object_rest(value),
+                _ => false,
+            }),
+            NodeKind::ArrayPattern(elements) => ast.list(elements).iter().any(|&e| self.contains_object_rest(e)),
+            NodeKind::AssignPattern { target, .. } | NodeKind::Rest(target) => self.contains_object_rest(target),
+            _ => false,
+        }
+    }
+
+    /// A name for something the rewrite binds: it is declared by the declaration it is part of, so a call has its own.
+    fn binding_name(&mut self, prefix: &str) -> String {
+        let name = format!("{prefix}{}", self.bundler.temp_count);
+        self.bundler.temp_count += 1;
+        name
+    }
+
+    /// A name for a part of a pattern rewrite: a binding of the declaration it is in, or, in an assignment, a `var` of the chunk.
+    fn part_name(&mut self, prefix: &str, assign: bool) -> String {
+        if assign { self.temp() } else { self.binding_name(prefix) }
+    }
+
+    /// A pattern with an object rest in it, as declarators that read `source` (a name): the keys that are computed first, then the pattern
+    /// with each part that has a rest in it replaced by a name, then the rest itself (`__objRest(source, [the keys before it])`), then each
+    /// of those parts, rewritten the same way. They go in one declaration (`var`, `let` or `const`), after the declarator that holds the
+    /// value. A nested pattern is read after the outer one is done, not in turn with it. `None` after an error.
+    fn rest_declarators(&mut self, pattern: NodeId, source: &str, assign: bool) -> Option<Vec<Vec<Piece>>> {
+        let ast = self.ast;
+        self.skip.insert(pattern);
+        let mut before: Vec<Vec<Piece>> = Vec::new();
+        let mut after: Vec<Vec<Piece>> = Vec::new();
+        // A part of a pattern that has a rest in it becomes a name (with its default), and its own declarators follow.
+        let nested = |this: &mut Self, part: NodeId, after: &mut Vec<Vec<Piece>>| -> Option<Vec<Piece>> {
+            let (inner, default) = match ast[part].kind {
+                NodeKind::AssignPattern { target, default } => (target, Some(default)),
+                _ => (part, None),
+            };
+            let name = this.part_name("__rkp", assign);
+            after.extend(this.rest_declarators(inner, &name, assign)?);
+            let mut pieces = vec![text(&name)];
+            if let Some(default) = default {
+                let (ds, de) = this.span(default);
+                pieces.extend([text(" = "), Piece::Range(ds, de)]);
+            }
+            Some(pieces)
+        };
+        match ast[pattern].kind {
+            NodeKind::ObjectPattern(props) => {
+                let has_rest = ast.list(props).iter().any(|&p| matches!(ast[p].kind, NodeKind::Rest(_)));
+                let mut kept: Vec<Vec<Piece>> = Vec::new();
+                let mut keys: Vec<String> = Vec::new();
+                let mut rest = None;
+                for &p in ast.list(props) {
+                    match ast[p].kind {
+                        NodeKind::Rest(target) if assign || matches!(ast[target].kind, NodeKind::BindingIdent(_)) => rest = Some(target),
+                        NodeKind::PatternProp { key, value } => {
+                            let computed = ast[p].flags & crate::ast::flags::COMPUTED != 0;
+                            let mut property: Option<Vec<Piece>> = None;
+                            if computed && has_rest {
+                                // Evaluated once, first, so the rest can leave it out.
+                                let name = self.part_name("__rkk", assign);
+                                let (ks, ke) = self.span(key);
+                                before.push(vec![text(&format!("{name} = (")), Piece::Range(ks, ke), text(")")]);
+                                keys.push(name.clone());
+                                property = Some(vec![text(&format!("[{name}]: "))]);
+                            } else if !computed && has_rest {
+                                let exclusion = match ast[key].kind {
+                                    NodeKind::PropName(a) | NodeKind::Str(a) => json_string(ast.atom(a)),
+                                    NodeKind::Num(_) => {
+                                        let (ks, ke) = self.span(key);
+                                        let literal = self.source_between(ks, ke).replace('_', "");
+                                        match literal.parse::<f64>() {
+                                            Ok(n) if n.fract() == 0.0 && n.abs() < 1e15 => json_string(&format!("{}", n as i64)),
+                                            _ => {
+                                                self.lower_error(Feature::ObjectRest, pattern);
+                                                return None;
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        self.lower_error(Feature::ObjectRest, pattern);
+                                        return None;
+                                    }
+                                };
+                                keys.push(exclusion);
+                            }
+                            if self.contains_object_rest(value) {
+                                let (ks, ke) = self.span(key);
+                                let mut pieces = property.unwrap_or_else(|| if computed { vec![text("["), Piece::Range(ks, ke), text("]: ")] } else { vec![Piece::Range(ks, ke), text(": ")] });
+                                pieces.extend(nested(self, value, &mut after)?);
+                                kept.push(pieces);
+                            } else if let Some(mut pieces) = property {
+                                let (vs, ve) = self.span(value);
+                                pieces.push(Piece::Range(vs, ve));
+                                kept.push(pieces);
+                            } else {
+                                let (ps, pe) = self.span(p);
+                                kept.push(vec![Piece::Range(ps, pe)]);
+                            }
+                        }
                         _ => {
                             self.lower_error(Feature::ObjectRest, pattern);
                             return None;
                         }
-                    };
-                    keys.push(name);
-                    let (start, end) = self.span(p);
-                    plain = Some(match plain {
-                        Some((a, _)) => (a, end),
-                        None => (start, end),
-                    });
+                    }
                 }
-                _ => {
-                    self.lower_error(Feature::ObjectRest, pattern);
-                    return None;
+                let mut declarators = before;
+                if !kept.is_empty() {
+                    let mut pieces = vec![text("{ ")];
+                    for (i, part) in kept.into_iter().enumerate() {
+                        if i > 0 {
+                            pieces.push(text(", "));
+                        }
+                        pieces.extend(part);
+                    }
+                    pieces.push(text(&format!(" }} = {source}")));
+                    if assign {
+                        pieces.insert(0, text("("));
+                        pieces.push(text(")"));
+                    }
+                    declarators.push(pieces);
                 }
+                if let Some(rest) = rest {
+                    self.bundler.helpers.spread = true;
+                    let (rs, re) = self.span(rest);
+                    declarators.push(vec![Piece::Range(rs, re), text(&format!(" = __objRest({source}, [{}])", keys.join(", ")))]);
+                }
+                declarators.extend(after);
+                Some(declarators)
+            }
+            NodeKind::ArrayPattern(elements) => {
+                let mut pieces = vec![text("[")];
+                for (i, &element) in ast.list(elements).iter().enumerate() {
+                    if i > 0 {
+                        pieces.push(text(", "));
+                    }
+                    match ast[element].kind {
+                        NodeKind::Hole => {}
+                        NodeKind::Rest(target) if self.contains_object_rest(target) => {
+                            pieces.push(text("..."));
+                            pieces.extend(nested(self, target, &mut after)?);
+                        }
+                        _ if self.contains_object_rest(element) => pieces.extend(nested(self, element, &mut after)?),
+                        _ => {
+                            let (es, ee) = self.span(element);
+                            pieces.push(Piece::Range(es, ee));
+                        }
+                    }
+                }
+                pieces.push(text(&format!("] = {source}")));
+                if assign {
+                    pieces.insert(0, text("("));
+                    pieces.push(text(")"));
+                }
+                let mut declarators = vec![pieces];
+                declarators.extend(after);
+                Some(declarators)
+            }
+            _ => {
+                self.lower_error(Feature::ObjectRest, pattern);
+                None
             }
         }
-        let rest = rest?;
-        self.skip.insert(pattern);
-        Some((plain, keys, rest))
     }
 
-    /// `const { a, ...rest } = init` as `const { a } = (T = init), rest = __objRest(T, ["a"])`.
-    fn lower_rest_declarator(&mut self, node: NodeId, pattern: NodeId, init: NodeId) {
-        let Some((plain, keys, rest)) = self.rest_parts(pattern) else { return };
-        let (is, ie) = self.span(init);
-        let (rs, re) = self.span(rest);
-        self.bundler.helpers.spread = true;
-        let mut pieces: Vec<Piece> = Vec::new();
-        match plain {
-            Some((a, b)) => {
-                let t = self.temp();
-                pieces.extend([text("{ "), Piece::Range(a, b), text(&format!(" }} = ({t} = (")), Piece::Range(is, ie), text("))")]);
-                pieces.extend([text(", "), Piece::Range(rs, re), text(&format!(" = __objRest({t}, [{}])", keys.join(", ")))]);
+    /// The declarators joined by commas.
+    fn joined(declarators: Vec<Vec<Piece>>) -> Vec<Piece> {
+        let mut out = Vec::new();
+        for (i, declarator) in declarators.into_iter().enumerate() {
+            if i > 0 {
+                out.push(text(", "));
             }
-            None => {
-                pieces.extend([Piece::Range(rs, re), text(" = __objRest("), Piece::Range(is, ie), text(", [])")]);
-            }
+            out.extend(declarator);
         }
+        out
+    }
+
+    /// `const { a, ...rest } = init` as `const __rks = (init), { a } = __rks, rest = __objRest(__rks, ["a"])`.
+    fn lower_rest_declarator(&mut self, node: NodeId, pattern: NodeId, init: NodeId) {
+        let source = self.binding_name("__rks");
+        let Some(declarators) = self.rest_declarators(pattern, &source, false) else { return };
+        let (is, ie) = self.span(init);
+        let mut pieces = vec![text(&format!("{source} = (")), Piece::Range(is, ie), text("), ")];
+        pieces.extend(Self::joined(declarators));
         self.push(node, pieces);
     }
 
@@ -705,7 +842,7 @@ impl Scanner<'_, '_> {
         let NodeKind::VarDecl { decls, .. } = self.ast[left].kind else { return None };
         let [only] = self.ast.list(decls) else { return None };
         match self.ast[*only].kind {
-            NodeKind::VarDeclarator { target, init: None } if self.has_object_rest(target) => Some(target),
+            NodeKind::VarDeclarator { target, init: None } if self.contains_object_rest(target) => Some(target),
             _ => None,
         }
     }
@@ -715,16 +852,12 @@ impl Scanner<'_, '_> {
         let ast = self.ast;
         let Some(pattern) = self.for_of_rest(left) else { return };
         let NodeKind::VarDecl { kind, .. } = ast[left].kind else { return };
-        let Some((plain, keys, rest)) = self.rest_parts(pattern) else { return };
         let _ = node;
         let name = self.argument_name();
-        let (rs, re) = self.span(rest);
-        self.bundler.helpers.spread = true;
+        let Some(declarators) = self.rest_declarators(pattern, &name, false) else { return };
         let mut declaration = vec![text(kind.as_str()), text(" ")];
-        if let Some((a, b)) = plain {
-            declaration.extend([text("{ "), Piece::Range(a, b), text(&format!(" }} = {name}, "))]);
-        }
-        declaration.extend([Piece::Range(rs, re), text(&format!(" = __objRest({name}, [{}]);", keys.join(", ")))]);
+        declaration.extend(Self::joined(declarators));
+        declaration.push(text(";"));
         let (ps, pe) = self.span(pattern);
         self.edits.push(Edit { start: ps, end: pe, pieces: vec![text(&name)], shorthand: None, transparent: false });
         let (bs, be) = self.span(body);
@@ -733,6 +866,33 @@ impl Scanner<'_, '_> {
         } else {
             self.edits.push(Edit { start: bs, end: bs, pieces: [vec![text("{ ")], declaration, vec![text(" ")]].concat(), shorthand: None, transparent: false });
             self.edits.push(Edit { start: be, end: be, pieces: vec![text(" }")], shorthand: None, transparent: false });
+        }
+    }
+
+    /// `({ a, ...rest } = value)` as `(T = (value), ({ a } = T), rest = __objRest(T, ["a"]), T)`: the value of the assignment is the value.
+    fn lower_rest_assignment(&mut self, node: NodeId, target: NodeId, value: NodeId) {
+        let source = self.temp();
+        let Some(parts) = self.rest_declarators(target, &source, true) else { return };
+        let (vs, ve) = self.span(value);
+        let mut pieces = vec![text(&format!("({source} = (")), Piece::Range(vs, ve), text("), ")];
+        pieces.extend(Self::joined(parts));
+        pieces.push(text(&format!(", {source})")));
+        self.push(node, pieces);
+    }
+
+    /// `catch ({ a, ...rest }) { body }` as `catch (__rkarg0) { let { a } = __rkarg0, rest = __objRest(...); body }`.
+    fn lower_rest_catch(&mut self, param: NodeId, body: NodeId) {
+        let ast = self.ast;
+        let name = self.argument_name();
+        let Some(declarators) = self.rest_declarators(param, &name, false) else { return };
+        let (ps, pe) = self.span(param);
+        self.edits.push(Edit { start: ps, end: pe, pieces: vec![text(&name)], shorthand: None, transparent: false });
+        let (bs, _) = self.span(body);
+        if matches!(ast[body].kind, NodeKind::Block(_)) {
+            let mut declaration = vec![text(" let ")];
+            declaration.extend(Self::joined(declarators));
+            declaration.push(text(";"));
+            self.edits.push(Edit { start: bs + 1, end: bs + 1, pieces: declaration, shorthand: None, transparent: false });
         }
     }
 
@@ -750,19 +910,15 @@ impl Scanner<'_, '_> {
         let mut last_end = 0;
         for &param in ast.list(params) {
             let pattern = match ast[param].kind {
-                NodeKind::ObjectPattern(_) if self.has_object_rest(param) => param,
-                NodeKind::AssignPattern { target, .. } if self.has_object_rest(target) => target,
+                NodeKind::ObjectPattern(_) | NodeKind::ArrayPattern(_) if self.contains_object_rest(param) => param,
+                NodeKind::AssignPattern { target, .. } if self.contains_object_rest(target) => target,
                 _ => continue,
             };
-            let Some((plain, keys, rest)) = self.rest_parts(pattern) else { continue };
             let name = self.argument_name();
-            let (rs, re) = self.span(rest);
-            self.bundler.helpers.spread = true;
+            let Some(declarators) = self.rest_declarators(pattern, &name, false) else { continue };
             statements.push(text("var "));
-            if let Some((a, b)) = plain {
-                statements.extend([text("{ "), Piece::Range(a, b), text(&format!(" }} = {name}, "))]);
-            }
-            statements.extend([Piece::Range(rs, re), text(&format!(" = __objRest({name}, [{}]); ", keys.join(", ")))]);
+            statements.extend(Self::joined(declarators));
+            statements.push(text("; "));
             let (ps, pe) = self.span(pattern);
             self.edits.push(Edit { start: ps, end: pe, pieces: vec![text(&name)], shorthand: None, transparent: false });
             last_end = self.span(param).1;
@@ -854,7 +1010,12 @@ impl Scanner<'_, '_> {
         });
         let prefix = if wrap_super { vec![text("((__superGet, __superSet) => ")] } else { Vec::new() };
         let suffix = if wrap_super { ")((k) => super[k], (k, v) => super[k] = v)" } else { "" };
-        self.edits.push(Edit { start: async_at, end: async_at + 5 + after as u32, pieces: prefix, shorthand: None, transparent: false });
+        let expression_body = !matches!(ast[body].kind, NodeKind::Block(_));
+        // An expression body is wrapped by one edit that holds the body as a range: edits at the body's own first and last offsets would
+        // apply twice where a rewrite of the body (`??`, `?.`) reads it back through a range of its own.
+        if !expression_body {
+            self.edits.push(Edit { start: async_at, end: async_at + 5 + after as u32, pieces: prefix.clone(), shorthand: None, transparent: false });
+        }
         if let (true, Some(star)) = (generator, star) {
             self.edits.push(Edit { start: star, end: star + 1, pieces: Vec::new(), shorthand: None, transparent: false });
         }
@@ -883,8 +1044,16 @@ impl Scanner<'_, '_> {
             // Replacing the closing brace, rather than adding after it, keeps the edit inside a method that is moved elsewhere.
             self.edits.push(Edit { start: be - 1, end: be, pieces: vec![text(&format!("}} ); }}{suffix}"))], shorthand: None, transparent: false });
         } else {
-            self.edits.push(Edit { start: bs, end: bs, pieces: vec![text(&format!("{open}{{ {declare}return "))], shorthand: None, transparent: false });
-            self.edits.push(Edit { start: be, end: be, pieces: vec![text(&format!("; }}){suffix}"))], shorthand: None, transparent: false });
+            let function_end = ast[function].span.end;
+            let mut pieces = prefix;
+            pieces.extend([Piece::Range(async_at + 5 + after as u32, bs), text(&format!("{open}{{ {declare}return ")), Piece::Range(bs, be), text("; })")]);
+            if function_end > be {
+                pieces.push(Piece::Range(be, function_end));
+            }
+            if !suffix.is_empty() {
+                pieces.push(text(suffix));
+            }
+            self.edits.push(Edit { start: async_at, end: function_end.max(be), pieces, shorthand: None, transparent: false });
         }
     }
 
