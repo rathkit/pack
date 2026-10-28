@@ -46,6 +46,9 @@ First release.
 - JS API: `plugins` takes plugin objects (their hooks run in the calling process, across a local socket; `emitFile`, `parse`, `getModuleInfo` and the other context methods that answer at once work, and `configureServer` gets middlewares and `ws.send`) and `{ module }` descriptors.
 - `rkp serve --https` (with `--https-cert` and `--https-key`, or a self-signed certificate it makes and keeps): TLS (HTTP/2, or HTTP/1.1 for clients that ask for it) through a Node.js proxy in front of the dev server.
 - `rkp serve --hmr`: changed modules are replaced in the open page (`import.meta.hot.accept`, `dispose`, `data`, `decline`, `invalidate`), with the page reloading only when a change reaches an entry nothing accepts; top-level await and decorators work, and React Fast Refresh keeps the state of components (when `react-refresh` is installed).
+- Plugins: Vue (`@vitejs/plugin-vue`) and Svelte 5 (`@sveltejs/vite-plugin-svelte`) work, including under `--hmr`; hooks written as objects with a `handler`, `configEnvironment`, the `serve` command, and `lang.<ext>` queries (`?vue&type=style&lang.css`) are understood.
+- A normal bundle no longer breaks when a module declares a top-level name the helpers use (lodash-es declares `Symbol`).
+- Tested in headless Chromium only: the development server, `--hmr` and federation have not been tried in Firefox or Safari.
 - JSX: a space between two elements on one line (`<a/> <b/>`) is kept, as Babel and esbuild keep it.
 - `--dts-bundle`: one merged `.d.ts` for each entry instead of one for each source file.
 - `--dts` and `--dts-dir`: declaration files for the entries, written with the project's `typescript` (JS API `dts`, `dtsDir`).

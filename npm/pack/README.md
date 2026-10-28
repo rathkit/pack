@@ -50,8 +50,15 @@ await server.close();
 - The options are the command's flags: entries (files, or html pages), `outfile` / `outdir`, `format`, `minify`,
   `sourcemap`, `splitting`, `external`, `alias`, `define`, `loader`, `platform`, `jsx`, `tsconfig`, `config`,
   `federation` (a file, or the options as an object) and the rest. They are typed in `index.d.ts`.
-- Plugins are not options: they are listed in a config file (`rathkit.config.mjs`), which the program reads, or whose
-  path you give as `config`. The program runs them in a Node process of its own.
+- Plugins are options: `plugins` takes plugin objects (Rollup and Vite style hooks, with the context methods and a
+  `configureServer` subset), `{ module, export, options }` descriptors, or a config file (`config`), which the program
+  reads. Hooks run in your process; the program talks to them over a socket.
+- The development server: `hmr: true` swaps changed modules in a running page (React Fast Refresh when `react` and
+  `react-refresh` are installed; `reactRefresh: false` turns it off), and `https: true` serves HTTP/2 with a certificate
+  made for the machine.
+- Declarations: `dts: true` writes `.d.ts` files, `dtsDir` says where, and `dtsBundle: true` merges an entry's
+  declarations into one file.
+- `target` is a year (`es2020`, `esnext`) or engines (`chrome80,safari14,node18`); syntax an engine lacks is lowered.
 
 Node 24 or later is needed only when a config lists plugins.
 

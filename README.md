@@ -146,6 +146,7 @@ rkp bundle src/main.ts --outfile dist/app.mjs
       `file-loader` and `@svgr/webpack`, `vite-imagetools`, `vite-plugin-image-optimizer`, `unplugin-fonts` (its style sheet, and the tags it adds to a page in a build and in `serve`), and `vite-plugin-webfont-dl` (downloads from Google Fonts, so it
       is skipped when the network is down) (`tools/run-assets.mjs`), and `@module-federation/vite` and
       `@module-federation/enhanced` (`tools/run-federation.mjs`, in Chromium).
+      `@vitejs/plugin-vue` and `@sveltejs/vite-plugin-svelte`, edited under `--hmr` with no reload (`tools/run-hmr.mjs`, in Chromium).
     - Tried by hand, not repeated in CI: `@rollup/plugin-json`, `-image`, `-commonjs`, `-node-resolve`, `-babel`,
       `-typescript`; babel-loader; css-loader with style-loader; `copy-webpack-plugin`, `html-webpack-plugin`,
       `mini-css-extract-plugin`, `compression-webpack-plugin`, `webpack-manifest-plugin`,
@@ -153,7 +154,7 @@ rkp bundle src/main.ts --outfile dist/app.mjs
       `@parcel/compressor-gzip`.
     - Everything else a plugin might do is untested: a plugin not listed may work, and a bug report with
       the plugin's name is welcome.
-  - Not supported: Vite's module-level HMR (`handleHotUpdate` can stop or add reloads, not swap modules), webpack plugins that
+  - Vite's `handleHotUpdate` can stop or add reloads; modules are swapped in place by `--hmr` (see the development server). Not supported: webpack plugins that
     depend on webpack's own module and chunk graph internals beyond the above (for example `SplitChunksPlugin`
     settings are ignored), Parcel packagers and bundlers (the bundler's own are used).
 - `--watch` builds again when a file the build read changes (and plugins' `addWatchFile` files): plugins hear it
@@ -359,6 +360,8 @@ agrees with them:
 | Minifying in pieces | the same bundle minified in one pass (`tools/check-pieces.mjs`: byte for byte, every format, many cuts and few) | every fixture and every package in a real project; source maps for a 1.1 MB NestJS bundle byte for byte |
 | Source maps | the other end of every mapping (the token in the generated file is the token in the original, or the identifier the map says was renamed), and Node's own stack traces | 1.3 million mappings in the TypeScript compiler bundle, 20,000 error sites in generated TypeScript/JavaScript/CommonJS programs across 7 output modes, every fixture |
 | JSX, decorators, metadata | `tsc`'s own transform | 18 programs in both JSX modes; the standard-decorator ones also as `cjs`, `iife` and unshaken |
+
+The browser checks (development server, `--hmr`, Fast Refresh, Vue, Svelte, federation) run in headless Chromium only; Firefox and Safari have not been tried.
 
 ```
 cargo test                                    # unit tests and the Node comparisons

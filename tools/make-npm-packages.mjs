@@ -61,7 +61,7 @@ for (const p of platforms) {
   cpSync(binary, join(dir, 'bin', exe));
   if (p.os !== 'win32') chmodSync(join(dir, 'bin', exe), 0o755);
   cpSync(join(root, 'LICENSE'), join(dir, 'LICENSE'));
-  writeFileSync(join(dir, 'README.md'), `# ${name}\n\nThe rathkit-pack program for ${p.os} on ${p.cpu}${p.libc ? ` (${p.libc})` : ''}. Install \`@rathkit/pack\` instead of this package.\n`);
+  writeFileSync(join(dir, 'README.md'), `# ${name}\n\nThe rathkit-pack program for ${p.os} on ${p.cpu}${p.libc ? ` (${p.libc})` : ''}. Install \`@rathkit/pack\` instead of this package. Alpha: https://github.com/rathkit/pack#readme\n`);
   const manifest = {
     name,
     version,
