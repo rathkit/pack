@@ -211,28 +211,369 @@ function compilerOptions(ts, tsConfigPath) {
   return options;
 }
 
+// ---- one declaration file for an entry (--dts-bundle) -----------------------------------------------------
+
+// The declarations of an entry and of everything it reaches by relative imports, in one file: names that two files share are told apart, the
+// imports and exports between the files are gone, what comes from a package stays an import, and the entry's exports are listed at the end.
+function bundleDeclarations(ts, entryFile) {
+  const options = { noEmit: true, noLib: true, skipLibCheck: true, types: [], module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ESNext, moduleResolution: ts.ModuleResolutionKind.Bundler, allowJs: false };
+  const program = ts.createProgram([entryFile], options);
+  const checker = program.getTypeChecker();
+  const entry = program.getSourceFile(entryFile);
+  if (!entry) throw new Error('cannot read ' + entryFile);
+  const root = path.dirname(entryFile);
+
+  // ---- the modules of the bundle: the entry and what it reaches by relative imports and exports
+  const isRelative = (spec) => spec.startsWith('.') || spec.startsWith('/');
+  const internal = (file) => !file.isDeclarationFile ? false : file.fileName.startsWith(root + path.sep) || file.fileName === entryFile;
+  const resolveInternal = (from, spec) => {
+    if (!isRelative(spec)) return null;
+    if (/\.d\.[mc]?ts$/.test(spec)) return program.getSourceFile(path.resolve(path.dirname(from.fileName), spec)) ?? null;
+    const base = path.resolve(path.dirname(from.fileName), spec).replace(/\.(m|c)?js$/, '');
+    for (const candidate of [base + '.d.ts', base + '.d.mts', base + '.d.cts', path.join(base, 'index.d.ts')]) {
+      const found = program.getSourceFile(candidate);
+      if (found) return found;
+    }
+    return null;
+  };
+  const order = [];
+  const seen = new Set();
+  const edges = new Map();
+  const visit = (file) => {
+    if (seen.has(file.fileName)) return;
+    seen.add(file.fileName);
+    const targets = [];
+    for (const statement of file.statements) {
+      const spec = (ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement)) && statement.moduleSpecifier && ts.isStringLiteral(statement.moduleSpecifier) ? statement.moduleSpecifier.text : null;
+      if (spec === null) continue;
+      const target = resolveInternal(file, spec);
+      if (target) {
+        targets.push(target);
+        visit(target);
+      }
+    }
+    // `import("./x").T` in a type also reaches a module.
+    const walk = (node) => {
+      if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument) && ts.isStringLiteral(node.argument.literal)) {
+        const target = resolveInternal(file, node.argument.literal.text);
+        if (target) {
+          targets.push(target);
+          visit(target);
+        }
+      }
+      ts.forEachChild(node, walk);
+    };
+    walk(file);
+    edges.set(file.fileName, targets);
+    order.push(file);
+  };
+  visit(entry);
+  const modules = order;
+  const moduleOf = new Map(modules.map((m) => [m.fileName, m]));
+
+  // ---- names: what is declared at the top of each module, and the external imports
+  const topLevelSymbols = new Map(); // ts.Symbol -> { file, name }
+  const used = new Set();
+  const finalName = new Map(); // ts.Symbol -> final name
+  const uniqueName = (name) => {
+    let candidate = name;
+    for (let n = 1; used.has(candidate); n++) candidate = `${name}$${n}`;
+    used.add(candidate);
+    return candidate;
+  };
+  const declName = (statement) => {
+    if ((ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement) || ts.isInterfaceDeclaration(statement) || ts.isTypeAliasDeclaration(statement) || ts.isEnumDeclaration(statement) || ts.isModuleDeclaration(statement)) && statement.name && ts.isIdentifier(statement.name)) return [statement.name];
+    if (ts.isVariableStatement(statement)) return statement.declarationList.declarations.map((d) => d.name).filter(ts.isIdentifier);
+    return [];
+  };
+  // Names the bundle's own declarations keep when they can; the first module in order gets them first.
+  for (const file of modules) {
+    for (const statement of file.statements) {
+      for (const name of declName(statement)) {
+        const symbol = checker.getSymbolAtLocation(name);
+        if (!symbol || topLevelSymbols.has(symbol)) continue;
+        topLevelSymbols.set(symbol, { file, name: name.text });
+        finalName.set(symbol, uniqueName(name.text));
+      }
+    }
+  }
+  // External imports: one local name for each thing imported from a package.
+  const externals = new Map(); // key -> { spec, kind, imported, local }
+  const externalKey = (spec, kind, imported) => `${spec}\u0000${kind}\u0000${imported}`;
+  const externalFor = (spec, kind, imported, preferred) => {
+    const key = externalKey(spec, kind, imported);
+    let found = externals.get(key);
+    if (!found) {
+      found = { spec, kind, imported, local: uniqueName(preferred) };
+      externals.set(key, found);
+    }
+    return found;
+  };
+  const importBinding = (declaration) => {
+    // The specifier, kind and imported name of an import binding declaration.
+    if (ts.isImportSpecifier(declaration)) {
+      const clause = declaration.parent.parent;
+      const spec = clause.parent.moduleSpecifier.text;
+      return { spec, kind: 'named', imported: (declaration.propertyName ?? declaration.name).text, local: declaration.name.text };
+    }
+    if (ts.isImportClause(declaration)) return { spec: declaration.parent.moduleSpecifier.text, kind: 'default', imported: 'default', local: declaration.name.text };
+    if (ts.isNamespaceImport(declaration)) return { spec: declaration.parent.parent.moduleSpecifier.text, kind: 'namespace', imported: '*', local: declaration.name.text };
+    return null;
+  };
+
+  // ---- namespaces standing for modules that are imported or re-exported as a whole
+  const namespaces = new Map(); // file name -> name
+  const namespaceBlocks = [];
+  const exportsOf = (file) => {
+    const moduleSymbol = checker.getSymbolAtLocation(file);
+    return moduleSymbol ? checker.getExportsOfModule(moduleSymbol) : [];
+  };
+  const resolveAlias = (symbol) => {
+    let current = symbol;
+    for (let i = 0; i < 20 && current.flags & ts.SymbolFlags.Alias; i++) {
+      const next = checker.getAliasedSymbol(current);
+      if (!next || next === current || next.name === 'unknown') return { external: current };
+      current = next;
+    }
+    return { symbol: current };
+  };
+  const namespaceFor = (file, preferred) => {
+    let name = namespaces.get(file.fileName);
+    if (name) return name;
+    name = uniqueName(preferred);
+    namespaces.set(file.fileName, name);
+    const members = [];
+    for (const exported of exportsOf(file)) {
+      const text = publicBinding(exported, `${name}_${exported.name}`);
+      if (text) members.push(text === exported.name ? text : `${text} as ${exported.name}`);
+    }
+    namespaceBlocks.push(`declare namespace ${name} {\n    export { ${members.join(', ')} };\n}`);
+    return name;
+  };
+  // The name an export has in the bundle, or null when it cannot be named (a type-only thing from nowhere).
+  function publicBinding(exported, preferredNamespace) {
+    const resolved = resolveAlias(exported);
+    if (resolved.external) {
+      const declaration = resolved.external.declarations?.[0];
+      const binding = declaration && importBinding(declaration);
+      if (binding) return externalFor(binding.spec, binding.kind, binding.imported, binding.local).local;
+      return null;
+    }
+    const target = resolved.symbol;
+    if (finalName.has(target)) return finalName.get(target);
+    if (target.flags & ts.SymbolFlags.ValueModule && target.declarations?.some(ts.isSourceFile)) {
+      const file = target.declarations.find(ts.isSourceFile);
+      if (moduleOf.has(file.fileName)) return namespaceFor(file, preferredNamespace);
+    }
+    return null;
+  }
+
+  // ---- the text of each module, with names changed and module statements gone
+  const finalFor = (identifier) => {
+    const symbol = checker.getSymbolAtLocation(identifier);
+    if (!symbol) return null;
+    if (symbol.flags & ts.SymbolFlags.Alias) {
+      const declaration = symbol.declarations?.[0];
+      const binding = declaration && importBinding(declaration);
+      if (binding && !isRelative(binding.spec)) return externalFor(binding.spec, binding.kind, binding.imported, binding.local).local;
+      if (binding && declaration) {
+        if (ts.isNamespaceImport(declaration)) {
+          const file = resolveInternal(declaration.getSourceFile(), binding.spec);
+          return file ? namespaceFor(file, binding.local) : null;
+        }
+        const resolved = resolveAlias(symbol);
+        if (resolved.symbol && finalName.has(resolved.symbol)) return finalName.get(resolved.symbol);
+        if (resolved.external) return publicBinding(symbol, binding.local);
+      }
+      return null;
+    }
+    return finalName.get(symbol) ?? null;
+  };
+  const header = [];
+  const bodies = [];
+  const emitted = new Set();
+  for (const file of modules) {
+    const text = file.text;
+    const edits = [];
+    const removed = [];
+    // A reference to another file of the library is a reference to what is in this file now.
+    for (const reference of file.referencedFiles) if (!resolveInternal(file, reference.fileName.startsWith('.') ? reference.fileName : './' + reference.fileName)) header.push(`/// <reference path="${reference.fileName}" />`);
+    for (const reference of file.typeReferenceDirectives) header.push(`/// <reference types="${reference.fileName}" />`);
+    for (const statement of file.statements) {
+      if (ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement) || ts.isExportAssignment(statement) || ts.isImportEqualsDeclaration(statement)) {
+        if (ts.isExportAssignment(statement) && statement.isExportEquals) throw new Error(`export = is not supported in ${file.fileName}`);
+        removed.push([statement.getFullStart(), statement.getEnd()]);
+        continue;
+      }
+      // `export` / `export default` in front of a declaration
+      const modifiers = ts.canHaveModifiers(statement) ? ts.getModifiers(statement) ?? [] : [];
+      for (const modifier of modifiers) {
+        if (modifier.kind === ts.SyntaxKind.ExportKeyword || modifier.kind === ts.SyntaxKind.DefaultKeyword) edits.push([modifier.getStart(), modifier.getEnd() + 1, '']);
+      }
+      // `export default function f()` has no `declare`, which the same thing needs once it is not exported.
+      const needsDeclare = (ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement) || ts.isEnumDeclaration(statement) || ts.isVariableStatement(statement) || (ts.isModuleDeclaration(statement) && !(statement.flags & ts.NodeFlags.GlobalAugmentation))) && modifiers.some((m) => m.kind === ts.SyntaxKind.ExportKeyword) && !modifiers.some((m) => m.kind === ts.SyntaxKind.DeclareKeyword);
+      if (needsDeclare) {
+        const firstModifier = modifiers[0];
+        edits.push([firstModifier.getStart(), firstModifier.getStart(), 'declare ']);
+      }
+    }
+    const walk = (node) => {
+      if (removed.some(([a, b]) => node.getStart() >= a && node.getEnd() <= b)) return;
+      if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument) && ts.isStringLiteral(node.argument.literal)) {
+        const spec = node.argument.literal.text;
+        const targetFile = resolveInternal(file, spec);
+        if (targetFile && node.qualifier) {
+          // `import("./x").T<A>` is the name T has in the bundle (A is rewritten on its own).
+          const left = ts.isIdentifier(node.qualifier) ? node.qualifier : leftmost(node.qualifier);
+          const exported = exportsOf(targetFile).find((e) => e.name === left.text);
+          const name = exported && publicBinding(exported, left.text);
+          if (name) {
+            const tail = node.typeArguments ? node.typeArguments.pos - 1 : node.getEnd();
+            const qualifierEnd = node.qualifier.getEnd();
+            const rest = text.slice(left.getEnd(), qualifierEnd);
+            edits.push([node.getStart(), Math.min(tail, qualifierEnd), name + rest]);
+            if (node.typeArguments) node.typeArguments.forEach(walk);
+            return;
+          }
+        } else if (!targetFile && !isRelative(spec)) {
+          // an external `import("pkg").T` stays as it is
+        } else if (targetFile) throw new Error(`typeof import("${spec}") is not supported in ${file.fileName}`);
+        return;
+      }
+      if (ts.isIdentifier(node)) {
+        const parent = node.parent;
+        const isMemberName = (ts.isQualifiedName(parent) && parent.right === node) || (ts.isPropertyAccessExpression(parent) && parent.name === node);
+        if (!isMemberName && !(ts.isPropertySignature(parent) && parent.name === node) && !(ts.isMethodSignature(parent) && parent.name === node) && !(ts.isPropertyDeclaration(parent) && parent.name === node) && !(ts.isMethodDeclaration(parent) && parent.name === node) && !(ts.isParameter(parent) && parent.name === node) && !(ts.isEnumMember(parent) && parent.name === node)) {
+          const renamed = finalFor(node);
+          if (renamed && renamed !== node.text) edits.push([node.getStart(), node.getEnd(), renamed]);
+        }
+        return;
+      }
+      ts.forEachChild(node, walk);
+    };
+    const leftmost = (qualified) => (ts.isQualifiedName(qualified) ? leftmost(qualified.left) : qualified);
+    for (const statement of file.statements) {
+      if (removed.some(([a]) => a === statement.getFullStart())) continue;
+      walk(statement);
+    }
+    // Apply: remove the module statements and make the edits, from the end.
+    const all = [...edits, ...removed.map(([a, b]) => [a, b, ''])].sort((x, y) => y[0] - x[0]);
+    let out = text;
+    for (const [a, b, replacement] of all) out = out.slice(0, a) + replacement + out.slice(b);
+    bodies.push(out.replace(/^\s*\/\/\/ <reference [^\n]*\n/gm, '').trim());
+  }
+
+  // ---- what the entry exports
+  const exportList = [];
+  const externalExports = [];
+  for (const exported of exportsOf(entry)) {
+    const resolved = resolveAlias(exported);
+    if (resolved.external) {
+      // A re-export from a package: kept as it was.
+      const declaration = resolved.external.declarations?.[0];
+      if (declaration && ts.isExportSpecifier(declaration)) {
+        const decl = declaration.parent.parent;
+        const spec = decl.moduleSpecifier.text;
+        externalExports.push(`export { ${declaration.propertyName ? `${declaration.propertyName.text} as ` : ''}${exported.name} } from '${spec}';`);
+        continue;
+      }
+      const binding = declaration && importBinding(declaration);
+      if (binding) {
+        const local = externalFor(binding.spec, binding.kind, binding.imported, binding.local).local;
+        exportList.push(local === exported.name ? local : `${local} as ${exported.name}`);
+      }
+      continue;
+    }
+    const name = publicBinding(exported, exported.name);
+    if (name) exportList.push(name === exported.name ? name : `${name} as ${exported.name}`);
+  }
+  // `export * from "pkg"` anywhere in the chain of star exports
+  for (const file of modules) {
+    for (const statement of file.statements) {
+      if (ts.isExportDeclaration(statement) && !statement.exportClause && statement.moduleSpecifier && ts.isStringLiteral(statement.moduleSpecifier) && !isRelative(statement.moduleSpecifier.text)) {
+        externalExports.push(`export * from '${statement.moduleSpecifier.text}';`);
+      }
+    }
+  }
+
+  // ---- put it together
+  const imports = [];
+  const bySpec = new Map();
+  for (const e of externals.values()) {
+    if (!bySpec.has(e.spec)) bySpec.set(e.spec, []);
+    bySpec.get(e.spec).push(e);
+  }
+  for (const [spec, list] of bySpec) {
+    const named = list.filter((e) => e.kind === 'named').map((e) => (e.imported === e.local ? e.local : `${e.imported} as ${e.local}`));
+    const def = list.find((e) => e.kind === 'default');
+    const ns = list.find((e) => e.kind === 'namespace');
+    if (ns) imports.push(`import * as ${ns.local} from '${spec}';`);
+    if (def || named.length) imports.push(`import ${[def ? def.local : null, named.length ? `{ ${named.join(', ')} }` : null].filter(Boolean).join(', ')} from '${spec}';`);
+  }
+  const unique = (list) => [...new Set(list)];
+  const parts = [...unique(header), ...imports, ...bodies, ...namespaceBlocks, `export { ${unique(exportList).join(', ')} };`, ...unique(externalExports)];
+  return parts.filter(Boolean).join('\n\n') + '\n';
+}
+
 // ---- writing declarations for entry points (--dts) --------------------------------------------------
 
 // One declaration file for each source file the entries reach, as `tsc --declaration --emitDeclarationOnly` writes them, laid out
 // from the folder the sources have in common. Files in node_modules are not described.
-function emit({ entries, outDir, tsConfigPath }) {
+function emit({ entries, outDir, tsConfigPath, bundle = false }) {
   const ts = loadTypeScript();
   if (!ts) return { error: 'the typescript package is not installed (--dts writes declarations with it; install it in the project)' };
   const options = compilerOptions(ts, tsConfigPath);
   const out = path.resolve(cwd, outDir);
-  const program = ts.createProgram(entries, { ...options, declaration: true, emitDeclarationOnly: true, noEmit: false, outDir: out, declarationDir: undefined, declarationMap: false, sourceMap: false, composite: false, incremental: false, noEmitOnError: false, skipLibCheck: true, allowJs: true });
-  const written = [];
+  // To bundle, the declarations of every file are written to a folder of ours first, and one file for each entry goes to `out`.
+  const target = bundle ? fs.mkdtempSync(path.join(os.tmpdir(), 'rathkit-dts-bundle-')) : out;
+  const program = ts.createProgram(entries, { ...options, declaration: true, emitDeclarationOnly: true, noEmit: false, outDir: target, declarationDir: undefined, declarationMap: false, sourceMap: false, composite: false, incremental: false, noEmitOnError: false, skipLibCheck: true, allowJs: true });
+  let written = [];
   const result = program.emit(undefined, (file, text) => {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, text);
-    written.push(path.relative(out, file).split(path.sep).join('/'));
+    written.push(path.relative(target, file).split(path.sep).join('/'));
   });
   const errors = ts.getPreEmitDiagnostics(program).filter((d) => d.category === ts.DiagnosticCategory.Error);
   for (const d of errors.slice(0, 20)) {
     const where = d.file ? `${path.relative(cwd, d.file.fileName)}:${d.file.getLineAndCharacterOfPosition(d.start).line + 1}: ` : '';
     note(`${where}${ts.flattenDiagnosticMessageText(d.messageText, '\n').split('\n')[0]}`);
   }
-  if (result.emitSkipped && !written.length) return { error: 'no declarations were written' };
+  if (result.emitSkipped && !written.length) {
+    if (bundle) fs.rmSync(target, { recursive: true, force: true });
+    return { error: 'no declarations were written' };
+  }
+  if (bundle) {
+    try {
+      // Where the files were put follows the folder the sources have in common.
+      const sources = program.getSourceFiles().filter((f) => !f.isDeclarationFile && !program.isSourceFileFromExternalLibrary(f)).map((f) => path.dirname(f.fileName));
+      const common = sources.reduce((a, b) => {
+        let dir = a;
+        while (!(b + path.sep).startsWith(dir + path.sep) && dir !== path.dirname(dir)) dir = path.dirname(dir);
+        return dir;
+      }, sources[0] ?? cwd);
+      const names = new Set();
+      const bundled = [];
+      fs.mkdirSync(out, { recursive: true });
+      for (const entry of entries) {
+        const base = path.join(target, path.relative(common, entry).replace(/\.(tsx?|jsx?|mjs|cjs|mts|cts)$/, ''));
+        const emitted = ['.d.ts', '.d.mts', '.d.cts'].map((e) => base + e).find((f) => fs.existsSync(f));
+        const name = path.basename(emitted ?? base + '.d.ts');
+        if (!emitted) {
+          note(`no declarations were written for ${path.relative(cwd, entry)}`);
+          continue;
+        }
+        if (names.has(name)) return { error: `two entries would both be written as ${name}; give them different names` };
+        names.add(name);
+        fs.writeFileSync(path.join(out, name), bundleDeclarations(ts, emitted));
+        bundled.push(name);
+      }
+      written = bundled;
+    } catch (error) {
+      return { error: `the declarations could not be bundled: ${error.message}` };
+    } finally {
+      fs.rmSync(target, { recursive: true, force: true });
+    }
+  }
   written.sort();
   return { written, errors: errors.length };
 }

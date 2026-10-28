@@ -1,7 +1,8 @@
 //! `--dts`: declaration files for the entry points, written by the project's own `typescript` package (run through Node).
 //!
-//! The files are what `tsc --declaration --emitDeclarationOnly` writes: one for each source file the entries reach, not merged into
-//! one, laid out from the folder the sources share. Point `types` in package.json at the one beside the entry's output.
+//! The files are what `tsc --declaration --emitDeclarationOnly` writes: one for each source file the entries reach, laid out from the
+//! folder the sources share; with `bundle`, one file for each entry instead, with everything it reaches merged in. Point `types` in
+//! package.json at the one beside the entry's output.
 
 use std::path::{Path, PathBuf};
 
@@ -16,10 +17,10 @@ pub struct Emitted {
 }
 
 /// Writes declarations for `entries` into `out_dir`. `ts_config` is a `tsconfig.json` to use instead of the nearest one.
-pub fn emit(entries: &[PathBuf], out_dir: &Path, ts_config: Option<&str>, cwd: &Path) -> Result<Emitted, String> {
+pub fn emit(entries: &[PathBuf], out_dir: &Path, ts_config: Option<&str>, bundle: bool, cwd: &Path) -> Result<Emitted, String> {
     let list = entries.iter().map(|e| quote(&e.to_string_lossy())).collect::<Vec<_>>().join(",");
     let input = format!(
-        "{{\"command\":\"emit\",\"cwd\":{},\"entries\":[{list}],\"outDir\":{},\"tsConfigPath\":{}}}",
+        "{{\"command\":\"emit\",\"cwd\":{},\"entries\":[{list}],\"outDir\":{},\"tsConfigPath\":{},\"bundle\":{bundle}}}",
         quote(&cwd.to_string_lossy()),
         quote(&out_dir.to_string_lossy()),
         ts_config.map_or("null".to_string(), quote),

@@ -555,6 +555,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     let mut metafile: Option<String> = None;
     let mut dts = false;
     let mut dts_dir: Option<String> = None;
+    let mut dts_bundle = false;
     let mut inject_files: Vec<String> = Vec::new();
     let mut tsconfig_raw: Option<String> = None;
     let mut bundle_options = rathkit_pack::bundle::Options::default();
@@ -742,6 +743,10 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
             }
             // --dts [--dts-dir=DIR]: declaration files for the entries, written with the project's TypeScript.
             "--dts" => dts = true,
+            "--dts-bundle" => {
+                dts = true;
+                dts_bundle = true;
+            }
             arg if arg == "--dts-dir" || arg.starts_with("--dts-dir=") => {
                 dts = true;
                 dts_dir = if arg == "--dts-dir" { it.next().cloned() } else { Some(arg["--dts-dir=".len()..].to_string()) };
@@ -1102,7 +1107,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     // Workers are scripts built on their own; the files they read and the files they copy are noted for the build that asked.
     let workers = std::sync::Arc::new(WorkerLog::default());
     options.worker_builder = Some(worker_builder(cwd.clone(), options.clone(), bundle_options.clone(), treeshake, workers.clone(), 0));
-    let job = std::sync::Arc::new(Job { cwd, entries, options, bundle_options, treeshake, outfile, outdir, host: plugin_host, config_file, watch, serve: serve_state, bind: (host_name, port), restart_files, workers, pages, metafile, dts: dts.then(|| (dts_dir, tsconfig_path.clone())), https: https.then(|| (https_cert, https_key)) });
+    let job = std::sync::Arc::new(Job { cwd, entries, options, bundle_options, treeshake, outfile, outdir, host: plugin_host, config_file, watch, serve: serve_state, bind: (host_name, port), restart_files, workers, pages, metafile, dts: dts.then(|| (dts_dir, tsconfig_path.clone(), dts_bundle)), https: https.then(|| (https_cert, https_key)) });
     if let Some(host) = &job.host {
         // Child compilers of webpack plugins build one entry as a script that sets a global.
         let for_children = job.clone();
@@ -1142,7 +1147,7 @@ struct Job {
     /// Where to write what went into the build and what came out, as JSON.
     metafile: Option<String>,
     /// `--dts`: with the folder to write the declarations to, or none for the output folder.
-    dts: Option<(Option<String>, Option<String>)>,
+    dts: Option<(Option<String>, Option<String>, bool)>,
     /// `--https`: the certificate and key files, or none for a self-signed certificate.
     https: Option<(Option<String>, Option<String>)>,
 }
@@ -1664,14 +1669,14 @@ fn run_build(job: &Job) -> Outcome {
         }
     };
     if status == ExitCode::SUCCESS {
-        if let Some((folder, ts_config)) = &job.dts {
+        if let Some((folder, ts_config, bundle)) = &job.dts {
             let base = match (outdir, outfile) {
                 (Some(dir), _) => std::path::PathBuf::from(dir),
                 (None, Some(file)) => std::path::Path::new(file).parent().map(|p| p.to_path_buf()).unwrap_or_default(),
                 _ => cwd.to_path_buf(),
             };
             let target = folder.as_deref().map_or(base, std::path::PathBuf::from);
-            match rathkit_pack::dts::emit(&job.entries.iter().map(|e| cwd.join(e)).collect::<Vec<_>>(), &target, ts_config.as_deref(), cwd) {
+            match rathkit_pack::dts::emit(&job.entries.iter().map(|e| cwd.join(e)).collect::<Vec<_>>(), &target, ts_config.as_deref(), *bundle, cwd) {
                 Ok(done) => {
                     for message in &done.messages {
                         eprintln!("types: {message}");

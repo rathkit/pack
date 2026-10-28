@@ -60,6 +60,8 @@ export interface Options {
   dts?: boolean;
   /** The folder for the declaration files, when not the output folder (implies `dts`). */
   dtsDir?: string;
+  /** With `dts`: one `.d.ts` for each entry (named after it) instead of one for each source file: everything the entry reaches by relative imports is merged in, names two files share are told apart, and what comes from a package stays an import. */
+  dtsBundle?: boolean;
   /** Write what went into the build and what came out, as JSON in the shape of esbuild's metafile, to this file (the result has it too). */
   metafile?: string;
   /** Specifiers left out of the output: exact names, or a prefix ending in `/*`. */

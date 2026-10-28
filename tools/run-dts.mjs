@@ -2,7 +2,7 @@
 // bench folder: pnpm install --dir bench).
 //   node tools/run-dts.mjs
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, realpathSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, realpathSync, cpSync, readdirSync, copyFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -62,6 +62,44 @@ write(bare, 'src/index.ts', 'export const x: number = 1;\n');
 r = run(bare, ['bundle', 'src/index.ts', '--outdir', 'dist', '--dts']);
 check(r.status !== 0 && /typescript package is not installed/.test(r.stderr), 'a missing typescript is an error', r.stderr);
 check(existsSync(join(bare, 'dist', 'bundle.js')), 'the bundle itself is still written');
+
+
+// --dts-bundle: one declaration file for the entry, with everything it reaches merged in.
+{
+  const lib = join(tmp, 'lib');
+  cpSync(join(root, 'tests', 'dts-bundle', 'lib'), lib, { recursive: true });
+  symlinkSync(realpathSync(typescript), join(lib, 'node_modules', 'typescript'), 'dir');
+  const built = run(lib, ['bundle', 'src/index.ts', '--outdir', 'dist', '--dts-bundle', '--external', 'ext-pkg']);
+  check(built.status === 0, 'a build with --dts-bundle', built.stderr + built.stdout);
+  const files = existsSync(join(lib, 'dist')) ? readdirSync(join(lib, 'dist')).filter((f) => f.endsWith('.d.ts')).sort() : [];
+  check(files.join() === 'index.d.ts', 'one declaration file for the entry', files.join());
+  const merged = existsSync(join(lib, 'dist', 'index.d.ts')) ? readFileSync(join(lib, 'dist', 'index.d.ts'), 'utf8') : '';
+  check(!/from '\.\.?\//.test(merged) && !/import\("\.\.?\//.test(merged), 'with no import of another file of the library', merged.slice(0, 300));
+  check(/^import .* from 'ext-pkg';/m.test(merged) && /export \{ makeExt \} from 'ext-pkg';/.test(merged), 'and what comes from a package stays an import and a re-export');
+  check((merged.match(/\binterface Item\b|\binterface Item\$\d\b/g) ?? []).length === 3, 'the three things named Item are told apart', (merged.match(/interface Item\S*/g) ?? []).join());
+  check(/export \{[^}]*\bdescribe\b[^}]*\};/.test(merged), 'and the exports are listed');
+  mkdirSync(join(lib, 'consumer'), { recursive: true });
+  copyFileSync(join(root, 'tests', 'dts-bundle', 'consumer.ts'), join(lib, 'consumer', 'main.ts'));
+  const compile = spawnSync('node', [join(typescript, 'bin', 'tsc'), '--noEmit', '--strict', '--module', 'esnext', '--moduleResolution', 'bundler', '--target', 'es2020', 'consumer/main.ts'], { cwd: lib, encoding: 'utf8' });
+  check(compile.status === 0, 'a strict consumer type-checks against it, and its wrong uses are errors', compile.stdout);
+}
+
+
+// And a library with the awkward corners: default exports, a default re-export, `declare global`, a module augmentation, a const enum.
+{
+  const lib = join(tmp, 'edge');
+  cpSync(join(root, 'tests', 'dts-bundle', 'edge'), lib, { recursive: true });
+  symlinkSync(realpathSync(typescript), join(lib, 'node_modules', 'typescript'), 'dir');
+  const built = run(lib, ['bundle', 'src/index.ts', '--outdir', 'dist', '--dts-bundle', '--external', 'ext-pkg']);
+  check(built.status === 0, 'a build with --dts-bundle of a library with augmentations', built.stderr + built.stdout);
+  const merged = existsSync(join(lib, 'dist', 'index.d.ts')) ? readFileSync(join(lib, 'dist', 'index.d.ts'), 'utf8') : '';
+  check(/declare global \{/.test(merged) && /declare module 'ext-pkg' \{/.test(merged), 'declare global and a module augmentation are kept', merged.slice(0, 200));
+  check(/export \{[^}]*\bThing as default\b[^}]*\}|export default Thing/.test(merged), 'and so is the default export');
+  mkdirSync(join(lib, 'consumer'), { recursive: true });
+  copyFileSync(join(lib, 'consumer.ts'), join(lib, 'consumer', 'main.ts'));
+  const compile = spawnSync('node', [join(typescript, 'bin', 'tsc'), '--noEmit', '--strict', '--module', 'esnext', '--moduleResolution', 'bundler', '--target', 'es2020', 'consumer/main.ts'], { cwd: lib, encoding: 'utf8' });
+  check(compile.status === 0, 'a strict consumer type-checks against it', compile.stdout);
+}
 
 rmSync(tmp, { recursive: true, force: true });
 if (failed) {

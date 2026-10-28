@@ -89,7 +89,11 @@ rkp bundle src/main.ts --outfile dist/app.mjs
 - `--dts` (and `--dts-dir=DIR`, for a folder other than the output's): declaration files for the entries, written with the project's own
   `typescript` package (run by Node; it is an error if it is not installed). They are what `tsc --declaration --emitDeclarationOnly`
   writes: one `.d.ts` for each source file the entries reach, laid out from the folder the sources share (so `src/index.ts` becomes
-  `dist/index.d.ts` beside `dist/index.js`), not merged into one file. A JavaScript entry gets its JSDoc types. Type errors are listed and do
+  `dist/index.d.ts` beside `dist/index.js`). With `--dts-bundle` (`dtsBundle: true`) each entry gets one file instead, named after it, with
+  everything it reaches by relative imports merged in: two files' declarations with the same name are told apart (`Item`, `Item$1`), the
+  imports and exports between the files are gone, what comes from a package stays an import or re-export, `declare global` and module
+  augmentations are kept, a default export stays one, and the entry's exports are listed at the end. (Checked against a library with
+  those cases and against the declarations of six packages, `rxjs` and `@rspack/core` among them, by compiling consumers.) A JavaScript entry gets its JSDoc types. Type errors are listed and do
   not stop the files being written. In the JS API: `dts: true`, `dtsDir`. Checked by type-checking a consumer against the result
   (`tools/run-dts.mjs`).
 - Vite's import forms: `./a.wasm?init` (a function that instantiates the module and resolves to the instance, reading the copied file with

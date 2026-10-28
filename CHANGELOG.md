@@ -47,6 +47,7 @@ First release.
 - `rkp serve --https` (with `--https-cert` and `--https-key`, or a self-signed certificate it makes and keeps): TLS (HTTP/2, or HTTP/1.1 for clients that ask for it) through a Node.js proxy in front of the dev server.
 - `rkp serve --hmr`: changed modules are replaced in the open page (`import.meta.hot.accept`, `dispose`, `data`, `decline`, `invalidate`), with the page reloading only when a change reaches an entry nothing accepts; top-level await and decorators work, and React Fast Refresh keeps the state of components (when `react-refresh` is installed).
 - JSX: a space between two elements on one line (`<a/> <b/>`) is kept, as Babel and esbuild keep it.
+- `--dts-bundle`: one merged `.d.ts` for each entry instead of one for each source file.
 - `--dts` and `--dts-dir`: declaration files for the entries, written with the project's `typescript` (JS API `dts`, `dtsDir`).
 - `--target=es2015` to `es2025`: `**`, `?.`, `??`, logical assignment, numeric separators, optional `catch` and trailing commas
   and object spread and rest (in declarations, parameters and `for of`), class fields, private members and static blocks are
