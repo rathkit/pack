@@ -500,7 +500,8 @@ impl Context<'_> {
             Some(WorkerQuery::Bundled) => Some(Loader::File),
             Some(WorkerQuery::Wrapper { .. }) => None,
             None if wasm_init => None,
-            None => query_loader(&query).or_else(|| self.loader_for(path)).or(forced_asset.then_some(Loader::File)),
+            // `?vue&type=style&lang.css`: the language of a part of a file is in the query, as Vite reads it.
+            None => query_loader(&query).or_else(|| lang_extension(&query).and_then(|ext| self.loader_for(Path::new(&format!("part.{ext}"))))).or_else(|| self.loader_for(path)).or(forced_asset.then_some(Loader::File)),
         };
         let mut by_plugin = plugin_text.is_some() || plugin_bytes.is_some();
         if let Some(host) = host.filter(|h| h.has("transform")) {
@@ -1066,6 +1067,11 @@ fn worker_query(query: &str) -> Option<WorkerQuery> {
 }
 
 /// What a query asks for by itself (as in Vite): `?raw` is the text, `?url` the address of a copied file, `?inline` a data URL.
+/// `lang.css` or `lang.ts` in a query: the extension of the language the part is written in.
+fn lang_extension(query: &str) -> Option<&str> {
+    query.split('&').find_map(|part| part.strip_prefix("lang.")).filter(|ext| !ext.is_empty() && ext.chars().all(|c| c.is_ascii_alphanumeric()))
+}
+
 fn query_loader(query: &str) -> Option<Loader> {
     query.split('&').find_map(|part| match part.split_once('=').map_or(part, |(k, _)| k) {
         "raw" => Some(Loader::Text),

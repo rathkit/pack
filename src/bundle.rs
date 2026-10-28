@@ -2751,6 +2751,8 @@ const RESERVED: &[&str] = &[
     "arguments", "eval", "undefined", "NaN", "Infinity", "require", "module", "exports", "__cjs", "__toDefault", "__toNs", "__ns", "__createRequire",
     "__filename", "__dirname", "__fileURLToPath", "__pathDirname", "__esm", "__req", "__decorate", "__param", "__metadata",
     "__esDecorate", "__runInitializers", "__setFunctionName", "__propKey",
+    // Globals that the helpers written into a bundle use: a top-level name of a module (lodash has `var Symbol = root.Symbol`) must not hide them.
+    "Object", "Reflect", "Symbol", "Promise", "WeakMap", "WeakSet", "Map", "Set", "TypeError", "Error", "Math", "Array", "JSON", "Proxy", "String", "Number", "Function", "Date", "RegExp",
 ];
 
 impl Bundler<'_> {

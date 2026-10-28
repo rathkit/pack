@@ -51,6 +51,7 @@ let root = process.cwd();
 let cli = {};
 let plugins = [];
 let configOptions = {};
+let resolveExtras = { conditions: [], mainFields: [] };
 const emitted = new Map(); // reference -> { fileName, source, owner }
 const emittedChunks = []; // { reference, id, importer, fileName, owner, resolved }
 const usedChunkNames = new Set();
@@ -255,14 +256,21 @@ const parseModule = (code, options = {}) => {
 const viteConfig = () => ({
   root,
   mode: cli.mode ?? 'production',
-  command: 'build',
+  command: cli.serve ? 'serve' : 'build',
   isProduction: (cli.mode ?? 'production') === 'production',
   base: wp.config?.base ?? '/',
   build: { sourcemap: !!cli.sourcemap, minify: !!cli.minify, target: 'esnext', outDir: cli.outdir ?? 'dist', assetsDir: 'assets', lib: false, rollupOptions: {}, ssr: false },
   define: configOptions.define ?? {},
   resolve: { alias: configOptions.alias ?? [], conditions: [], mainFields: [], extensions: ['.mjs', '.js', '.mts', '.ts', '.jsx', '.tsx', '.json'] },
   plugins: [],
-  env: { MODE: cli.mode ?? 'production', DEV: false, PROD: true, BASE_URL: '/', SSR: false },
+  env: { MODE: cli.mode ?? 'production', DEV: (cli.mode ?? 'production') !== 'production', PROD: (cli.mode ?? 'production') === 'production', BASE_URL: '/', SSR: false },
+  optimizeDeps: { force: false, include: [], exclude: [], extensions: [] },
+  // Files Vite would turn into a URL by default (a plugin asks before it loads a file as text).
+  assetsInclude: (file) => /\.(?:png|jpe?g|gif|svg|webp|avif|ico|bmp|woff2?|ttf|otf|eot|mp4|webm|ogg|mp3|wav|flac|aac|pdf)(?:[?#].*)?$/i.test(String(file)),
+  consumer: 'client',
+  experimental: {},
+  ssr: {},
+  server: { hmr: true, middlewareMode: false },
   logger: { info: (m) => log('info', m), warn: (m) => log('warn', m), warnOnce: (m) => log('warn', m), error: (m) => log('error', m), clearScreen() {}, hasWarned: false },
   css: {},
   esbuild: {},
@@ -1042,7 +1050,8 @@ const normalizePlugin = async (raw) => {
     return [];
   }
   // Vite's `apply`: only for the build.
-  if (raw.apply === 'serve' || (typeof raw.apply === 'function' && !raw.apply({}, { command: 'build', mode: cli.mode ?? 'production' }))) return [];
+  const command = cli.serve ? 'serve' : 'build';
+  if ((typeof raw.apply === 'string' && raw.apply !== command) || (typeof raw.apply === 'function' && !raw.apply({}, { command, mode: cli.mode ?? 'production' }))) return [];
   return [raw];
 };
 
@@ -1065,7 +1074,7 @@ async function init(params) {
       throw new Error(`Cannot load ${params.config}: ${error.message}`);
     }
     config = mod.default ?? mod;
-    if (typeof config === 'function') config = await config({ command: 'build', mode: cli.mode ?? 'production', isSsrBuild: false }, {});
+    if (typeof config === 'function') config = await config({ command: cli.serve ? 'serve' : 'build', mode: cli.mode ?? 'production', isSsrBuild: false }, {});
     config = await config;
     if (Array.isArray(config)) config = config[0] ?? {};
   }
@@ -1074,15 +1083,41 @@ async function init(params) {
   let list = [];
   for (const raw of flatten(await Promise.all(flatten(config.plugins ?? [])))) list.push(...(await normalizePlugin(raw)));
   list = orderPlugins(list);
-  // Vite config hooks may add definitions and aliases.
+  // Vite config hooks may add definitions, aliases, and the conditions and package.json fields modules are resolved by. A hook is a function, or
+  // an object with a `handler` (and an `order`).
+  const command = cli.serve ? 'serve' : 'build';
+  const mode = cli.mode || (cli.serve ? 'development' : 'production');
+  resolveExtras = { conditions: [], mainFields: [] };
+  const takeResolve = (resolve) => {
+    if (!resolve) return;
+    for (const c of toArray(resolve.conditions ?? [])) if (!resolveExtras.conditions.includes(c)) resolveExtras.conditions.push(c);
+    for (const f of toArray(resolve.mainFields ?? [])) if (!resolveExtras.mainFields.includes(f)) resolveExtras.mainFields.push(f);
+  };
   for (const plugin of list) {
-    if (typeof plugin.config === 'function') {
-      const returned = await plugin.config.call(createContext(plugin), { ...config, root }, { command: 'build', mode: cli.mode ?? 'production' });
+    const hook = handlerOf(plugin.config);
+    if (hook) {
+      const returned = await hook.call(createContext(plugin), { ...config, root }, { command, mode });
       if (returned?.define) configOptions.define = { ...configOptions.define, ...returned.define };
       if (returned?.resolve?.alias) configOptions.alias = [...toArray(configOptions.alias ?? []), ...(Array.isArray(returned.resolve.alias) ? returned.resolve.alias : Object.entries(returned.resolve.alias).map(([find, replacement]) => ({ find, replacement })))];
+      takeResolve(returned?.resolve);
     }
   }
-  for (const plugin of list) if (typeof plugin.configResolved === 'function') await plugin.configResolved.call(createContext(plugin), viteConfig());
+  // Vite 6's environments: the browser one is the environment of a bundle for a page.
+  {
+    const environment = { consumer: 'client', resolve: { ...(config.resolve ?? {}) }, define: {} };
+    for (const plugin of list) {
+      const hook = handlerOf(plugin.configEnvironment);
+      if (!hook) continue;
+      const returned = await hook.call(createContext(plugin), 'client', environment, { command, mode, isSsrTargetWebworker: false });
+      if (returned?.resolve) environment.resolve = { ...environment.resolve, ...returned.resolve };
+    }
+    const swap = (list2) => toArray(list2 ?? []).map((c) => (c === 'development|production' ? mode : c));
+    takeResolve({ conditions: swap(environment.resolve?.conditions), mainFields: environment.resolve?.mainFields });
+  }
+  for (const plugin of list) {
+    const hook = handlerOf(plugin.configResolved);
+    if (hook) await hook.call(createContext(plugin), viteConfig());
+  }
   // Parcel plugins: a `.parcelrc` (given as the config, or found at the root), or `parcel` in the config.
   const parcelPlugins = [];
   {
@@ -1143,6 +1178,8 @@ async function init(params) {
     plugins: plugins.map((p) => p.name ?? 'anonymous'),
     hooks,
     define: Object.entries(configOptions.define).map(([k, v]) => [k, typeof v === 'string' ? v : JSON.stringify(v)]),
+    conditions: resolveExtras.conditions,
+    mainFields: resolveExtras.mainFields,
     input: input ? (typeof input === 'string' ? [input] : Array.isArray(input) ? input : Object.values(input)) : [],
   };
 }

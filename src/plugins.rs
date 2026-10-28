@@ -34,6 +34,9 @@ pub struct HostInfo {
     pub input: Vec<String>,
     /// The options of a module federation plugin in the config, as JSON.
     pub federation: Option<Json>,
+    /// `resolve.conditions` and `resolve.mainFields` the plugins ask for (Vite's `config` and `configEnvironment` hooks).
+    pub conditions: Vec<String>,
+    pub main_fields: Vec<String>,
 }
 
 /// The command line settings plugins may look at.
@@ -52,6 +55,8 @@ pub struct CliInfo {
     pub mode: String,
     /// Run the module federation plugin of a config (the Vite one) itself, instead of reading its options.
     pub real_federation_plugin: bool,
+    /// The command is `serve` (Vite's `command`), not a build.
+    pub serve: bool,
     /// What `--public-path` says (webpack loaders read it as `__webpack_public_path__`).
     pub public_path: String,
 }
@@ -268,7 +273,7 @@ impl PluginHost {
         ready?;
         let mut host = PluginHost { shared, child: Mutex::new(child), next: AtomicU64::new(1), info: HostInfo::default() };
         let params = format!(
-            "{{\"root\":{},\"config\":{},\"cli\":{{\"entries\":{},\"outdir\":{},\"outfile\":{},\"format\":{},\"minify\":{},\"sourcemap\":{},\"splitting\":{},\"external\":{},\"loaders\":[{}],\"platformBrowser\":{},\"mode\":{}}}}}",
+            "{{\"root\":{},\"config\":{},\"cli\":{{\"entries\":{},\"outdir\":{},\"outfile\":{},\"format\":{},\"minify\":{},\"sourcemap\":{},\"splitting\":{},\"external\":{},\"loaders\":[{}],\"platformBrowser\":{},\"mode\":{},\"serve\":{}}}}}",
             quote(&root.to_string_lossy()),
             opt_str(config),
             string_list(&cli.entries),
@@ -282,11 +287,14 @@ impl PluginHost {
             cli.loaders.iter().map(|(a, b)| format!("[{},{}]", quote(a), quote(b))).collect::<Vec<_>>().join(","),
             cli.platform_browser,
             quote(if cli.mode.is_empty() { "production" } else { &cli.mode }),
+            cli.serve,
         );
         let result = host.call("init", &params)?;
         let strings = |key: &str| -> Vec<String> { result.get(key).and_then(Json::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default() };
         host.info.plugins = strings("plugins");
         host.info.input = strings("input");
+        host.info.conditions = strings("conditions");
+        host.info.main_fields = strings("mainFields");
         host.info.federation = result.get("federation").filter(|f| !matches!(f, Json::Null)).cloned();
         if let Some(Json::Object(hooks)) = result.get("hooks") {
             host.info.hooks = hooks.iter().filter(|(_, v)| v.as_bool() == Some(true)).map(|(k, _)| k.clone()).collect();

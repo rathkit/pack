@@ -927,6 +927,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
                 platform_browser: !options.node_builtins,
                 mode: mode.clone(),
                 real_federation_plugin,
+                serve,
                 public_path: options.public_path.clone(),
             };
             match rathkit_pack::plugins::PluginHost::start(&cwd, Some(file), &info) {
@@ -949,6 +950,17 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
         }
         for define in &cli_defines {
             options.defines.add(define.clone());
+        }
+        // Where plugins have the resolver look: conditions and package.json fields (a `svelte` field, a `svelte` condition).
+        for condition in &host.info.conditions {
+            if !options.resolve.conditions.contains(condition) {
+                options.resolve.conditions.push(condition.clone());
+            }
+        }
+        for (position, field) in host.info.main_fields.iter().enumerate() {
+            if !options.resolve.main_fields.contains(field) {
+                options.resolve.main_fields.insert(position.min(options.resolve.main_fields.len()), field.clone());
+            }
         }
         if entries.is_empty() {
             entries = host.info.input.clone();

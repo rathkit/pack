@@ -11,8 +11,10 @@
     "@rollup/plugin-url": "8.0.2",
     "@rspack/cli": "2.2.9",
     "@rspack/core": "2.2.9",
+    "@sveltejs/vite-plugin-svelte": "7.3.1",
     "@svgr/rollup": "8.1.0",
     "@svgr/webpack": "8.1.0",
+    "@vitejs/plugin-vue": "6.0.8",
     "acorn": "8.19.0",
     "esbuild": "0.28.2",
     "file-loader": "6.2.0",
@@ -25,6 +27,7 @@
     "rxjs": "7.8.2",
     "semver": "7.7.2",
     "sharp": "0.35.5",
+    "svelte": "5.56.0",
     "svgo": "4.1.0",
     "three": "0.186.1",
     "ts5": "npm:typescript@5.9.3",
@@ -35,7 +38,8 @@
     "vite-imagetools": "12.0.1",
     "vite-plugin-image-optimizer": "2.0.3",
     "vite-plugin-svgr": "5.2.0",
-    "vite-plugin-webfont-dl": "3.13.1"
+    "vite-plugin-webfont-dl": "3.13.1",
+    "vue": "3.5.43"
   },
   "packageManager": "pnpm@12.14.0"
 }

@@ -255,6 +255,40 @@ if (existsSync(join(root, 'bench', 'node_modules', 'react-dom'))) {
   }
 }
 
+// Large real packages: the table prints what a normal bundle prints (CommonJS interop, cycles, a thousand modules).
+for (const name of ['rxjs', 'lodash', 'three']) {
+  if (!existsSync(join(root, 'bench', 'node_modules', name === 'lodash' ? 'lodash-es' : name))) continue;
+  const app = join(dir, `soak-${name}`);
+  cpSync(join(root, 'tests', 'hmr', 'soak', name), app, { recursive: true });
+  symlinkSync(join(root, 'bench', 'node_modules'), join(app, 'node_modules'), 'dir');
+  writeFileSync(join(app, 'index.html'), '<!doctype html><script type="module" src="/main.js"></script>\n');
+  const define = ['--define', 'process.env.NODE_ENV="development"'];
+  const normal = join(dir, `soak-${name}-normal.mjs`);
+  const built = spawnSync(bin, ['bundle', 'main.js', '--outfile', normal, '--format', 'esm', ...define], { cwd: app, encoding: 'utf8' });
+  check(built.status === 0, `the ${name} bundle builds`, built.stderr);
+  const want = spawnSync('node', [normal], { encoding: 'utf8', timeout: 60000 });
+  const served = spawn(bin, ['serve', 'main.js', '--hmr', '--port', '0', ...define], { cwd: app, stdio: ['ignore', 'pipe', 'pipe'] });
+  let log = '';
+  served.stdout.on('data', (d) => (log += d));
+  served.stderr.on('data', (d) => (log += d));
+  try {
+    if (!(await until(() => /(?:127\.0\.0\.1|localhost):\d+/.test(log)))) throw new Error('the server did not start: ' + log);
+    const port = /(?:localhost|127\.0\.0\.1):(\d+)/.exec(log)[1];
+    const table = await fetchBuilt('http://127.0.0.1:' + port);
+    const file = join(app, 'table.mjs');
+    writeFileSync(file, table);
+    const got = spawnSync('node', [file], { encoding: 'utf8', cwd: app, timeout: 60000 });
+    check(want.status === 0 && want.stdout.length > 100, `the ${name} bundle runs`, want.stderr + want.stdout.slice(0, 200));
+    check(got.status === 0, `the ${name} table runs`, got.stderr.slice(0, 600));
+    check(got.stdout === want.stdout, `${name}: the table prints what the bundle prints`, '--- bundle\n' + want.stdout + '--- table\n' + got.stdout + got.stderr.slice(0, 300));
+  } catch (error) {
+    failed++;
+    console.log('FAIL ' + (error?.stack ?? error));
+  } finally {
+    served.kill();
+  }
+}
+
 // In a browser: the page client applies the updates, and the page is not reloaded.
 {
   const findBrowser = () => {
@@ -364,6 +398,75 @@ if (existsSync(join(root, 'bench', 'node_modules', 'react-dom'))) {
           check(await until60(async () => (await evaluate('window.__page')) !== first), 'a module that exports more than components reloads the page');
         } finally {
           react.kill();
+        }
+      }
+      // Vue: single-file components through @vitejs/plugin-vue, whose generated code uses import.meta.hot.accept and Vue's HMR runtime.
+      if (existsSync(join(root, 'bench', 'node_modules', '@vitejs', 'plugin-vue')) && existsSync(join(root, 'bench', 'node_modules', 'vue'))) {
+        const app = join(dir, 'vue-app');
+        cpSync(join(root, 'tests', 'hmr', 'vue'), app, { recursive: true });
+        symlinkSync(join(root, 'bench', 'node_modules'), join(app, 'node_modules'), 'dir');
+        const defines = ['process.env.NODE_ENV="development"', '__VUE_OPTIONS_API__=true', '__VUE_PROD_DEVTOOLS__=false', '__VUE_PROD_HYDRATION_MISMATCH_DETAILS__=false'].flatMap((d) => ['--define', d]);
+        const vue = spawn(bin, ['serve', 'main.js', '--hmr', '--port', '0', ...defines], { cwd: app, stdio: ['ignore', 'pipe', 'pipe'] });
+        let vueLog = '';
+        vue.stdout.on('data', (d) => (vueLog += d));
+        vue.stderr.on('data', (d) => (vueLog += d));
+        try {
+          if (!(await until(() => /(?:127\.0\.0\.1|localhost):\d+/.test(vueLog)))) throw new Error('the Vue server did not start: ' + vueLog);
+          const vuePort = /(?:localhost|127\.0\.0\.1):(\d+)/.exec(vueLog)[1];
+          await fetchBuilt(`http://127.0.0.1:${vuePort}`);
+          await send('Page.navigate', { url: `http://127.0.0.1:${vuePort}/` });
+          const text = () => evaluate("document.getElementById('app')?.textContent?.replace(/\\s+/g, ' ').trim()");
+          check(await until60(async () => (await text()) === 'count 0Hellochild one'), 'the Vue app renders', String(await text()) + ' ' + vueLog.slice(-300));
+          const first = await evaluate('window.__page');
+          await evaluate("document.querySelector('button').click()");
+          await evaluate("document.querySelector('button').click()");
+          check(await until60(async () => (await text()) === 'count 2Hellochild one'), 'and its state changes');
+          write2(app, 'App.vue', readFileSync(join(app, 'App.vue'), 'utf8').replace('Hello', 'Howdy'));
+          check(await until60(async () => /Howdy/.test(await text())), 'an edited template is applied in place', String(await text()));
+          check((await evaluate('window.__page')) === first, 'without a reload');
+          const afterTemplate = await text();
+          check(/count 2/.test(afterTemplate), 'and the state of the component is kept', String(afterTemplate));
+          write2(app, 'Child.vue', readFileSync(join(app, 'Child.vue'), 'utf8').replace('child one', 'child two'));
+          check(await until60(async () => /child two/.test(await text())), 'an edited child component is applied', String(await text()));
+          check((await evaluate('window.__page')) === first, 'without a reload either');
+          write2(app, 'App.vue', readFileSync(join(app, 'App.vue'), 'utf8').replace('ref(0)', 'ref(10)'));
+          check(await until60(async () => /count 10/.test(await text())), 'an edited script re-creates the component', String(await text()));
+          check((await evaluate('window.__page')) === first, 'and the page is still not reloaded');
+        } finally {
+          vue.kill();
+        }
+      }
+      // Svelte 5: components through @sveltejs/vite-plugin-svelte (compiled with its own HMR, which uses import.meta.hot).
+      if (existsSync(join(root, 'bench', 'node_modules', '@sveltejs', 'vite-plugin-svelte')) && existsSync(join(root, 'bench', 'node_modules', 'svelte'))) {
+        const app = join(dir, 'svelte-app');
+        cpSync(join(root, 'tests', 'hmr', 'svelte'), app, { recursive: true });
+        symlinkSync(join(root, 'bench', 'node_modules'), join(app, 'node_modules'), 'dir');
+        const svelte = spawn(bin, ['serve', 'main.js', '--hmr', '--port', '0', '--define', 'process.env.NODE_ENV="development"'], { cwd: app, stdio: ['ignore', 'pipe', 'pipe'] });
+        let svelteLog = '';
+        svelte.stdout.on('data', (d) => (svelteLog += d));
+        svelte.stderr.on('data', (d) => (svelteLog += d));
+        try {
+          if (!(await until(() => /(?:127\.0\.0\.1|localhost):\d+/.test(svelteLog)))) throw new Error('the Svelte server did not start: ' + svelteLog);
+          const sveltePort = /(?:localhost|127\.0\.0\.1):(\d+)/.exec(svelteLog)[1];
+          await fetchBuilt(`http://127.0.0.1:${sveltePort}`);
+          await send('Page.navigate', { url: `http://127.0.0.1:${sveltePort}/` });
+          const text = () => evaluate("document.getElementById('app')?.textContent?.replace(/\\s+/g, ' ').trim()");
+          check(await until60(async () => /count 0\s*Hello\s*child one/.test((await text()) ?? '')), 'the Svelte app renders', String(await text()) + ' ' + svelteLog.slice(-400));
+          const first = await evaluate('window.__page');
+          await evaluate("document.querySelector('button').click()");
+          await evaluate("document.querySelector('button').click()");
+          check(await until60(async () => /count 2/.test((await text()) ?? '')), 'and its state changes', String(await text()));
+          write2(app, 'App.svelte', readFileSync(join(app, 'App.svelte'), 'utf8').replace('Hello', 'Howdy'));
+          check(await until60(async () => /Howdy/.test((await text()) ?? '')), 'an edited template is applied in place', String(await text()) + ' ' + svelteLog.slice(-300));
+          check((await evaluate('window.__page')) === first, 'without a reload');
+          write2(app, 'Child.svelte', readFileSync(join(app, 'Child.svelte'), 'utf8').replace('child one', 'child two'));
+          check(await until60(async () => /child two/.test((await text()) ?? '')), 'an edited child component is applied', String(await text()));
+          check((await evaluate('window.__page')) === first, 'without a reload either');
+          write2(app, 'App.svelte', readFileSync(join(app, 'App.svelte'), 'utf8').replace('$state(0)', '$state(10)'));
+          check(await until60(async () => /count 10/.test((await text()) ?? '')), 'an edited script is applied', String(await text()));
+          check((await evaluate('window.__page')) === first, 'and the page is still not reloaded');
+        } finally {
+          svelte.kill();
         }
       }
       ws.close();
