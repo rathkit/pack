@@ -303,8 +303,10 @@ async function startBridge(list, { base, cwd, command, mode }) {
       worker.postMessage({ t: 'ask', rid, call, method, args });
     });
   const askNow = (call, method, args) => {
-    worker.postMessage({ t: 'ask', rid: ++requests, call, method, args, sync: true });
+    // The flag is lowered before the question is sent: an answer that comes before this thread waits (few cores, a slow thread) has raised
+    // it, and wait returns at once; lowered after, the answer would be wiped out and the wait would never end.
     Atomics.store(flag, 0, 0);
+    worker.postMessage({ t: 'ask', rid: ++requests, call, method, args, sync: true });
     Atomics.wait(flag, 0, 0);
     const answer = receiveMessageOnPort(port1)?.message;
     if (!answer || answer.error) throw new Error(answer ? answer.error : 'the build did not answer');
