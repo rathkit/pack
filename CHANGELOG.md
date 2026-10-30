@@ -53,6 +53,7 @@ First release.
 - Plugins: Vue (`@vitejs/plugin-vue`) and Svelte 5 (`@sveltejs/vite-plugin-svelte`) work, including under `--hmr`; hooks written as objects with a `handler`, `configEnvironment`, the `serve` command, and `lang.<ext>` queries (`?vue&type=style&lang.css`) are understood.
 - A normal bundle no longer breaks when a module declares a top-level name the helpers use (lodash-es declares `Symbol`).
 - Tested in headless Chromium only: the development server, `--hmr` and federation have not been tried in Firefox or Safari.
+- The development server (and the HTTPS proxy) answers on both loopback addresses when the host is `localhost`; before, it listened on the first address `localhost` resolved to, so `http://127.0.0.1:PORT` was refused on machines where that is `::1`.
 - JSX: a space between two elements on one line (`<a/> <b/>`) is kept, as Babel and esbuild keep it.
 - `--dts-bundle`: one merged `.d.ts` for each entry instead of one for each source file.
 - `--dts` and `--dts-dir`: declaration files for the entries, written with the project's `typescript` (JS API `dts`, `dtsDir`).

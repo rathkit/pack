@@ -128,7 +128,18 @@ const server = http2.createSecureServer({ cert, key, allowHTTP1: true }, (req, r
 });
 server.on('clientError', (_error, socket) => socket.destroy());
 server.on('sessionError', () => {});
-server.listen(options.port, options.host, () => process.stdout.write(`listening ${server.address().port}\n`));
+// `localhost` is both loopback addresses on one port (see bind_listeners in src/serve.rs): the first address it resolves to is not
+// the same everywhere, and a client that names 127.0.0.1 or [::1] must get an answer.
+const local = options.host === 'localhost';
+server.listen(options.port, local ? '127.0.0.1' : options.host, () => {
+  const port = server.address().port;
+  if (local) {
+    const other = net.createServer((socket) => server.emit('connection', socket));
+    other.on('error', () => {});
+    other.listen(port, '::1');
+  }
+  process.stdout.write(`listening ${port}\n`);
+});
 server.on('error', (error) => {
   process.stdout.write(`error ${error.message}\n`);
   process.exit(1);

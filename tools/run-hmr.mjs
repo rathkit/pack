@@ -60,13 +60,20 @@ const until = async (condition, ms = 15000) => {
   return false;
 };
 const until60 = (condition) => until(condition, 60000);
-const fetchBuilt = async (base) => {
+// The server's first build, which the page asks for as soon as it can. A build that is not served in 20 seconds is a failure that
+// says what the server printed and what the last request got.
+const fetchBuilt = async (base, log = () => output) => {
   let response;
+  let last = 'no answer';
   await until(async () => {
-    response = await fetch(base + '/bundle.js').catch(() => null);
+    response = await fetch(base + '/bundle.js').catch((error) => {
+      last = String(error?.cause?.message ?? error?.message ?? error);
+      return null;
+    });
+    if (response) last = `status ${response.status}`;
     return response?.ok;
-  }, 60000);
-  if (!response?.ok) throw new Error('the build was not served');
+  }, 20000);
+  if (!response?.ok) throw new Error(`the build was not served from ${base} (${last}); the server said:\n${log()}`);
   return response.text();
 };
 try {
@@ -178,7 +185,7 @@ try {
   try {
     if (!(await until(() => /(?:127\.0\.0\.1|localhost):\d+/.test(log)))) throw new Error('the server did not start: ' + log);
     const port = /(?:localhost|127\.0\.0\.1):(\d+)/.exec(log)[1];
-    const table = await fetchBuilt('http://127.0.0.1:' + port);
+    const table = await fetchBuilt('http://127.0.0.1:' + port, () => log);
     const file = join(dir, 'table.mjs');
     writeFileSync(file, table);
     const got = run(file);
@@ -207,7 +214,7 @@ try {
   try {
     if (!(await until(() => /(?:127\.0\.0\.1|localhost):\d+/.test(log)))) throw new Error('the server did not start: ' + log);
     const port = /(?:localhost|127\.0\.0\.1):(\d+)/.exec(log)[1];
-    const table = await fetchBuilt('http://127.0.0.1:' + port);
+    const table = await fetchBuilt('http://127.0.0.1:' + port, () => log);
     check(!/does not support/.test(log), 'decorators and top-level await are accepted', log);
     const file = join(dir, 'dt-table.mjs');
     writeFileSync(file, table);
@@ -240,7 +247,7 @@ if (existsSync(join(root, 'bench', 'node_modules', 'react-dom'))) {
   try {
     if (!(await until(() => /(?:127\.0\.0\.1|localhost):\d+/.test(log)))) throw new Error('the server did not start: ' + log);
     const port = /(?:localhost|127\.0\.0\.1):(\d+)/.exec(log)[1];
-    const table = await fetchBuilt('http://127.0.0.1:' + port);
+    const table = await fetchBuilt('http://127.0.0.1:' + port, () => log);
     const file = join(app, 'table.mjs');
     writeFileSync(file, table);
     const got = spawnSync('node', [file], { encoding: 'utf8', cwd: app });
@@ -274,7 +281,7 @@ for (const name of ['rxjs', 'lodash', 'three']) {
   try {
     if (!(await until(() => /(?:127\.0\.0\.1|localhost):\d+/.test(log)))) throw new Error('the server did not start: ' + log);
     const port = /(?:localhost|127\.0\.0\.1):(\d+)/.exec(log)[1];
-    const table = await fetchBuilt('http://127.0.0.1:' + port);
+    const table = await fetchBuilt('http://127.0.0.1:' + port, () => log);
     const file = join(app, 'table.mjs');
     writeFileSync(file, table);
     const got = spawnSync('node', [file], { encoding: 'utf8', cwd: app, timeout: 60000 });
@@ -380,7 +387,7 @@ for (const name of ['rxjs', 'lodash', 'three']) {
           if (!(await until(() => /(?:127\.0\.0\.1|localhost):\d+/.test(reactLog)))) throw new Error('the React server did not start: ' + reactLog);
           const reactPort = /(?:localhost|127\.0\.0\.1):(\d+)/.exec(reactLog)[1];
           // The page is opened once the build is there to be served.
-          await fetchBuilt(`http://127.0.0.1:${reactPort}`);
+          await fetchBuilt(`http://127.0.0.1:${reactPort}`, () => reactLog);
           await send('Page.navigate', { url: `http://127.0.0.1:${reactPort}/` });
           const text = () => evaluate("document.getElementById('out')?.textContent");
           check(await until60(async () => (await text()) === 'Hello count 0'), 'the React app renders', String(await text()));
@@ -413,7 +420,7 @@ for (const name of ['rxjs', 'lodash', 'three']) {
         try {
           if (!(await until(() => /(?:127\.0\.0\.1|localhost):\d+/.test(vueLog)))) throw new Error('the Vue server did not start: ' + vueLog);
           const vuePort = /(?:localhost|127\.0\.0\.1):(\d+)/.exec(vueLog)[1];
-          await fetchBuilt(`http://127.0.0.1:${vuePort}`);
+          await fetchBuilt(`http://127.0.0.1:${vuePort}`, () => vueLog);
           await send('Page.navigate', { url: `http://127.0.0.1:${vuePort}/` });
           const text = () => evaluate("document.getElementById('app')?.textContent?.replace(/\\s+/g, ' ').trim()");
           check(await until60(async () => (await text()) === 'count 0Hellochild one'), 'the Vue app renders', String(await text()) + ' ' + vueLog.slice(-300));
@@ -448,7 +455,7 @@ for (const name of ['rxjs', 'lodash', 'three']) {
         try {
           if (!(await until(() => /(?:127\.0\.0\.1|localhost):\d+/.test(svelteLog)))) throw new Error('the Svelte server did not start: ' + svelteLog);
           const sveltePort = /(?:localhost|127\.0\.0\.1):(\d+)/.exec(svelteLog)[1];
-          await fetchBuilt(`http://127.0.0.1:${sveltePort}`);
+          await fetchBuilt(`http://127.0.0.1:${sveltePort}`, () => svelteLog);
           await send('Page.navigate', { url: `http://127.0.0.1:${sveltePort}/` });
           const text = () => evaluate("document.getElementById('app')?.textContent?.replace(/\\s+/g, ' ').trim()");
           check(await until60(async () => /count 0\s*Hello\s*child one/.test((await text()) ?? '')), 'the Svelte app renders', String(await text()) + ' ' + svelteLog.slice(-400));

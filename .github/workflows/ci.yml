@@ -44,6 +44,10 @@ jobs:
       - run: node tools/check-zero-deps.mjs
       # The release's bill of materials is made from the same rules and must list no components.
       - run: node tools/make-sbom.mjs "$RUNNER_TEMP/sbom.cdx.json" && node -e "process.exit(require(process.argv[1]).components.length)" "$RUNNER_TEMP/sbom.cdx.json"
+      # Which address `localhost` resolves to first differs between machines; the dev server answers on both loopback addresses.
+      - name: How localhost resolves
+        if: runner.os != 'Windows'
+        run: getent hosts localhost || true; cat /etc/hosts || true
       - run: cargo build --release
       - run: cargo test --release
       - run: node tools/run-fixtures.mjs

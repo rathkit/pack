@@ -176,19 +176,42 @@ fn is_loopback_host(host: &str) -> bool {
     host == "localhost" || (host, 0).to_socket_addrs().is_ok_and(|mut a| a.all(|addr| addr.ip().is_loopback()))
 }
 
+/// Binds `host:port`. `localhost` is both loopback addresses (127.0.0.1 and ::1) on one port, since a client that names either one
+/// must get an answer: the first address the system resolves `localhost` to is not the same everywhere, and `http://127.0.0.1:PORT`
+/// would be refused where it is `::1`. A machine without IPv6 simply has the one.
+fn bind_listeners(host: &str, port: u16) -> std::io::Result<Vec<TcpListener>> {
+    if host != "localhost" {
+        return Ok(vec![TcpListener::bind((host, port))?]);
+    }
+    let first = match TcpListener::bind(("127.0.0.1", port)) {
+        Ok(listener) => listener,
+        // No IPv4 loopback: the other one alone, or the original error.
+        Err(e) => return TcpListener::bind(("::1", port)).map(|l| vec![l]).map_err(|_| e),
+    };
+    let mut listeners = vec![first];
+    if let Ok(second) = TcpListener::bind(("::1", listeners[0].local_addr()?.port())) {
+        listeners.push(second);
+    }
+    Ok(listeners)
+}
+
 fn bind_and_serve(state: Arc<ServeState>, bind_host: &str, public_host: &str, port: u16) -> std::io::Result<u16> {
-    let listener = TcpListener::bind((bind_host, port))?;
-    let port = listener.local_addr()?.port();
-    *state.exposed.lock().unwrap() = if bind_host == public_host { !listener.local_addr()?.ip().is_loopback() } else { !is_loopback_host(public_host) };
+    let listeners = bind_listeners(bind_host, port)?;
+    let local = listeners[0].local_addr()?;
+    let port = local.port();
+    *state.exposed.lock().unwrap() = if bind_host == public_host { !local.ip().is_loopback() } else { !is_loopback_host(public_host) };
     *state.bound_host.lock().unwrap() = public_host.to_string();
-    std::thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
-            let state = state.clone();
-            std::thread::spawn(move || {
-                let _ = handle(stream, &state);
-            });
-        }
-    });
+    for listener in listeners {
+        let state = state.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let state = state.clone();
+                std::thread::spawn(move || {
+                    let _ = handle(stream, &state);
+                });
+            }
+        });
+    }
     Ok(port)
 }
 

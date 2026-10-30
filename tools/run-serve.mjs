@@ -58,8 +58,18 @@ const get = async (path) => {
 const check = (cond, what) => {
   if (!cond) throw new Error(what);
 };
+// Where IPv6 exists, `localhost` is answered on both loopback addresses: the first one it resolves to differs between machines, and a
+// client that names 127.0.0.1 or [::1] must get an answer on every one of them.
+const hasIPv6 = await new Promise((resolve) => {
+  const probe = net.createServer().on('error', () => resolve(false));
+  probe.listen(0, '::1', () => probe.close(() => resolve(true)));
+});
 let failed = null;
 try {
+  const port = new URL(base).port;
+  const over = async (host) => (await fetch(`http://${host}:${port}/__rathkit/client.js`).catch((e) => ({ status: String(e.cause?.code ?? e) }))).status;
+  check((await over('127.0.0.1')) === 200, 'the server answers on 127.0.0.1');
+  if (hasIPv6) check((await over('[::1]')) === 200, `the server answers on [::1] (${await over('[::1]')})`);
   // Wait for the first build.
   for (let i = 0; i < 100; i++) {
     if ((await get('/main.js')).status === 200) break;

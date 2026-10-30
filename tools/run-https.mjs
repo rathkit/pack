@@ -4,6 +4,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, readFileSync, copyFileSync, rmSync, existsSync } from 'node:fs';
 import https from 'node:https';
+import net from 'node:net';
 import http2 from 'node:http2';
 import crypto from 'node:crypto';
 import { join, dirname } from 'node:path';
@@ -110,6 +111,15 @@ try {
     session.close();
   }
   // Plain HTTP to the same port is not served.
+  // Both loopback addresses answer (where IPv6 exists), whichever one `localhost` resolves to first on the machine.
+  const v6 = await new Promise((resolve) => {
+    const probe = net.createServer().on('error', () => resolve(false));
+    probe.listen(0, '::1', () => probe.close(() => resolve(true)));
+  });
+  for (const host of v6 ? ['127.0.0.1', '::1'] : ['127.0.0.1']) {
+    const answered = await get(server.port, '/', { ca: pem, host }).then((r) => r.status, (e) => e.code);
+    check(answered === 200, `https answers on ${host}`, String(answered));
+  }
   const plain = await fetch(`http://127.0.0.1:${server.port}/`).then((r) => `status ${r.status}`, () => 'refused');
   check(plain === 'refused', 'plain HTTP is not answered on the TLS port', plain);
   server.child.kill();
