@@ -2,7 +2,77 @@
 //! same thing when run by Node as written and when run bundled (with and without
 //! tree-shaking). Skipped when `node` is not installed.
 
-use std::process::Command;
+use std::io::Read;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
+
+/// How long one script of `tools/` may run in these tests. They take seconds to a minute; a hang (a race, a port that is never
+/// answered) must cost this, with what the script printed, and not the 30 minutes a CI job is allowed.
+const SCRIPT_LIMIT: Duration = Duration::from_secs(300);
+
+trait OutputWithin {
+    /// Like `output`, but a run that is not over in `SCRIPT_LIMIT` is killed (with what it started) and is an error that holds what it printed.
+    fn output_within(&mut self) -> std::io::Result<Output> {
+        self.output_for(SCRIPT_LIMIT)
+    }
+    fn output_for(&mut self, limit: Duration) -> std::io::Result<Output>;
+}
+
+impl OutputWithin for Command {
+    fn output_for(&mut self, limit: Duration) -> std::io::Result<Output> {
+        self.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(self, 0);
+        let mut child = self.spawn()?;
+        let read = |mut pipe: Box<dyn Read + Send>| std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = pipe.read_to_end(&mut bytes);
+            bytes
+        });
+        let stdout = read(Box::new(child.stdout.take().expect("piped")));
+        let stderr = read(Box::new(child.stderr.take().expect("piped")));
+        let started = Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait()? {
+                break Some(status);
+            }
+            if started.elapsed() > limit {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        if status.is_none() {
+            // The script's own children (servers, browsers) are in its group, so they end with it and close the pipes.
+            #[cfg(unix)]
+            let _ = Command::new("kill").args(["-KILL", "--", &format!("-{}", child.id())]).status();
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let stdout = stdout.join().unwrap_or_default();
+        let stderr = stderr.join().unwrap_or_default();
+        match status {
+            Some(status) => Ok(Output { status, stdout, stderr }),
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("not over in {} seconds, and killed\nstdout:\n{}\nstderr:\n{}", limit.as_secs(), String::from_utf8_lossy(&stdout), String::from_utf8_lossy(&stderr)),
+            )),
+        }
+    }
+}
+
+#[test]
+fn a_script_that_hangs_is_killed_and_what_it_printed_is_kept() {
+    if Command::new("node").arg("--version").output().is_err() {
+        return;
+    }
+    // A script that prints, starts a child that would outlive it, and then waits for ever.
+    let script = "console.log('before the hang'); require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { stdio: 'inherit' }); setInterval(() => {}, 1000);";
+    let started = Instant::now();
+    let error = Command::new("node").args(["-e", script]).output_for(Duration::from_secs(2)).expect_err("it never ends");
+    assert!(started.elapsed() < Duration::from_secs(30), "the wait for the pipes did not end: its child was left running");
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    assert!(error.to_string().contains("before the hang"), "what it printed is in the error: {error}");
+}
 
 #[test]
 fn bundled_programs_behave_like_the_originals() {
@@ -14,7 +84,7 @@ fn bundled_programs_behave_like_the_originals() {
         .arg("tools/run-fixtures.mjs")
         .env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rkp"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
+        .output_within()
         .expect("run the fixture script");
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "fixtures disagree:\n{text}\n{}", String::from_utf8_lossy(&output.stderr));
@@ -33,7 +103,7 @@ fn typescript_features_match_the_compilers_own_transform() {
         .env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rkp"))
         .env("TS_MODULE", module)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
+        .output_within()
         .expect("run the JSX script");
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "programs disagree with tsc:\n{text}\n{}", String::from_utf8_lossy(&output.stderr));
@@ -49,7 +119,7 @@ fn split_chunks_behave_like_the_originals() {
         .arg("tools/run-split.mjs")
         .env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rkp"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
+        .output_within()
         .expect("run the splitting script");
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "split programs disagree:\n{text}\n{}", String::from_utf8_lossy(&output.stderr));
@@ -65,7 +135,7 @@ fn defined_constants_behave_like_the_values_they_stand_for() {
         .arg("tools/run-defines.mjs")
         .env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rkp"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
+        .output_within()
         .expect("run the define script");
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "define programs disagree:\n{text}\n{}", String::from_utf8_lossy(&output.stderr));
@@ -81,7 +151,7 @@ fn loaders_and_style_sheets_produce_what_they_should() {
         .arg("tools/run-loaders.mjs")
         .env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rkp"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
+        .output_within()
         .expect("run the loader script");
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "loader programs disagree:\n{text}\n{}", String::from_utf8_lossy(&output.stderr));
@@ -97,7 +167,7 @@ fn plugins_of_every_kind_run_in_the_host() {
         .arg("tools/run-plugins.mjs")
         .env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rkp"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
+        .output_within()
         .expect("run the plugin script");
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "plugin programs disagree:\n{text}\n{}", String::from_utf8_lossy(&output.stderr));
@@ -113,7 +183,7 @@ fn watch_mode_rebuilds_and_tells_plugins() {
         .arg("tools/run-watch.mjs")
         .env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rkp"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
+        .output_within()
         .expect("run the watch script");
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "watch mode misbehaves:\n{text}\n{}", String::from_utf8_lossy(&output.stderr));
@@ -145,7 +215,7 @@ fn the_dev_server_serves_and_tells_pages_about_changes() {
         .arg("tools/run-serve.mjs")
         .env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rkp"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
+        .output_within()
         .expect("run the serve script");
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "the dev server misbehaves:\n{text}\n{}", String::from_utf8_lossy(&output.stderr));
@@ -491,7 +561,7 @@ fn syntax_newer_than_the_target_is_rewritten_and_checked() {
     if Command::new("node").arg("--version").output().is_err() {
         return;
     }
-    let output = Command::new("node").arg("tools/run-target.mjs").env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rkp")).current_dir(env!("CARGO_MANIFEST_DIR")).output().expect("run the target script");
+    let output = Command::new("node").arg("tools/run-target.mjs").env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rkp")).current_dir(env!("CARGO_MANIFEST_DIR")).output_within().expect("run the target script");
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "target builds disagree:\n{text}\n{}", String::from_utf8_lossy(&output.stderr));
 }
@@ -501,7 +571,7 @@ fn plugin_objects_given_to_the_js_api_run_in_the_calling_process() {
     if Command::new("node").arg("--version").output().is_err() {
         return;
     }
-    let output = Command::new("node").arg("tools/test-plugin-objects.mjs").env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rkp")).current_dir(env!("CARGO_MANIFEST_DIR")).output().expect("run the plugin objects script");
+    let output = Command::new("node").arg("tools/test-plugin-objects.mjs").env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rkp")).current_dir(env!("CARGO_MANIFEST_DIR")).output_within().expect("run the plugin objects script");
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "plugin objects are wrong:\n{text}\n{}", String::from_utf8_lossy(&output.stderr));
 }
@@ -511,7 +581,7 @@ fn the_dev_server_speaks_https_with_a_certificate_of_its_own_or_a_given_one() {
     if Command::new("node").arg("--version").output().is_err() {
         return;
     }
-    let output = Command::new("node").arg("tools/run-https.mjs").env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rkp")).current_dir(env!("CARGO_MANIFEST_DIR")).output().expect("run the https script");
+    let output = Command::new("node").arg("tools/run-https.mjs").env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rkp")).current_dir(env!("CARGO_MANIFEST_DIR")).output_within().expect("run the https script");
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "https is wrong:\n{text}\n{}", String::from_utf8_lossy(&output.stderr));
 }
@@ -521,7 +591,7 @@ fn changed_modules_are_replaced_in_the_page_with_hmr() {
     if Command::new("node").arg("--version").output().is_err() {
         return;
     }
-    let output = Command::new("node").arg("tools/run-hmr.mjs").env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rkp")).current_dir(env!("CARGO_MANIFEST_DIR")).output().expect("run the hmr script");
+    let output = Command::new("node").arg("tools/run-hmr.mjs").env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rkp")).current_dir(env!("CARGO_MANIFEST_DIR")).output_within().expect("run the hmr script");
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "hmr is wrong:\n{text}\n{}", String::from_utf8_lossy(&output.stderr));
 }
@@ -531,7 +601,7 @@ fn declaration_files_are_written_for_the_entries_and_checked_by_a_consumer() {
     if Command::new("node").arg("--version").output().is_err() {
         return;
     }
-    let output = Command::new("node").arg("tools/run-dts.mjs").env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rkp")).current_dir(env!("CARGO_MANIFEST_DIR")).output().expect("run the dts script");
+    let output = Command::new("node").arg("tools/run-dts.mjs").env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rkp")).current_dir(env!("CARGO_MANIFEST_DIR")).output_within().expect("run the dts script");
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "declarations are wrong:\n{text}\n{}", String::from_utf8_lossy(&output.stderr));
 }
