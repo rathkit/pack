@@ -61,6 +61,7 @@ for (const p of platforms) {
   cpSync(binary, join(dir, 'bin', exe));
   if (p.os !== 'win32') chmodSync(join(dir, 'bin', exe), 0o755);
   cpSync(join(root, 'LICENSE'), join(dir, 'LICENSE'));
+  cpSync(join(root, 'NOTICE'), join(dir, 'NOTICE'));
   writeFileSync(join(dir, 'README.md'), `# ${name}\n\nThe rathkit-pack program for ${p.os} on ${p.cpu}${p.libc ? ` (${p.libc})` : ''}. Install \`@rathkit/pack\` instead of this package. Alpha: https://github.com/rathkit/pack#readme\n`);
   const manifest = {
     name,
@@ -74,7 +75,7 @@ for (const p of platforms) {
     os: [p.os],
     cpu: [p.cpu],
     ...(p.libc ? { libc: [p.libc] } : {}),
-    files: ['bin', 'README.md', 'LICENSE'],
+    files: ['bin', 'README.md', 'LICENSE', 'NOTICE'],
     publishConfig: { access: 'public', provenance: true },
   };
   writeFileSync(join(dir, 'package.json'), JSON.stringify(manifest, null, 2) + '\n');
@@ -84,6 +85,7 @@ for (const p of platforms) {
 const launcher = join(out, 'pack');
 cpSync(join(root, 'npm', 'pack'), launcher, { recursive: true });
 cpSync(join(root, 'LICENSE'), join(launcher, 'LICENSE'));
+cpSync(join(root, 'NOTICE'), join(launcher, 'NOTICE'));
 base.version = version;
 base.optionalDependencies = Object.fromEntries(made.map((m) => [m.name, version]));
 writeFileSync(join(launcher, 'package.json'), JSON.stringify(base, null, 2) + '\n');

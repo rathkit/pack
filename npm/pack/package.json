@@ -27,7 +27,8 @@
     "bridge.js",
     "index.d.ts",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "NOTICE"
   ],
   "engines": {
     "node": ">=18"
