@@ -36,16 +36,18 @@ Verify `SHA256SUMS` this way, then the tarball against `SHA256SUMS`. The same co
 
 ## npm
 
-`@rathkit/pack` is the same program for npm: a launcher with one optional dependency, the package for your platform
-(`@rathkit/pack-linux-x64` and so on). None of them has an install script or any dependency but that one. Each is
-published from the `release` workflow with a provenance statement:
+`@rathkit/pack` is the same program for npm: a launcher with one optional dependency per platform, and the package for
+your platform: `@rathkit/pack-linux-x64-gnu`, `-linux-arm64-gnu`, `-linux-x64-musl`, `-linux-arm64-musl`,
+`-darwin-arm64`, `-darwin-x64` and `-win32-x64`. None of them has an install script or any dependency but those. Each is staged by the `release` workflow with a
+provenance statement and goes live when the owner approves it:
 
 ```
-pnpm add -D @rathkit/pack@next
-pnpm audit signatures
+npm install --save-dev @rathkit/pack@next
+npm audit signatures
 ```
 
-Versions with a suffix (`0.1.0-alpha.0`) are on the `next` tag only.
+Versions with a suffix (`0.1.0-alpha.0`) are on the `next` tag only. The first versions of a package are published by
+hand and have no provenance statement (the release notes say which); later ones do.
 
 ## Zero dependencies
 
