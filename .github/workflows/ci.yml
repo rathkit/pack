@@ -14,41 +14,62 @@ concurrency:
 
 jobs:
   check:
-    name: ${{ matrix.os }} node ${{ matrix.node }}
+    # The same steps on every leg: glibc and musl, x64 and arm64, the oldest and the newest Node that runs the plugin host.
+    # The first four names below are what the main ruleset requires; keep them as they are.
+    name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    # Alpine legs run in a container; a leg with no container key runs on the runner itself.
+    container: ${{ matrix.container }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        # The plugin host needs Node 24 or newer; test the oldest and the newest, and a second CPU architecture.
         include:
-          - { os: ubuntu-latest, node: 24, browser: true }
-          - { os: ubuntu-latest, node: 26, browser: true }
-          - { os: ubuntu-24.04-arm, node: 24, browser: false }
+          - { name: "ubuntu-latest node 24", os: ubuntu-latest, node: 24, browser: true }
+          - { name: "ubuntu-latest node 26", os: ubuntu-latest, node: 26, browser: true }
+          - { name: "ubuntu-24.04-arm node 24", os: ubuntu-24.04-arm, node: 24 }
+          - { name: "ubuntu-24.04-arm node 26", os: ubuntu-24.04-arm, node: 26 }
+          - { name: "alpine (musl) node 24", os: ubuntu-latest, node: 24, musl: true, container: "node:24-alpine" }
+          - { name: "alpine (musl) node 26", os: ubuntu-latest, node: 26, musl: true, container: "node:26-alpine" }
+          - { name: "alpine (musl, arm64) node 24", os: ubuntu-24.04-arm, node: 24, musl: true, container: "node:24-alpine" }
+          - { name: "alpine (musl, arm64) node 26", os: ubuntu-24.04-arm, node: 26, musl: true, container: "node:26-alpine" }
     env:
       # The TypeScript compiler the JSX and decorator programs are compared with.
       TS_MODULE: ${{ github.workspace }}/bench/node_modules/ts5
     steps:
+      # Alpine: the program has no C dependencies, so it is built and run there as it is; this checks it. The container's
+      # own Node is the one that runs the tests.
+      - if: matrix.musl
+        run: apk add --no-cache git rust cargo python3 bash
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       # pnpm, this job's Node, and the install of bench (the libraries and compilers the comparisons bundle; nothing from
       # there is built into the bundler) from its lockfile, in one step.
-      - uses: pnpm/setup@a0881977cd8ea73b1ed212236c99ca10dcc80cf4
+      - if: ${{ !matrix.musl }}
+        uses: pnpm/setup@a0881977cd8ea73b1ed212236c99ca10dcc80cf4
         with:
           runtime: node@${{ matrix.node }}
           working-directory: bench
           cache: true
           require-lockfile: true
-      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - if: matrix.musl
+        uses: pnpm/setup@a0881977cd8ea73b1ed212236c99ca10dcc80cf4
+        with:
+          working-directory: bench
+          cache: true
+          require-lockfile: true
+      - if: ${{ !matrix.musl }}
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - run: node --version
       - run: node tools/check-zero-deps.mjs
       # The release's bill of materials is made from the same rules and must list no components.
       - run: node tools/make-sbom.mjs "$RUNNER_TEMP/sbom.cdx.json" && node -e "process.exit(require(process.argv[1]).components.length)" "$RUNNER_TEMP/sbom.cdx.json"
       # Which address `localhost` resolves to first differs between machines; the dev server answers on both loopback addresses.
       - name: How localhost resolves
-        if: runner.os != 'Windows'
         run: getent hosts localhost || true; cat /etc/hosts || true
       - run: cargo build --release
+      - run: ./target/release/rkp --version
       - run: cargo test --release
       - run: node tools/run-fixtures.mjs
       - run: node tools/run-defines.mjs
@@ -65,7 +86,7 @@ jobs:
       - run: node tools/run-jsx.mjs
       - run: node tools/test-federation-runtime.mjs
       - run: node tools/diff-semver.mjs
-      # Module federation in a real browser; the x64 runner has Chrome.
+      # Module federation in a real browser; only the x64 glibc runner has Chrome.
       - if: matrix.browser
         run: node tools/run-federation.mjs
         env:
@@ -100,33 +121,3 @@ jobs:
       - name: The word check did not run (no list set)
         if: env.RATHKIT_DENYLIST == ''
         run: echo "::warning::RATHKIT_DENYLIST is not set; the word check was skipped"
-
-  # The musl build (Alpine): the program has no C dependencies, so it runs there as it is built; this checks it does.
-  musl:
-    name: alpine (musl) node 24
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    container: node:24-alpine
-    env:
-      TS_MODULE: ${{ github.workspace }}/bench/node_modules/ts5
-    steps:
-      - run: apk add --no-cache git rust cargo python3 bash
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      # pnpm and the install of bench; the container's own Node is the one that runs the tests.
-      - uses: pnpm/setup@a0881977cd8ea73b1ed212236c99ca10dcc80cf4
-        with:
-          working-directory: bench
-          cache: true
-          require-lockfile: true
-      - run: cargo build --release
-      - run: ./target/release/rkp --version
-      - run: cargo test --release
-      - run: node tools/run-fixtures.mjs
-      - run: node tools/run-loaders.mjs
-      - run: node tools/run-plugins.mjs
-      - run: node tools/run-split.mjs
-      - run: node tools/run-watch.mjs
-      - run: node tools/run-serve.mjs
-      - run: node tools/test-npm-wrapper.mjs
