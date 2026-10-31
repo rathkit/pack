@@ -332,18 +332,33 @@ for (const name of ['rxjs', 'lodash', 'three']) {
     let log = '';
     server.stdout.on('data', (d) => (log += d));
     server.stderr.on('data', (d) => (log += d));
-    const profile = mkdtempSync(join(tmpdir(), 'hmr-profile-'));
-    const chrome = spawn(browser, ['--no-sandbox', '--disable-gpu', '--headless=new', `--user-data-dir=${profile}`, '--remote-debugging-port=0', 'about:blank'], { stdio: 'ignore' });
+    let profile;
+    let chrome;
+    const startChrome = () => {
+      profile = mkdtempSync(join(tmpdir(), 'hmr-profile-'));
+      chrome = spawn(browser, ['--no-sandbox', '--disable-gpu', '--headless=new', `--user-data-dir=${profile}`, '--remote-debugging-port=0', 'about:blank'], { stdio: 'ignore' });
+    };
+    startChrome();
     try {
       if (!(await until(() => /(?:127\.0\.0\.1|localhost):\d+/.test(log)))) throw new Error('the server did not start: ' + log);
       const port = /(?:localhost|127\.0\.0\.1):(\d+)/.exec(log)[1];
+      // The browser picks a free port and says which in a file of its profile. A runner's first launch can be slow, so it gets two
+      // tries of 30 seconds, each waiting for a page it can control, and a browser that never comes up is a clear failure.
       let targets;
-      await until(async () => {
-        const f = join(profile, 'DevToolsActivePort');
-        if (!existsSync(f)) return false;
-        targets = await fetch(`http://127.0.0.1:${readFileSync(f, 'utf8').split('\n')[0]}/json`).then((r) => r.json()).catch(() => undefined);
-        return Boolean(targets);
-      });
+      for (let attempt = 0; attempt < 2 && !targets; attempt++) {
+        if (attempt > 0) {
+          chrome.kill();
+          startChrome();
+        }
+        await until(async () => {
+          const f = join(profile, 'DevToolsActivePort');
+          if (!existsSync(f)) return false;
+          const list = await fetch(`http://127.0.0.1:${readFileSync(f, 'utf8').split('\n')[0]}/json`).then((r) => r.json()).catch(() => undefined);
+          if (Array.isArray(list) && list.some((t) => t.type === 'page')) targets = list;
+          return Boolean(targets);
+        }, 30000);
+      }
+      if (!targets) throw new Error('the browser did not open a page to control');
       const ws = new WebSocket(targets.find((t) => t.type === 'page').webSocketDebuggerUrl);
       await new Promise((r) => (ws.onopen = r));
       let id = 0;
