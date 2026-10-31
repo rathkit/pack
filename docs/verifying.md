@@ -49,6 +49,13 @@ npm audit signatures
 Versions with a suffix (`0.1.0-alpha.0`) are on the `next` tag only. The first versions of a package are published by
 hand and have no provenance statement (the release notes say which); later ones do.
 
+## crates.io
+
+`cargo install rathkit-pack --version <version>` builds the program from the crate on crates.io. crates.io has no provenance
+statements, so nothing there says which commit a crate came from. The tag does: the signed `v<version>` tag, and the
+checksums and signatures of the release files above, are the record of what that version is, and the crate's source is the
+`src` folder of that tag.
+
 ## Zero dependencies
 
 ```

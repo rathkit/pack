@@ -185,6 +185,21 @@ jobs:
           for f in npm-packed/*.tgz; do tar -tzf "$f" | grep -qx 'package/NOTICE' || { echo "$f has no NOTICE"; exit 1; }; done
           node -e "const d=require('./npm-out/pack/package.json').optionalDependencies; if (Object.keys(d).length!==7) { console.error(d); process.exit(1) }"
 
+  crate-pack:
+    # Every run: the crate is packed and built from its own files (nothing outside the include list is there), so a mistake shows before a tag does.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - name: Pack and build the crate, without uploading it
+        run: |
+          cargo publish --dry-run --locked
+          files=$(cargo package --list --locked)
+          for f in LICENSE NOTICE README.md Cargo.toml; do echo "$files" | grep -qx "$f" || { echo "the crate has no $f"; exit 1; }; done
+          echo "$files" | grep -Ev '^(src/|Cargo\.(toml|lock|toml\.orig)$|README\.md$|LICENSE$|NOTICE$|CHANGELOG\.md$|\.cargo_vcs_info\.json$)' && { echo "files outside the include list are in the crate"; exit 1; } || true
+
   npm:
     # The same binaries as npm packages: a launcher and one package per platform, staged with provenance. Nothing goes live here:
     # each version waits in npm until the owner approves it with two-factor authentication (docs/RELEASING.md).
@@ -227,3 +242,41 @@ jobs:
             npm stage publish "$file" --access public --tag "$tag" --provenance
           done
           npm stage publish "$launcher" --access public --tag "$tag" --provenance
+
+  crates:
+    # The crate on crates.io (cargo install rathkit-pack --version <version>). Publishing there is permanent: a version can be yanked
+    # but never removed or reused, and there is no staging, so the crates-io environment's reviewer is the only gate.
+    # Runs only when the repository variable CRATES_PUBLISH is "true". Trusted publishing (OIDC) needs the crate's settings on
+    # crates.io to name this repository, this workflow and the crates-io environment. No token is stored anywhere; the one this job
+    # gets expires in 30 minutes and is revoked when the job ends. (This is what rust-lang/crates-io-auth-action does, in curl, so that
+    # no extra action has to be allowed in the organization.)
+    needs: build
+    if: github.event_name == 'push' && vars.CRATES_PUBLISH == 'true'
+    runs-on: ubuntu-latest
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write # trusted publishing
+    env:
+      USER_AGENT: rathkit-pack release workflow (https://github.com/rathkit/pack)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - name: Get a short-lived token from crates.io
+        run: |
+          jwt=$(curl -sS --fail-with-body -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=crates.io" | jq -r .value)
+          echo "::add-mask::$jwt"
+          token=$(curl -sS --fail-with-body -X POST https://crates.io/api/v1/trusted_publishing/tokens -H 'Content-Type: application/json' -H "User-Agent: $USER_AGENT" -d "{\"jwt\":\"$jwt\"}" | jq -r .token)
+          test -n "$token" && test "$token" != null
+          echo "::add-mask::$token"
+          echo "CARGO_REGISTRY_TOKEN=$token" >> "$GITHUB_ENV"
+      - name: Publish
+        run: cargo publish --locked
+      - name: Revoke the token
+        if: always()
+        run: |
+          if [ -n "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            curl -sS -X DELETE https://crates.io/api/v1/trusted_publishing/tokens -H "Authorization: Bearer $CARGO_REGISTRY_TOKEN" -H "User-Agent: $USER_AGENT" || true
+          fi

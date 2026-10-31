@@ -2,7 +2,9 @@
 
 How a release of Rathkit Pack is made, and the steps only the owner can take. Nothing here publishes by itself: the
 `release` workflow builds, tests, lists and signs on every version tag, and stages the npm packages only when the repository
-variable `NPM_PUBLISH` is `true`. A staged version is not on npm until the owner approves it.
+variable `NPM_PUBLISH` is `true`, and publishes the crate to crates.io only when `CRATES_PUBLISH` is `true`. A staged npm
+version is not on npm until the owner approves it; crates.io has no staging, so approving the `crates-io` environment is the
+one step that publishes there.
 
 ## Versions and tags
 
@@ -25,6 +27,9 @@ variable `NPM_PUBLISH` is `true`. A staged version is not on npm until the owner
 6. The `npm` job (only when `NPM_PUBLISH` is `true`) waits for the owner to approve the `npm` environment, then stages the
    eight packages with provenance through npm trusted publishing: no npm token is stored anywhere.
 7. The owner approves the staged versions (below).
+8. The `crates` job (only when `CRATES_PUBLISH` is `true`) waits for the owner to approve the `crates-io` environment, gets a
+   30-minute token from crates.io through trusted publishing, runs `cargo publish --locked` and revokes the token. **That is
+   permanent**: a version on crates.io can be yanked but never removed, and its number can never be reused.
 
 By hand, `release` is a dry run: **Actions, release, Run workflow**, with a tag such as `v0.1.0-alpha.0`. Everything is
 built, tested and signed and kept as a workflow artifact; nothing is released or published.
@@ -58,3 +63,26 @@ is published by hand from the release's own tarballs, with the `next` tag and no
    alpha through the workflow soon after.
 
 The release notes of such a version say that it was published by hand and carries no provenance statement.
+
+## crates.io
+
+The crate is `rathkit-pack` (the `rkp` program and the `rathkit_pack` library), built from source by whoever installs it:
+`cargo install rathkit-pack --version <version>`. Cargo skips versions with a suffix unless the version is named.
+`Cargo.toml` lists what goes in the crate (`include`: `src`, `Cargo.toml`, `Cargo.lock`, the README, LICENSE, NOTICE and
+CHANGELOG), and every run of the `release` workflow packs and builds the crate from those files without uploading it.
+
+The first version is published by hand, because trusted publishing can only be set up for a crate that exists:
+
+1. On crates.io, sign in with GitHub and verify your email. Create an API token (Account Settings, API Tokens) named
+   `pack first publish` with only the `publish-new` scope, limited to the crate pattern `rathkit-pack`, and a short expiry.
+2. In a clean checkout of the release tag: `cargo publish --dry-run --locked`.
+3. Then `read -rs CARGO_REGISTRY_TOKEN; export CARGO_REGISTRY_TOKEN; cargo publish --locked` and paste the token. This keeps it
+   out of `~/.cargo/credentials.toml`.
+4. Revoke the token on crates.io.
+5. In the crate's settings, Trusted Publishing, add a GitHub publisher: owner `rathkit`, repository `pack`, workflow
+   `release.yml`, environment `crates-io`.
+6. In the repository, create the `crates-io` environment (required reviewer, tag rule `v*`, no admin bypass) and set the variable
+   `CRATES_PUBLISH` to `true`. Release the next version through the workflow.
+
+crates.io has no provenance statement for crates. What ties a crate to its source is the signed tag and the signed release
+files; see [verifying.md](verifying.md).

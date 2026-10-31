@@ -4,7 +4,12 @@ version = "0.1.0-alpha.0"
 edition = "2024"
 description = "A fast, zero-dependency JavaScript and TypeScript bundler"
 license = "Apache-2.0"
-publish = false
+repository = "https://github.com/rathkit/pack"
+homepage = "https://github.com/rathkit/pack#readme"
+readme = "README.md"
+keywords = ["bundler", "javascript", "typescript", "zero-dependency", "alpha"]
+categories = ["development-tools", "web-programming"]
+include = ["/src/**", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE", "/NOTICE", "/CHANGELOG.md"]
 
 [lib]
 name = "rathkit_pack"
