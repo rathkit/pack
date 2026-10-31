@@ -182,14 +182,17 @@ jobs:
           for dir in npm-out/*/; do (cd "$dir" && pnpm pack --pack-destination "$GITHUB_WORKSPACE/npm-packed" >/dev/null); done
           ls -l npm-packed
           test "$(ls npm-packed | wc -l)" = 8
+          for f in npm-packed/*.tgz; do tar -tzf "$f" | grep -qx 'package/NOTICE' || { echo "$f has no NOTICE"; exit 1; }; done
           node -e "const d=require('./npm-out/pack/package.json').optionalDependencies; if (Object.keys(d).length!==7) { console.error(d); process.exit(1) }"
 
   npm:
-    # The same binaries as npm packages: a launcher and one package per platform, published with provenance.
-    # Trusted publishing (OIDC) needs each package to name this repository and workflow in its npm settings.
+    # The same binaries as npm packages: a launcher and one package per platform, staged with provenance. Nothing goes live here:
+    # each version waits in npm until the owner approves it with two-factor authentication (docs/RELEASING.md).
+    # Trusted publishing (OIDC) needs each package to name this repository, this workflow and the npm environment in its npm settings.
     needs: build
     if: github.event_name == 'push' && vars.NPM_PUBLISH == 'true'
     runs-on: ubuntu-latest
+    environment: npm
     permissions:
       contents: read
       id-token: write # trusted publishing and the provenance statement
@@ -197,20 +200,30 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: pnpm/setup@a0881977cd8ea73b1ed212236c99ca10dcc80cf4
+      # npm itself does the staging, so this job uses the Node that comes with a new enough npm.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          runtime: node@24
-          working-directory: bench
-          install: false
+          node-version: "26"
+          registry-url: https://registry.npmjs.org
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: tarball-*
           path: dist
           merge-multiple: true
       - run: node tools/make-npm-packages.mjs --out npm-out --from dist
-      - name: Publish (a version with a suffix goes to the next tag, never latest)
+      - name: Stage with provenance (a version with a suffix goes to the next tag, never latest)
         run: |
+          npm --version
           tag=latest
           case "$TAG" in *-*) tag=next ;; esac
-          for dir in npm-out/pack-*; do pnpm publish "$dir" --provenance --access public --tag "$tag" --no-git-checks; done
-          pnpm publish npm-out/pack --provenance --access public --tag "$tag" --no-git-checks
+          mkdir npm-packed
+          for dir in npm-out/pack-*/ npm-out/pack/; do (cd "$dir" && npm pack --pack-destination "$GITHUB_WORKSPACE/npm-packed" >/dev/null); done
+          test "$(ls npm-packed | wc -l)" = 8
+          # The platform packages first and the launcher last. The ./ matters: npm reads a bare dir/name.tgz as a GitHub repository.
+          launcher="./npm-packed/rathkit-pack-${TAG#v}.tgz"
+          test -f "$launcher"
+          for file in ./npm-packed/*.tgz; do
+            [ "$file" = "$launcher" ] && continue
+            npm stage publish "$file" --access public --tag "$tag" --provenance
+          done
+          npm stage publish "$launcher" --access public --tag "$tag" --provenance
