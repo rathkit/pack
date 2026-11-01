@@ -360,7 +360,7 @@ fn the_metafile_lists_inputs_outputs_and_what_connects_them() {
     let meta = Json::parse(&std::fs::read_to_string(dir.join("meta/build.json")).unwrap()).unwrap();
     let inputs = meta.get("inputs").unwrap();
     for name in ["main.js", "lib/a.js", "lazy.js", "s.css"] {
-        assert!(inputs.get(name).is_some(), "input {name}");
+        assert!(inputs.get(name).is_some(), "input {name} is among {}", meta.get("inputs").map_or(String::new(), |i| match i { Json::Object(f) => f.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(", "), _ => String::new() }));
     }
     let imports: Vec<String> = inputs.get("main.js").unwrap().get("imports").and_then(Json::as_array).unwrap().iter().map(|i| format!("{}:{}", i.get("path").and_then(Json::as_str).unwrap(), i.get("kind").and_then(Json::as_str).unwrap())).collect();
     assert_eq!(imports, ["s.css:import-statement", "lib/a.js:import-statement", "lazy.js:dynamic-import"]);

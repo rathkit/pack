@@ -37,6 +37,10 @@ fn kind_name(kind: RequestKind) -> &'static str {
 }
 
 pub fn build(graph: &Graph, output: &Output, cwd: &Path) -> String {
+    // Modules are named by their real paths, so the project folder must be too: a folder given by a short or linked name
+    // (Windows 8.3 names, a symlinked parent) would otherwise leave every path absolute.
+    let real_cwd = std::fs::canonicalize(cwd).map(|c| crate::resolve::without_verbatim_prefix(&c)).unwrap_or_else(|_| cwd.to_path_buf());
+    let cwd = real_cwd.as_path();
     let mut inputs: Vec<(String, Json)> = Vec::new();
     for module in &graph.modules {
         // A made-up module (a plugin's virtual module, the federation runtime) has no place in the project.
