@@ -16,7 +16,7 @@ Everything else waits on this: provenance needs a public source repository, and 
 - [x] 0.4 Document what "alpha" promises and the version policy for 0.x; first release `0.1.0-alpha.0` on the `next` tag, never `latest`.
 - [ ] 0.5 Make the repository public and set up its GitHub settings *(maintainer)*.
 - [ ] 0.6 npm scope, packages and trusted publishing *(maintainer)*.
-- [ ] 0.7 Release dry run in CI, fix what it finds, publish `0.1.0-alpha.0`, check it with [verifying.md](verifying.md).
+- [x] 0.7 Release dry run in CI, fix what it finds, publish `0.1.0-alpha.0`, check it with [verifying.md](verifying.md).
 - [ ] 0.8 Decide what counts as ready to announce *(maintainer)*.
 
 Done when: the package installs from npm with provenance, `rkp bundle` works from a clean machine on Linux, macOS and
