@@ -16,9 +16,13 @@ What an alpha does promise, and checks on every change (`tools/check-promises.mj
 scripts in any package, a build that needs no network, provenance and checksums on every release. It promises nothing
 about stability.
 
-## 0.1.0-alpha.0
+## 0.1.0-alpha.0 - 2026-10-31
 
 First release.
+
+The registries only accept trusted publishing from a package that already exists, so the npm packages and the crate of this
+first version were published by hand, **without provenance**. Their files are the ones attached to this release: compare them
+with `SHA256SUMS` as [docs/verifying.md](docs/verifying.md) describes. Every later release is published by the release workflow, with provenance.
 
 ### Added
 
