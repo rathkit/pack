@@ -3,7 +3,7 @@
 // and what cannot work says so.
 //   node tools/test-plugin-objects.mjs
 import { createRequire } from 'node:module';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, realpathSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,7 +12,8 @@ import { tmpdir } from 'node:os';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 process.env.RATHKIT_PACK_BIN ??= join(root, 'target', 'release', 'rkp');
 const { build, serve } = createRequire(import.meta.url)(join(root, 'npm', 'pack', 'index.js'));
-const dir = mkdtempSync(join(tmpdir(), 'plugin-objects-'));
+// The build names modules by their real paths, and the temporary folder is not one on macOS (/var is /private/var) or Windows (8.3 names).
+const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'plugin-objects-')));
 const write = (name, text) => {
   mkdirSync(dirname(join(dir, name)), { recursive: true });
   writeFileSync(join(dir, name), text);

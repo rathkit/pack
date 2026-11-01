@@ -29,6 +29,8 @@ permissions:
 
 jobs:
   build:
+    # A hung test must fail the job, not hold it for six hours.
+    timeout-minutes: 40
     strategy:
       # One platform failing must not hide what the others do.
       fail-fast: false

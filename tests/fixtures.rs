@@ -45,6 +45,9 @@ impl OutputWithin for Command {
             // The script's own children (servers, browsers) are in its group, so they end with it and close the pipes.
             #[cfg(unix)]
             let _ = Command::new("kill").args(["-KILL", "--", &format!("-{}", child.id())]).status();
+            // Windows has no groups here: end the script and everything it started, which also closes the pipes.
+            #[cfg(windows)]
+            let _ = Command::new("taskkill").args(["/F", "/T", "/PID", &child.id().to_string()]).status();
             let _ = child.kill();
             let _ = child.wait();
         }
