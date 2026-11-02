@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::resolve::FileSystem;
+use crate::resolve::{Alias, FileSystem};
 
 /// One piece of a name pattern.
 #[derive(Clone, Debug, PartialEq)]
@@ -189,6 +189,32 @@ fn walk(fs: &dyn FileSystem, dir: &Path, rel: &mut Vec<String>, globs: &[Glob], 
         }
         rel.pop();
     }
+}
+
+/// `pattern` with a leading alias replaced: a path under the project becomes `/inside/the/project` and any other `../..` from the module.
+fn through_aliases(pattern: &str, aliases: &[Alias], root: &Path, module_dir: &Path) -> String {
+    let (mark, text) = match pattern.strip_prefix('!') {
+        Some(rest) => ("!", rest),
+        None => ("", pattern),
+    };
+    if text.starts_with("./") || text.starts_with("../") || text.starts_with('/') {
+        return pattern.to_string();
+    }
+    let Some(replaced) = aliases.iter().find_map(|a| a.substitute(text)) else { return pattern.to_string() };
+    let absolute = Path::new(&replaced);
+    if let Ok(inside) = absolute.strip_prefix(root) {
+        return format!("{mark}/{}", inside.to_string_lossy().replace('\\', "/"));
+    }
+    // Outside the project: as many `..` as it takes from the module's folder.
+    let mut up = String::new();
+    let mut base = module_dir.to_path_buf();
+    while !absolute.starts_with(&base) {
+        if !base.pop() {
+            return pattern.to_string();
+        }
+        up.push_str("../");
+    }
+    format!("{mark}{up}{}", absolute.strip_prefix(&base).unwrap_or(absolute).to_string_lossy().replace('\\', "/"))
 }
 
 /// The files that a list of patterns reaches (a `!` pattern takes files out), as absolute paths, found from `base_dir` or, for a pattern
@@ -474,7 +500,7 @@ fn relative_from(dir: &Path, file: &Path) -> String {
 
 /// Replaces every `import.meta.glob(...)` in `source`. `None` when there is none. `dirs` collects the
 /// directories that were read, so a file added to one starts another build when watching.
-pub fn rewrite(source: &str, module: &Path, root: &Path, fs: &dyn FileSystem, dirs: &mut Vec<PathBuf>) -> Result<Option<String>, String> {
+pub fn rewrite(source: &str, module: &Path, root: &Path, fs: &dyn FileSystem, aliases: &[Alias], dirs: &mut Vec<PathBuf>) -> Result<Option<String>, String> {
     let starts = calls(source);
     if starts.is_empty() {
         return Ok(None);
@@ -561,6 +587,8 @@ pub fn rewrite(source: &str, module: &Path, root: &Path, fs: &dyn FileSystem, di
             Some(b) => normalize(&module_dir.join(b)),
             None => module_dir.to_path_buf(),
         };
+        // A pattern may begin with an alias (`@/views/**/*.vue`), as in Vite: it stands for the path it is an alias of.
+        let patterns: Vec<String> = patterns.iter().map(|p| through_aliases(p, aliases, root, module_dir)).collect();
         let mut files = expand(&patterns, &base_dir, root, fs, dirs).map_err(&fail)?;
         files.retain(|f| f != module);
         files.sort();

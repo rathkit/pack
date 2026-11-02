@@ -941,6 +941,10 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
         None => None,
     };
     if let Some(host) = &plugin_host {
+        // The config's aliases are looked up by the plugin that resolves them; here they are for the patterns of `import.meta.glob`.
+        for (name, target) in &host.info.aliases {
+            options.resolve.alias.push(rathkit_pack::resolve::Alias { pattern: name.clone(), replacements: vec![target.clone()], exact_only: false });
+        }
         // The config's definitions come first, so `--define` on the command line wins.
         for (key, value) in &host.info.define {
             match rathkit_pack::define::Define::parse(key, value) {

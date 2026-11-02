@@ -146,6 +146,15 @@ impl Alias {
         self.capture(specifier).is_some()
     }
 
+    /// The first replacement that is an absolute path, with what the pattern captured filled in: `@/views/*.vue` for `@` -> `/src` is
+    /// `/src/views/*.vue`. For patterns that are not module names (globs), which are not looked up as modules.
+    pub fn substitute(&self, specifier: &str) -> Option<String> {
+        let captured = self.capture(specifier)?;
+        self.replacements.iter().filter(|r| Path::new(r.as_str()).is_absolute()).map(|replacement| {
+            if replacement.contains('*') { replacement.replace('*', captured) } else { format!("{replacement}{}", if self.pattern.contains('*') { "" } else { captured }) }
+        }).next()
+    }
+
     /// What the specifier leaves over after the pattern, if the pattern matches it.
     fn capture<'s>(&self, specifier: &'s str) -> Option<&'s str> {
         match self.pattern.split_once('*') {

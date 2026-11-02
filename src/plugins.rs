@@ -30,6 +30,8 @@ pub struct HostInfo {
     pub hooks: HashSet<String>,
     /// `define` entries from the config (and `DefinePlugin`), as `(key, expression)`.
     pub define: Vec<(String, String)>,
+    /// `resolve.alias` entries from the config that are a name and an absolute path, as `(name, path)`.
+    pub aliases: Vec<(String, String)>,
     /// Entry points the config names (Rollup's `input`).
     pub input: Vec<String>,
     /// The options of a module federation plugin in the config, as JSON.
@@ -298,6 +300,15 @@ impl PluginHost {
         host.info.federation = result.get("federation").filter(|f| !matches!(f, Json::Null)).cloned();
         if let Some(Json::Object(hooks)) = result.get("hooks") {
             host.info.hooks = hooks.iter().filter(|(_, v)| v.as_bool() == Some(true)).map(|(k, _)| k.clone()).collect();
+        }
+        if let Some(aliases) = result.get("aliases").and_then(Json::as_array) {
+            for pair in aliases {
+                if let Some([name, target]) = pair.as_array() {
+                    if let (Some(name), Some(target)) = (name.as_str(), target.as_str()) {
+                        host.info.aliases.push((name.to_string(), target.to_string()));
+                    }
+                }
+            }
         }
         if let Some(defines) = result.get("define").and_then(Json::as_array) {
             for pair in defines {

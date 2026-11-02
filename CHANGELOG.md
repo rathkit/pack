@@ -26,6 +26,8 @@ about stability.
 
 ### Fixed
 
+- `import.meta.glob` patterns may start with an alias (`@/views/**/*.vue`), from `--alias` or the configuration's `resolve.alias`
+  when it maps a name to a path.
 - A configuration file that imports another file without its extension (`./config/options`, usual in a TypeScript `vite.config.ts`)
   is bundled first, as Vite does, when Node cannot follow the import.
 - A part of a file that a plugin names by language (`Page.vue?vue&type=script&lang.ts`) is read as that language, so the

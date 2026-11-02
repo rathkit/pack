@@ -1,0 +1,2 @@
+/src/views/home.js /src/views/sub/deep.js
+home deep

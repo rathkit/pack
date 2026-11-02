@@ -639,7 +639,7 @@ impl Context<'_> {
                 // `import.meta.glob(...)` becomes the imports of the files it names.
                 if text.contains("import.meta.glob") {
                     let mut dirs = Vec::new();
-                    let rewritten = crate::glob::rewrite(&text, path, self.cwd, self.resolver.file_system(), &mut dirs).map_err(|m| error(m, None))?;
+                    let rewritten = crate::glob::rewrite(&text, path, self.cwd, self.resolver.file_system(), &self.options.resolve.alias, &mut dirs).map_err(|m| error(m, None))?;
                     self.state.0.lock().unwrap().watch_dirs.extend(dirs);
                     if let Some(rewritten) = rewritten {
                         text = rewritten;

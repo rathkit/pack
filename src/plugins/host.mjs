@@ -1258,6 +1258,9 @@ async function init(params) {
     plugins: plugins.map((p) => p.name ?? 'anonymous'),
     hooks,
     define: Object.entries(configOptions.define).map(([k, v]) => [k, typeof v === 'string' ? v : JSON.stringify(v)]),
+    // Aliases that are a name and a path (what `import.meta.glob` patterns need); the others (patterns, functions) work through the plugin.
+    aliases: toArray(Array.isArray(configOptions.alias) ? configOptions.alias : Object.entries(configOptions.alias ?? {}).map(([find, replacement]) => ({ find, replacement })))
+      .filter((a) => typeof a?.find === 'string' && typeof a.replacement === 'string' && path.isAbsolute(a.replacement)).map((a) => [a.find, a.replacement]),
     conditions: resolveExtras.conditions,
     mainFields: resolveExtras.mainFields,
     input: input ? (typeof input === 'string' ? [input] : Array.isArray(input) ? input : Object.values(input)) : [],
