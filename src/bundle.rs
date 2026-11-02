@@ -199,6 +199,8 @@ pub struct Options {
     /// directory and path. Otherwise they name the bundle itself, which suits code that finds
     /// files next to the bundle, and breaks code that looks for files next to its own source.
     pub original_paths: bool,
+    /// The output is for a browser (a page, the dev server): the shims that import Node's own modules (`require`, `__dirname`) are not written.
+    pub browser: bool,
     /// Shorten names and remove whitespace in the finished files.
     pub minify: crate::minify::Options,
     /// Write a source map for each output file.
@@ -253,7 +255,7 @@ pub enum SourceMapMode {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { splitting: false, format: Format::Esm, global_name: None, globals: Vec::new(), original_paths: false, minify: crate::minify::Options::default(), sourcemap: SourceMapMode::None, sources_content: true, map_base: None, file_name: None, hot: false, hmr: false, react_refresh: false, entry_names: Vec::new(), federation: None, banner_js: None, footer_js: None, banner_css: None, footer_css: None, drop_console: false, drop_debugger: false, entry_template: None, chunk_template: None, out_extensions: Vec::new(), legal_comments: crate::legal::LegalComments::Eof, target: crate::target::Target::ESNEXT }
+        Options { splitting: false, format: Format::Esm, global_name: None, globals: Vec::new(), original_paths: false, browser: false, minify: crate::minify::Options::default(), sourcemap: SourceMapMode::None, sources_content: true, map_base: None, file_name: None, hot: false, hmr: false, react_refresh: false, entry_names: Vec::new(), federation: None, banner_js: None, footer_js: None, banner_css: None, footer_css: None, drop_console: false, drop_debugger: false, entry_template: None, chunk_template: None, out_extensions: Vec::new(), legal_comments: crate::legal::LegalComments::Eof, target: crate::target::Target::ESNEXT }
     }
 }
 
@@ -375,6 +377,7 @@ struct Bundler<'a> {
     /// Entry exports whose value is an expression: `var alias = expr;` after everything ran.
     alias_values: Vec<(ModuleId, Key, Vec<Piece>)>,
     original_paths: bool,
+    browser: bool,
     hot: bool,
     registry: bool,
     react_refresh: bool,
@@ -493,6 +496,7 @@ impl<'a> Bundler<'a> {
             errors: Vec::new(),
             alias_values: Vec::new(),
             original_paths: false,
+            browser: false,
             hot: false,
             registry: false,
             react_refresh: false,
@@ -527,6 +531,7 @@ impl<'a> Bundler<'a> {
 
     fn run(&mut self, options: &Options) -> Result<Output, Vec<Diagnostic>> {
         self.original_paths = options.original_paths;
+        self.browser = options.browser;
         self.entry_names = options.entry_names.clone();
         self.hot = options.hot;
         self.registry = options.hmr;
@@ -2701,6 +2706,11 @@ impl<'a> Scanner<'_, 'a> {
             NodeKind::TsEnum { .. } => self.ts_enum_edit(node),
             NodeKind::TsNamespace { .. } => self.ts_namespace_edit(node),
             NodeKind::ClassField { key, value } => {
+                // The decorators of a field are code too (their names may be renamed in the output).
+                let decorators: Vec<NodeId> = ast.decorators_of(node).iter().map(|d| d.expr).collect();
+                for expr in decorators {
+                    self.walk_in(expr, wrapped, this_bound);
+                }
                 self.walk_in(key, wrapped, this_bound);
                 if let Some(value) = value {
                     self.walk_in(value, wrapped, true);
@@ -3300,10 +3310,10 @@ impl Bundler<'_> {
                 }
             }
         }
-        if self.helpers.require_shim && format == Format::Esm {
+        if self.helpers.require_shim && format == Format::Esm && !self.browser {
             out.push_str("import { createRequire as __createRequire } from \"node:module\";\nvar require = __createRequire(import.meta.url);\n");
         }
-        if self.helpers.path_shim && format == Format::Esm {
+        if self.helpers.path_shim && format == Format::Esm && !self.browser {
             out.push_str("import { fileURLToPath as __fileURLToPath } from \"node:url\";\nimport { dirname as __pathDirname } from \"node:path\";\nvar __filename = __fileURLToPath(import.meta.url);\nvar __dirname = __pathDirname(__filename);\n");
         }
         if format == Format::Esm {
@@ -4027,14 +4037,16 @@ impl Scanner<'_, '_> {
                     _ => {}
                 }
             }
+            // `{...list}` as a child spreads into the children, so they are an array even when it is the only one (as TypeScript writes it).
+            let spread_child = child_ids.iter().any(|&c| matches!(ast[c].kind, NodeKind::Spread(_)));
             let function = match child_ids.len() {
                 _ if jsx.dev => "jsxDEV",
-                0 | 1 => "jsx",
+                0 | 1 if !spread_child => "jsx",
                 _ => "jsxs",
             };
             match child_ids.len() {
                 0 => {}
-                1 => {
+                1 if !spread_child => {
                     let mut entry = vec![text("children: ")];
                     entry.extend(self.child_pieces(child_ids[0]));
                     entries.push(entry);
@@ -4076,7 +4088,7 @@ impl Scanner<'_, '_> {
                     None => pieces.push(text("void 0")),
                 }
                 let file = json_string(&self.module.path.to_string_lossy());
-                pieces.push(text(&format!(", {}, {{ fileName: {file}, lineNumber: {}, columnNumber: {} }}, this", child_ids.len() > 1, line + 1, column + 1)));
+                pieces.push(text(&format!(", {}, {{ fileName: {file}, lineNumber: {}, columnNumber: {} }}, this", child_ids.len() > 1 || spread_child, line + 1, column + 1)));
             } else if let Some(key) = key {
                 pieces.push(text(", "));
                 pieces.extend(key);

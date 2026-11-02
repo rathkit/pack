@@ -69,7 +69,7 @@ async function one(p) {
   if (p.kind === 'app' && browser) {
     const outdir = p.build[p.build.indexOf('--outdir') + 1] || 'dist';
     const page = await checkPage(path.join(where, outdir), p.expect?.page, browser);
-    if (!page.ok) return { ok: false, step: 'page', detail: page.problems.join('\n'), ms };
+    if (!page.ok) return { ok: false, step: 'page', detail: `${page.problems.join('\n')}\nbody: ${page.html}${page.log.length ? '\nlog: ' + page.log.join('\n     ') : ''}`, ms };
   }
   if (p.kind === 'library' && p.expect?.exports) {
     const file = path.join(where, p.expect.files[0]);
@@ -93,7 +93,7 @@ async function one(p) {
 
 const results = [];
 for (const p of list) {
-  process.stdout.write(`${p.name.padEnd(24)}`);
+  process.stdout.write(`${p.name.padEnd(28)}`);
   let r = { name: p.name, kind: p.kind, sha: p.sha, ...(await one(p)) };
   // A known gap is expected to fail; one that passes is news (the entry should lose its `expectFail`).
   if (p.expectFail) r = r.ok ? { ...r, flagged: true } : { ...r, ok: true, expected: true, step: r.step, detail: r.detail };

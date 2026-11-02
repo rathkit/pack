@@ -3,7 +3,7 @@
 //
 //   import { findBrowser, checkPage } from './lib/browser-check.mjs';
 //   const result = await checkPage('/path/to/dist', { allowErrors: ['regex'], text: 'regex', selector: '#root' });
-//   // { ok, problems: [string], text: 'what the page shows (first 200 characters)' }
+//   // { ok, problems: [string], text: 'what the page shows (first 200 characters)', html: 'the start of the body, to see what is there', log: ['console messages and outside requests'] }
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -63,6 +63,7 @@ export async function checkPage(dir, expect = {}, browser = findBrowser()) {
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'page-check-'));
   let chrome;
   const problems = [];
+  const log = [];
   const note = (text) => {
     if (!allowed.some((r) => r.test(text)) && !problems.includes(text)) problems.push(text);
   };
@@ -103,10 +104,14 @@ export async function checkPage(dir, expect = {}, browser = findBrowser()) {
           note(`uncaught: ${p.exceptionDetails?.exception?.description ?? p.exceptionDetails?.text}`.split('\n').slice(0, 3).join(' | '));
           break;
         case 'Runtime.consoleAPICalled':
+          if (log.length < 20) log.push(`${p.type}: ${(p.args ?? []).map((a) => a.value ?? a.description ?? '').join(' ')}`.slice(0, 200));
           if (p.type === 'error') note(`console.error: ${(p.args ?? []).map((a) => a.value ?? a.description ?? '').join(' ')}`.slice(0, 300));
           break;
         case 'Network.requestWillBeSent':
           requests.set(p.requestId, p.request.url);
+          // `node:module` and the like: a browser cannot load them, and the failure of a module graph is otherwise silent.
+          if (!/^(https?|data|blob|about|chrome-extension):/.test(p.request.url)) note(`request for ${p.request.url.slice(0, 80)}, which a browser cannot load`);
+          if (log.length < 20 && !p.request.url.startsWith(origin)) log.push(`request: ${p.request.url.slice(0, 120)}`);
           break;
         case 'Network.responseReceived':
           // Only the site's own files count; a page that calls an outside service gets what the network gives it.
@@ -132,8 +137,9 @@ export async function checkPage(dir, expect = {}, browser = findBrowser()) {
     if (children === -1) note(`no element matches ${expect.selector}`);
     else if (!text && !(await evaluate('document.body.querySelectorAll("img,canvas,svg,video,input,button").length'))) note('the page shows nothing');
     if (expect.text && !new RegExp(expect.text).test(text)) note(`the page text does not match /${expect.text}/: ${text}`);
+    const html = String((await evaluate('document.body.innerHTML')) ?? '').replace(/\s+/g, ' ').slice(0, 400);
     ws.close();
-    return { ok: problems.length === 0, problems, text };
+    return { ok: problems.length === 0, problems, text, html, log };
   } finally {
     chrome?.kill();
     server.close();

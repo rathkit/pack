@@ -550,7 +550,8 @@
           "selector": "#root",
           "text": "."
         }
-      }
+      },
+      "expectFail": "Rspack's own plugins (HtmlRspackPlugin) need its compiler API (compiler.__internal__registerBuiltinPlugin)"
     },
     {
       "name": "rspack-html-webpack-plugin",
@@ -573,7 +574,8 @@
         "files": [
           "dist/index.html"
         ]
-      }
+      },
+      "expectFail": "webpack and Rspack name the default entry chunk main.js, rkp writes bundle.js, so the template's <script src=\"./main.js\"> is a 404"
     }
   ]
 }

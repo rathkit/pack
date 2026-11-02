@@ -971,6 +971,15 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
         }
         options.plugins = Some(host.clone());
     }
+    // A program for a browser (the dev server, a page, `--platform-browser`) has no `process`: as in Vite, `process.env.NODE_ENV` is a constant
+    // there (`NODE_ENV` of the environment if it is set), and a `--define` of it wins.
+    if serve || !options.node_builtins || entries.iter().any(|e| e.to_ascii_lowercase().ends_with(".html")) {
+        bundle_options.browser = true;
+        let value = std::env::var("NODE_ENV").ok().filter(|v| !v.is_empty()).unwrap_or_else(|| if serve { "development" } else { "production" }.to_string());
+        if let Ok(define) = rathkit_pack::define::Define::parse("process.env.NODE_ENV", &format!("{value:?}")) {
+            options.defines.add_default(define);
+        }
+    }
     // An html page names its entries: the module scripts it points at. They are built, and the page is written again pointing at the built files.
     let mut pages: Vec<Page> = Vec::new();
     if !serve {

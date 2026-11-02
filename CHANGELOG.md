@@ -26,6 +26,13 @@ about stability.
 
 ### Fixed
 
+- In a page build, the dev server and `--platform-browser`, `process.env.NODE_ENV` is a constant (`production` for a build, `development`
+  for the server, or the environment's `NODE_ENV`; `--define` wins), as in Vite. Those outputs also no longer start with
+  `import ... from "node:module"` or `"node:url"` (the `require` and `__dirname` shims), which a browser cannot load and which
+  stopped every chunk of a page that had any CommonJS code in it.
+- A JSX spread child (`<List>{...items}</List>`) builds in the automatic runtime (`children: [...items]`).
+- A decorator on a class field uses the output's names for what it refers to (it kept the source name when the bundler had renamed an
+  import, as with Lit's `@property`).
 - A script may import a file of `public/` by its address (`import icons from '/icons.svg'`, which a Vue template with `<use href="/icons.svg#a">`
   becomes): the project folder is tried, then `public/`, when no such file is on the disk.
 - `import.meta.glob` patterns may start with an alias (`@/views/**/*.vue`), from `--alias` or the configuration's `resolve.alias`

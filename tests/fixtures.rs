@@ -672,3 +672,33 @@ fn what_a_target_cannot_have_stops_the_build_and_is_named() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_page_has_node_env_as_a_constant_and_a_program_for_node_keeps_it() {
+    let dir = std::env::temp_dir().join(format!("rkp-node-env-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("index.html"), "<!doctype html><script type=\"module\" src=\"/main.js\"></script>").unwrap();
+    std::fs::write(dir.join("main.js"), "import legacy from './legacy.cjs';\nif (process.env.NODE_ENV === 'production') console.log('PROD_BRANCH', legacy); else console.log('DEV_BRANCH');\n").unwrap();
+    // A CommonJS file that looks at `require` makes a Node program load Node's `module`; a page cannot.
+    std::fs::write(dir.join("legacy.cjs"), "module.exports = typeof require;\n").unwrap();
+    let build = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_rkp")).args(args).current_dir(&dir).env_remove("NODE_ENV").output().expect("rkp starts");
+        assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    let read = |path: &str| std::fs::read_to_string(dir.join(path)).unwrap();
+    // A page: a browser has no `process`, so the build decides, and the branch that is not taken is gone.
+    build(&["bundle", "index.html", "--outdir", "page"]);
+    let page = std::fs::read_dir(dir.join("page")).unwrap().filter_map(|e| e.ok()).map(|e| e.path()).find(|p| p.extension().is_some_and(|e| e == "js")).expect("a script was written");
+    let script = std::fs::read_to_string(page).unwrap();
+    assert!(!script.contains("process.env") && script.contains("PROD_BRANCH") && !script.contains("DEV_BRANCH"), "{script}");
+    assert!(!script.contains("node:module") && !script.contains("node:url"), "a page may not import Node's modules: {script}");
+    // What the user defines wins.
+    build(&["bundle", "index.html", "--outdir", "page2", "--define", "process.env.NODE_ENV=\"development\""]);
+    let page = std::fs::read_dir(dir.join("page2")).unwrap().filter_map(|e| e.ok()).map(|e| e.path()).find(|p| p.extension().is_some_and(|e| e == "js")).unwrap();
+    let script = std::fs::read_to_string(page).unwrap();
+    assert!(script.contains("DEV_BRANCH") && !script.contains("PROD_BRANCH"), "{script}");
+    // A program for Node reads the variable when it runs.
+    build(&["bundle", "main.js", "--outfile", "node.mjs"]);
+    assert!(read("node.mjs").contains("process.env.NODE_ENV") && read("node.mjs").contains("node:module"), "{}", read("node.mjs"));
+    std::fs::remove_dir_all(&dir).ok();
+}
