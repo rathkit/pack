@@ -24,6 +24,10 @@ about stability.
   is bundled first, as Vite does, when Node cannot follow the import.
 - A part of a file that a plugin names by language (`Page.vue?vue&type=script&lang.ts`) is read as that language, so the
   TypeScript in a Vue `<script setup lang="ts">` block builds.
+- A TypeScript function overload signature inside another function is removed from the output (it was left as a
+  bodiless `function f(obj)`, a syntax error).
+- In a TypeScript file, `export { Draft } from "./x"` of a name that module does not export is taken to be a type and left out
+  of the output, as `tsc` and esbuild do, and no longer an error.
 
 ## 0.1.0-alpha.1 - 2026-11-01
 

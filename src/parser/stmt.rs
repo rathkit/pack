@@ -478,7 +478,14 @@ impl<'a> Parser<'a> {
             return self.parse_ts_enum(start, true);
         }
         match self.tok.kind {
-            Kind::Keyword(Kw::Function) if !self.tok.escaped => self.parse_function(start, false, true, true),
+            Kind::Keyword(Kw::Function) if !self.tok.escaped => {
+                let function = self.parse_function(start, false, true, true)?;
+                // An overload signature has no body and leaves nothing behind, wherever it is (inside a function too).
+                if self.ts && matches!(self.ast[function].kind, NodeKind::Empty) {
+                    return Ok(self.ts_empty_statement(start));
+                }
+                Ok(function)
+            }
             Kind::Keyword(Kw::Class) if !self.tok.escaped => self.parse_class(start, true, true),
             Kind::Keyword(Kw::Const) if !self.tok.escaped => self.parse_var_statement(VarKind::Const),
             _ if is_let_decl => self.parse_var_statement(VarKind::Let),

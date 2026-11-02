@@ -92,6 +92,8 @@ pub fn link(graph: &Graph) -> Linked {
             let mut set = Vec::new();
             match linker.follow(&origin, &mut set) {
                 Lookup::Found(_) => {}
+                // In a TypeScript file `export { Draft } from './x'` may name a type, which is gone from the output (as `tsc` and esbuild treat it).
+                Lookup::NotFound if module.parsed.as_ref().is_some_and(|p| p.is_ts) => {}
                 Lookup::NotFound => linked.diagnostics.push(linker.missing(module.id, *request, name, graph.module(module.id).ast_pos(export.node))),
                 Lookup::Ambiguous => linked.diagnostics.push(linker.ambiguous(module.id, *request, name, graph.module(module.id).ast_pos(export.node))),
             }
