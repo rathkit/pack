@@ -18,6 +18,12 @@ about stability.
 
 ## Unreleased
 
+### Added
+
+- Less, Sass (`sass-embedded` or `sass`) and Stylus files are compiled when the compiler is installed in the project, as Vite does,
+  and read as style sheets (including `.module.scss`). This applies to builds that use a configuration file, since the
+  compilers run in the plugin host; a project that lists its own plugin for one of these languages keeps it.
+
 ### Fixed
 
 - A configuration file that imports another file without its extension (`./config/options`, usual in a TypeScript `vite.config.ts`)

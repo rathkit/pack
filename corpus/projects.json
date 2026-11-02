@@ -1,45 +1,378 @@
 {
-  "note": "Pinned open-source projects built with rkp (tools/run-corpus.mjs). Each entry is a repository at one commit; `build` is the rkp command line run in `dir`; `expect` says what a good build looks like.",
+  "note": "Pinned open-source projects built with rkp (tools/run-corpus.mjs). Each entry is a repository at one commit; `build` is the rkp command line run in `dir`; `expect` says what a good build looks like. `installArgs` adds options to `pnpm install` (`--trust-lockfile` skips pnpm's supply-chain check of a lockfile it distrusts); `dropLockfile` resolves versions afresh when the project's lockfile is in a format this pnpm cannot read, so that project is not pinned past its commit.",
   "projects": [
     {
       "name": "vue3-realworld",
       "kind": "app",
       "repo": "https://github.com/mutoe/vue3-realworld-example-app",
       "sha": "741c215ef0f674f90fcb03c5493a1b3a3a7f1b03",
-      "build": ["bundle", "index.html", "--outdir", "dist", "--config", "vite.config.ts"],
-      "expect": { "files": ["dist/index.html"] }
+      "build": [
+        "bundle",
+        "index.html",
+        "--outdir",
+        "dist",
+        "--config",
+        "vite.config.ts"
+      ],
+      "expect": {
+        "files": [
+          "dist/index.html"
+        ]
+      }
     },
     {
       "name": "mitt",
       "kind": "library",
       "repo": "https://github.com/developit/mitt",
       "sha": "6b41670516ed8e8b738612f60491995470aa63b3",
-      "build": ["bundle", "src/index.ts", "--format", "esm", "--outfile", "out/mitt.mjs"],
-      "expect": { "files": ["out/mitt.mjs"], "exports": ["default"] }
+      "build": [
+        "bundle",
+        "src/index.ts",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/mitt.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/mitt.mjs"
+        ],
+        "exports": [
+          "default"
+        ]
+      }
     },
     {
       "name": "zustand",
       "kind": "library",
       "repo": "https://github.com/pmndrs/zustand",
       "sha": "382d29c485e67018c06e75ec7235130d0968522c",
-      "build": ["bundle", "src/vanilla.ts", "--format", "esm", "--outfile", "out/vanilla.mjs"],
-      "expect": { "files": ["out/vanilla.mjs"], "exports": ["createStore"] }
+      "build": [
+        "bundle",
+        "src/vanilla.ts",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/vanilla.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/vanilla.mjs"
+        ],
+        "exports": [
+          "createStore"
+        ]
+      }
     },
     {
       "name": "nanoid",
       "kind": "library",
       "repo": "https://github.com/ai/nanoid",
       "sha": "35ea7d02c9f01d7f3d2293cc97829ff16d1e8117",
-      "build": ["bundle", "index.js", "--format", "esm", "--platform-browser", "--outfile", "out/nanoid.mjs"],
-      "expect": { "files": ["out/nanoid.mjs"], "exports": ["nanoid", "customAlphabet"] }
+      "build": [
+        "bundle",
+        "index.js",
+        "--format",
+        "esm",
+        "--platform-browser",
+        "--outfile",
+        "out/nanoid.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/nanoid.mjs"
+        ],
+        "exports": [
+          "nanoid",
+          "customAlphabet"
+        ]
+      }
     },
     {
       "name": "immer",
       "kind": "library",
       "repo": "https://github.com/immerjs/immer",
       "sha": "75a290e44ba14bd723c8ef8546b6559c8ef3ae88",
-      "build": ["bundle", "src/immer.ts", "--format", "esm", "--outfile", "out/immer.mjs"],
-      "expect": { "files": ["out/immer.mjs"], "exports": ["produce", "enablePatches"] }
+      "build": [
+        "bundle",
+        "src/immer.ts",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/immer.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/immer.mjs"
+        ],
+        "exports": [
+          "produce",
+          "enablePatches"
+        ]
+      }
+    },
+    {
+      "name": "clsx",
+      "kind": "library",
+      "repo": "https://github.com/lukeed/clsx",
+      "sha": "925494cf31bcd97d3337aacd34e659e80cae7fe2",
+      "install": false,
+      "build": [
+        "bundle",
+        "src/index.js",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/clsx.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/clsx.mjs"
+        ],
+        "exports": [
+          "default"
+        ],
+        "smoke": {
+          "code": "m.default(['a',{b:true,c:false}],'d')",
+          "equals": "a b d"
+        }
+      }
+    },
+    {
+      "name": "dayjs",
+      "kind": "library",
+      "repo": "https://github.com/iamkun/dayjs",
+      "sha": "436bde0bcded312781cbe45dc2b0ef079a36d8e3",
+      "install": false,
+      "build": [
+        "bundle",
+        "src/index.js",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/dayjs.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/dayjs.mjs"
+        ],
+        "exports": [
+          "default"
+        ],
+        "smoke": {
+          "code": "m.default('2024-03-05').format('YYYY')",
+          "equals": "2024"
+        }
+      }
+    },
+    {
+      "name": "ky",
+      "kind": "library",
+      "repo": "https://github.com/sindresorhus/ky",
+      "sha": "3541888878c4d303a8bc2ad61815f4e048f55a5d",
+      "install": false,
+      "build": [
+        "bundle",
+        "source/index.ts",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/ky.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/ky.mjs"
+        ],
+        "exports": [
+          "default",
+          "HTTPError"
+        ],
+        "smoke": {
+          "code": "typeof m.default.create",
+          "equals": "function"
+        }
+      }
+    },
+    {
+      "name": "commander",
+      "kind": "library",
+      "repo": "https://github.com/tj/commander.js",
+      "sha": "ba6d13ddb4243e5913367734f8c159089ffe7834",
+      "install": false,
+      "build": [
+        "bundle",
+        "index.js",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/commander.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/commander.mjs"
+        ],
+        "exports": [
+          "program",
+          "Command"
+        ],
+        "smoke": {
+          "code": "new m.Command('x').option('-a').parse(['n','x','-a']).opts().a",
+          "equals": "true"
+        }
+      }
+    },
+    {
+      "name": "semver",
+      "kind": "library",
+      "repo": "https://github.com/npm/node-semver",
+      "sha": "b37b033b585ad5e575afeccadb426ea41bc6cea4",
+      "install": false,
+      "build": [
+        "bundle",
+        "index.js",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/semver.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/semver.mjs"
+        ],
+        "exports": [
+          "default"
+        ],
+        "smoke": {
+          "code": "m.default.satisfies('1.2.3','^1.0.0')",
+          "equals": "true"
+        }
+      }
+    },
+    {
+      "name": "kleur",
+      "kind": "library",
+      "repo": "https://github.com/lukeed/kleur",
+      "sha": "fa3454483899ddab550d08c18c028e6db1aab0e5",
+      "install": false,
+      "build": [
+        "bundle",
+        "index.mjs",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/kleur.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/kleur.mjs"
+        ],
+        "exports": [
+          "default"
+        ],
+        "smoke": {
+          "code": "typeof m.default.red('x')",
+          "equals": "string"
+        }
+      }
+    },
+    {
+      "name": "picocolors",
+      "kind": "library",
+      "repo": "https://github.com/alexeyraspopov/picocolors",
+      "sha": "0e7c4af2de299dd7bc5916f2bddd151fa2f66740",
+      "install": false,
+      "build": [
+        "bundle",
+        "picocolors.js",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/picocolors.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/picocolors.mjs"
+        ],
+        "exports": [
+          "default"
+        ],
+        "smoke": {
+          "code": "typeof m.default.createColors",
+          "equals": "function"
+        }
+      }
+    },
+    {
+      "name": "marked",
+      "kind": "library",
+      "repo": "https://github.com/markedjs/marked",
+      "sha": "ba50aa95636ac8f97f46446bbfeb04592ed22216",
+      "install": false,
+      "build": [
+        "bundle",
+        "src/marked.ts",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/marked.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/marked.mjs"
+        ],
+        "exports": [
+          "marked",
+          "Lexer",
+          "Parser"
+        ],
+        "smoke": {
+          "code": "m.marked('# hi').trim()",
+          "equals": "<h1>hi</h1>"
+        }
+      }
+    },
+    {
+      "name": "conduit-react",
+      "kind": "app",
+      "repo": "https://github.com/yoonge/conduit-react",
+      "sha": "cb1d7e8f62c009ebf2254ada2e786a0dacc4b23c",
+      "build": [
+        "bundle",
+        "index.html",
+        "--outdir",
+        "dist",
+        "--config",
+        "vite.config.ts"
+      ],
+      "expect": {
+        "files": [
+          "dist/index.html"
+        ]
+      },
+      "dropLockfile": true
+    },
+    {
+      "name": "vue-naive-admin",
+      "kind": "app",
+      "repo": "https://github.com/zclzone/vue-naive-admin",
+      "sha": "a55f0a2e6fe0561ce62c3452b96ec4b4cbcb8553",
+      "build": [
+        "bundle",
+        "index.html",
+        "--outdir",
+        "dist",
+        "--config",
+        "vite.config.js"
+      ],
+      "expect": {
+        "files": [
+          "dist/index.html"
+        ]
+      },
+      "installArgs": [
+        "--trust-lockfile",
+        "--shamefully-hoist"
+      ]
     }
   ]
 }

@@ -967,6 +967,59 @@ const definitionsOf = (definitions, prefix = '') =>
     value && typeof value === 'object' && !(value instanceof RegExp) ? definitionsOf(value, `${prefix}${key}.`) : [[`${prefix}${key}`, typeof value === 'string' ? value : JSON.stringify(value)]],
   );
 
+/**
+ * Less, Sass and Stylus files, as Vite handles them: when the project has the compiler installed (`less`, `sass-embedded` or `sass`,
+ * `stylus`), a file with that extension is compiled to CSS and then read as a style sheet. Returns null when the project has none.
+ */
+const preprocessorPlugin = (projectRoot) => {
+  const req = nodeModule.createRequire(path.join(projectRoot, 'noop.js'));
+  const load = (names) => {
+    for (const name of names) {
+      try {
+        return req(name);
+      } catch {}
+    }
+    return null;
+  };
+  const compilers = {
+    less: { test: /\.less$/, names: ['less'] },
+    sass: { test: /\.(scss|sass)$/, names: ['sass-embedded', 'sass'] },
+    stylus: { test: /\.(styl|stylus)$/, names: ['stylus'] },
+  };
+  const available = Object.fromEntries(Object.entries(compilers).map(([k, v]) => [k, load(v.names)]).filter(([, m]) => m));
+  if (!Object.keys(available).length) return null;
+  const compile = {
+    async less(code, file) {
+      const out = await (available.less.default ?? available.less).render(code, { filename: file, paths: [path.dirname(file)] });
+      return { css: out.css, deps: out.imports };
+    },
+    async sass(code, file) {
+      const sass = available.sass;
+      const out = await sass.compileStringAsync(code, { url: pathToFileURL(file), syntax: file.endsWith('.sass') ? 'indented' : 'scss', loadPaths: [path.dirname(file)] });
+      return { css: out.css, deps: (out.loadedUrls ?? []).filter((u) => u.protocol === 'file:').map(fileURLToPath) };
+    },
+    async stylus(code, file) {
+      const stylus = available.stylus.default ?? available.stylus;
+      const style = stylus(code).set('filename', file);
+      const css = await new Promise((resolve, reject) => style.render((error, text) => (error ? reject(error) : resolve(text))));
+      return { css, deps: style.deps() };
+    },
+  };
+  return {
+    name: 'rathkit:css-preprocessors',
+    async transform(code, id) {
+      const file = id.split('?')[0];
+      for (const [kind, { test }] of Object.entries(compilers)) {
+        if (!available[kind] || !test.test(file)) continue;
+        const { css, deps } = await compile[kind](code, file);
+        for (const dep of deps) if (dep !== file) this.addWatchFile(dep);
+        return { code: css, moduleType: 'css' };
+      }
+      return null;
+    },
+  };
+};
+
 const externalPlugin = (external) => {
   const tests = toArray(external);
   return {
@@ -1190,7 +1243,10 @@ async function init(params) {
     compilerPlugins.push(wpAdapter());
     if (wp.provide) compilerPlugins.push(provideAdapter());
   }
-  plugins = [...(externals.length ? [externalPlugin(externals)] : []), ...pre, ...compilerPlugins, ...parcelPlugins, ...list, ...post];
+  // A project that lists its own plugin for these languages keeps it; otherwise Less, Sass and Stylus are compiled when installed.
+  const ownPreprocessor = [...pre, ...list, ...post].some((plugin) => /less|sass|scss|stylus/i.test(plugin?.name ?? ''));
+  const preprocessors = ownPreprocessor ? null : preprocessorPlugin(root);
+  plugins = [...(externals.length ? [externalPlugin(externals)] : []), ...(preprocessors ? [preprocessors] : []), ...pre, ...compilerPlugins, ...parcelPlugins, ...list, ...post];
   const hooks = {};
   for (const name of HOOKS) hooks[name] = hooksOf(name).length > 0;
   hooks.transform = hooksOf('transform').length > 0;

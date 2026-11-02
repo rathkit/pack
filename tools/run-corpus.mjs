@@ -38,9 +38,13 @@ function one(p) {
   if (!r.ok) return step('fetch', r);
   r = run('git', ['checkout', '-q', 'FETCH_HEAD'], where);
   if (!r.ok) return step('checkout', r);
-  const lock = fs.existsSync(path.join(where, 'pnpm-lock.yaml'));
-  r = run('pnpm', ['install', '--ignore-scripts', lock ? '--frozen-lockfile' : '--no-frozen-lockfile'], where, 900);
-  if (!r.ok) return step('install', r);
+  // `install: false` is for a project with no dependencies to build (the source is all there is).
+  if (p.install !== false) {
+    if (p.dropLockfile) fs.rmSync(path.join(where, 'pnpm-lock.yaml'), { force: true });
+    const lock = fs.existsSync(path.join(where, 'pnpm-lock.yaml'));
+    r = run('pnpm', ['install', '--ignore-scripts', lock ? '--frozen-lockfile' : '--no-frozen-lockfile', ...(p.installArgs || [])], where, 900);
+    if (!r.ok) return step('install', r);
+  }
   const started = Date.now();
   r = run(rkp, p.build, where, 300);
   const ms = Date.now() - started;
@@ -54,6 +58,14 @@ function one(p) {
     const have = JSON.parse(r.out.split('\n').pop());
     const lacking = p.expect.exports.filter((n) => !have.includes(n));
     if (lacking.length) return { ok: false, step: 'exports', detail: `missing ${lacking.join(', ')}; has ${have.join(', ')}`, ms };
+    // `smoke`: an expression over the module `m` that must print the given text, so the output does what the library does.
+    const smoke = p.expect.smoke;
+    if (smoke) {
+      const code = `import(${JSON.stringify(pathToFileURL(file).href)}).then((m) => console.log(String(${smoke.code})), (e) => { console.error(e.stack || e); process.exit(1); })`;
+      r = run(process.execPath, ['-e', code], where, 60);
+      if (!r.ok) return { ...step('smoke', r), ms };
+      if (r.out.split('\n').pop() !== smoke.equals) return { ok: false, step: 'smoke', detail: `${smoke.code} gave ${r.out.split('\n').pop()}, expected ${smoke.equals}`, ms };
+    }
   }
   return { ok: true, ms };
 }
