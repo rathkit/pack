@@ -24,7 +24,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import readline from 'node:readline';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { Worker, MessageChannel, receiveMessageOnPort } from 'node:worker_threads';
 import { Readable } from 'node:stream';
 
@@ -1057,6 +1057,26 @@ const normalizePlugin = async (raw) => {
 
 const orderPlugins = (list) => [...list.filter((p) => p.enforce === 'pre'), ...list.filter((p) => !p.enforce), ...list.filter((p) => p.enforce === 'post')];
 
+/** Bundles a configuration file with this program (packages stay external) and imports the result, or returns null if that cannot be done. */
+async function importBundled(file) {
+  const exe = process.env.RATHKIT_EXE;
+  if (!exe) return null;
+  const dir = path.dirname(file);
+  // Next to the file, so the packages it names are found from where it is.
+  const out = path.join(dir, `.rkp-config-${process.pid}-${Date.now()}.mjs`);
+  const here = pathToFileURL(file).href;
+  const args = ['bundle', file, '--format', 'esm', '--packages', 'external', '--outfile', out, '--no-config',
+    `--define:import.meta.url=${JSON.stringify(here)}`, `--define:import.meta.dirname=${JSON.stringify(dir)}`, `--define:import.meta.filename=${JSON.stringify(file)}`,
+    `--define:__dirname=${JSON.stringify(dir)}`, `--define:__filename=${JSON.stringify(file)}`];
+  const built = spawnSync(exe, args, { cwd: dir, encoding: 'utf8' });
+  if (built.status !== 0) return null;
+  try {
+    return { module: await import(pathToFileURL(out).href) };
+  } finally {
+    try { fs.unlinkSync(out); } catch {}
+  }
+}
+
 async function init(params) {
   if (process.env.RATHKIT_PLUGIN_DEBUG) console.error('[host] init', params.config);
   root = params.root;
@@ -1071,7 +1091,11 @@ async function init(params) {
     try {
       mod = await import(url);
     } catch (error) {
-      throw new Error(`Cannot load ${params.config}: ${error.message}`);
+      // Node cannot follow imports without an extension or of a folder, which a TypeScript config often has; Vite bundles the config
+      // to get around that, and so does this.
+      const bundled = ['ERR_MODULE_NOT_FOUND', 'ERR_UNSUPPORTED_DIR_IMPORT'].includes(error?.code) ? await importBundled(path.resolve(root, params.config)) : null;
+      if (!bundled) throw new Error(`Cannot load ${params.config}: ${error.message}`);
+      mod = bundled.module;
     }
     config = mod.default ?? mod;
     if (typeof config === 'function') config = await config({ command: cli.serve ? 'serve' : 'build', mode: cli.mode ?? 'production', isSsrBuild: false }, {});

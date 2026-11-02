@@ -494,7 +494,8 @@ impl Context<'_> {
                 js_face = loaded.js_face;
             }
         }
-        let extension = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
+        // `Page.vue?vue&type=script&lang.ts` is TypeScript: the language named in the query wins over the file's own extension (as in Vite).
+        let extension = lang_extension(&query).map(str::to_ascii_lowercase).or_else(|| path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase));
         let forced_asset = self.state.0.lock().unwrap().as_assets.contains(path);
         let ext_loader = match &worker {
             Some(WorkerQuery::Bundled) => Some(Loader::File),
@@ -682,7 +683,11 @@ impl Context<'_> {
         let (kind, parsed, record) = match mode {
             None => (ModuleKind::Json, None, ModuleRecord::default()),
             Some(mode) => {
-                let mut options = syntax_for(path);
+                // `Page.vue?vue&type=script&lang.ts`: the language in the query is read like a file extension.
+                let mut options = match lang_extension(&query) {
+                    Some(ext) => syntax_for(Path::new(&format!("part.{}", ext.to_ascii_lowercase()))),
+                    None => syntax_for(path),
+                };
                 match syntax_hint {
                     Some("ts") => options = options.typescript(),
                     Some("jsx") => options = options.with_jsx(),

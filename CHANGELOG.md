@@ -16,6 +16,15 @@ What an alpha does promise, and checks on every change (`tools/check-promises.mj
 scripts in any package, a build that needs no network, provenance and checksums on every release. It promises nothing
 about stability.
 
+## Unreleased
+
+### Fixed
+
+- A configuration file that imports another file without its extension (`./config/options`, usual in a TypeScript `vite.config.ts`)
+  is bundled first, as Vite does, when Node cannot follow the import.
+- A part of a file that a plugin names by language (`Page.vue?vue&type=script&lang.ts`) is read as that language, so the
+  TypeScript in a Vue `<script setup lang="ts">` block builds.
+
 ## 0.1.0-alpha.1 - 2026-11-01
 
 The program is the same as in 0.1.0-alpha.0. This is the first release whose npm packages and crate were published by the
