@@ -115,7 +115,8 @@ export async function checkPage(dir, expect = {}, browser = findBrowser()) {
           break;
         case 'Network.responseReceived':
           // Only the site's own files count; a page that calls an outside service gets what the network gives it.
-          if (p.response.status >= 400 && p.response.url.startsWith(origin)) note(`${p.response.status} for ${p.response.url.slice(origin.length)}`);
+          // A browser asks for /favicon.ico by itself; a page that has none is not broken.
+          if (p.response.status >= 400 && p.response.url.startsWith(origin) && !p.response.url.endsWith('/favicon.ico')) note(`${p.response.status} for ${p.response.url.slice(origin.length)}`);
           break;
         case 'Network.loadingFailed':
           if ((requests.get(p.requestId) ?? '').startsWith(origin) && !p.canceled) note(`failed to load ${requests.get(p.requestId).slice(origin.length)}: ${p.errorText}`);
@@ -141,8 +142,15 @@ export async function checkPage(dir, expect = {}, browser = findBrowser()) {
     ws.close();
     return { ok: problems.length === 0, problems, text, html, log };
   } finally {
-    chrome?.kill();
+    if (chrome && chrome.exitCode === null) {
+      const gone = new Promise((resolve) => chrome.once('exit', resolve));
+      chrome.kill();
+      await Promise.race([gone, new Promise((resolve) => setTimeout(resolve, 5000))]);
+    }
     server.close();
-    fs.rmSync(profile, { recursive: true, force: true });
+    // The browser may still be writing to its folder for a moment; leaving a temporary folder behind is not a failure.
+    try {
+      fs.rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+    } catch {}
   }
 }

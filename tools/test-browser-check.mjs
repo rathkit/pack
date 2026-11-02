@@ -17,7 +17,8 @@ const site = (name, html, script) => {
   if (script !== undefined) fs.writeFileSync(path.join(base, name, 'a.js'), script);
 };
 const page = '<!doctype html><body><div id="root"></div><script type="module" src="/a.js"></script>';
-site('good', page, 'document.getElementById("root").innerHTML = "<h1>Hello</h1>"');
+// A page that has no favicon is fine (a full browser asks for one by itself; this asks the same way).
+site('good', page, 'fetch("/favicon.ico").catch(() => {}); document.getElementById("root").innerHTML = "<h1>Hello</h1>"');
 site('throws', page, 'throw new Error("boom")');
 site('empty', '<!doctype html><body><div id="root"></div>');
 site('missing', '<!doctype html><body><div id="root">hi</div><script type="module" src="/gone.js"></script>');
@@ -45,6 +46,8 @@ r = await at('console', { allowErrors: ['bad thing'] });
 expect(r.ok, 'an error that is allowed is not reported', JSON.stringify(r));
 r = await at('good', { text: 'Goodbye' });
 expect(!r.ok, 'text that is not on the page is found', JSON.stringify(r));
-fs.rmSync(base, { recursive: true, force: true });
+try {
+  fs.rmSync(base, { recursive: true, force: true });
+} catch {}
 console.log(failed ? `${failed} failure(s)` : 'browser-check agrees');
 process.exit(failed ? 1 : 0);
