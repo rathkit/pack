@@ -1,0 +1,60 @@
+name: Compatibility report
+description: A project, plugin or tool that does not build, or builds differently, with Rathkit Pack.
+labels: [compatibility]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Rathkit Pack is alpha. Reports of what does not work with real projects decide what is built next, so they are welcome.
+        For security problems, do not file an issue. See the security policy.
+  - type: input
+    id: version
+    attributes:
+      label: Rathkit Pack version
+      description: Output of `rkp --version`, or the package version.
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What is incompatible?
+      options:
+        - A project (it does not build or does not run)
+        - A plugin (Rollup, Vite, webpack, Parcel or esbuild)
+        - A loader, framework or library
+        - Output differs from the usual build tool
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: subject
+    attributes:
+      label: Name and version
+      description: The project, plugin or tool, with its version and a link (a repository and commit if you can).
+    validations:
+      required: true
+  - type: input
+    id: usual
+    attributes:
+      label: Tool you build it with today
+      description: For example Vite 7, webpack 5, esbuild, Rollup.
+  - type: textarea
+    id: command
+    attributes:
+      label: Command and options used
+      description: The `rkp` command or configuration file you ran.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: What happened, compared with the usual build
+      description: The error output, or what differs. Trim long logs to the first error.
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      description: Operating system, architecture and Node version.

@@ -26,7 +26,7 @@ Windows, and the steps in [verifying.md](verifying.md) pass.
 
 - [ ] 1.1 A pinned list of 20 or more open-source projects (Vite apps for React, Vue and Svelte; libraries; command line tools; a webpack or rspack app) built with `rkp` and compared with their usual build, run by `tools/run-corpus.mjs`. Each failure becomes a fixture and a fix.
 - [ ] 1.2 The full test battery on Windows and macOS in CI, and fewer tests that run on Unix only.
-- [ ] 1.3 Issue templates, including a compatibility report (tool, plugin, versions), and labels.
+- [x] 1.3 Issue templates, including a compatibility report (tool, plugin, versions), and labels.
 - [ ] 1.4 The development server, `--hmr` and federation scenarios in Firefox and WebKit as well as Chromium.
 
 ## 2. Compatibility gaps
