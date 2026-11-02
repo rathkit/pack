@@ -1810,22 +1810,19 @@ fn watch_loop(job: std::sync::Arc<Job>) -> Done {
             }
         }
     }
+    let mut began = std::time::SystemTime::now();
     let mut outcome = run_build(&job);
     if let (Some(state), Some(message)) = (&job.serve, &outcome.error) {
         state.set_error(message);
     }
     let mut stamps: std::collections::HashMap<std::path::PathBuf, Stamp> = std::collections::HashMap::new();
-    // Stamps are those from before a build started, so a change made while it ran is found by the next look.
-    let remember = |outcome: &Outcome, stamps: &mut std::collections::HashMap<std::path::PathBuf, Stamp>| {
-        let mut next = std::collections::HashMap::new();
-        for path in outcome.watched.iter().chain(config_path.iter()).chain(job.restart_files.iter()) {
-            let known = stamps.get(path).cloned().unwrap_or_else(|| stamp(path));
-            next.insert(path.clone(), known);
-        }
-        *stamps = next;
+    // A file seen for the first time is stamped as it was when the build began; if it changed after that, the next look rebuilds.
+    let remember = |outcome: &Outcome, stamps: &mut std::collections::HashMap<std::path::PathBuf, Stamp>, began: std::time::SystemTime| {
+        let paths = outcome.watched.iter().chain(config_path.iter()).chain(job.restart_files.iter());
+        *stamps = carry_stamps(paths, stamps, began);
         eprintln!("watching {} files (Ctrl-C to stop)", stamps.len());
     };
-    remember(&outcome, &mut stamps);
+    remember(&outcome, &mut stamps, began);
     let mut restart = false;
     // Files under node_modules rarely change and are many: they are looked at every 25th time.
     let in_node_modules = |path: &std::path::Path| path.components().any(|c| c.as_os_str() == "node_modules");
@@ -1881,6 +1878,7 @@ fn watch_loop(job: std::sync::Arc<Job>) -> Done {
             stamps.insert(path.clone(), stamp(path));
         }
         let started = Instant::now();
+        began = std::time::SystemTime::now();
         outcome = run_build(&job);
         if let Some(state) = &job.serve {
             match &outcome.error {
@@ -1917,7 +1915,7 @@ fn watch_loop(job: std::sync::Arc<Job>) -> Done {
             }
         }
         eprintln!("rebuilt in {:.0} ms", started.elapsed().as_secs_f64() * 1000.0);
-        remember(&outcome, &mut stamps);
+        remember(&outcome, &mut stamps, began);
     }
     if let Some(host) = &job.host {
         let _ = host.close_watcher();
@@ -1925,6 +1923,48 @@ fn watch_loop(job: std::sync::Arc<Job>) -> Done {
         host.shutdown();
     }
     if restart { Done::Restart } else { Done::Exit(if outcome.ok { ExitCode::SUCCESS } else { ExitCode::FAILURE }) }
+}
+
+/// The stamps to keep after a build: those already known stay; a file seen for the first time gets the stamp it has now, unless
+/// it was written after the build began (the build may have read it before), in which case it gets one no real file has,
+/// so the next look finds it changed.
+fn carry_stamps<'a>(paths: impl Iterator<Item = &'a std::path::PathBuf>, known: &std::collections::HashMap<std::path::PathBuf, Stamp>, began: std::time::SystemTime) -> std::collections::HashMap<std::path::PathBuf, Stamp> {
+    let mut next = std::collections::HashMap::new();
+    for path in paths {
+        let kept = known.get(path).cloned().unwrap_or_else(|| match stamp(path) {
+            Some((modified, _)) if modified > began => Some((std::time::UNIX_EPOCH, u64::MAX)),
+            now => now,
+        });
+        next.insert(path.clone(), kept);
+    }
+    next
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn a_file_written_during_the_build_is_found_changed_by_the_next_look() {
+        let dir = std::env::temp_dir().join(format!("rkp-carry-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (before, during) = (dir.join("before.js"), dir.join("during.js"));
+        std::fs::write(&before, "1").unwrap();
+        std::fs::write(&during, "1").unwrap();
+        let known = std::collections::HashMap::new();
+        let paths = [before.clone(), during.clone()];
+        // The build began after `before` was written and before `during` was.
+        let began = std::fs::metadata(&before).unwrap().modified().unwrap();
+        std::fs::File::options().write(true).open(&during).unwrap().set_modified(began + Duration::from_secs(5)).unwrap();
+        let next = carry_stamps(paths.iter(), &known, began);
+        assert_eq!(next[&before], stamp(&before));
+        assert_ne!(next[&during], stamp(&during), "a file changed during the build must look changed");
+        // A build that began later sees both as they are.
+        let later = carry_stamps(paths.iter(), &known, SystemTime::now() + Duration::from_secs(60));
+        assert_eq!(later[&during], stamp(&during));
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
 
 /// Development aid: prints `OK` or `ERR <message>` for each TypeScript file, for comparison
