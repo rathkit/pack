@@ -1,0 +1,50 @@
+// Checks tools/lib/browser-check.mjs on small sites made here: one that works and four that each break in a different way.
+// Skipped without a Chromium-based browser (set CHROME to name one).
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { checkPage, findBrowser } from './lib/browser-check.mjs';
+
+const browser = findBrowser();
+if (!browser) {
+  console.log('browser-check: no Chromium-based browser found (set CHROME); skipped');
+  process.exit(0);
+}
+const base = fs.mkdtempSync(path.join(os.tmpdir(), 'browser-check-'));
+const site = (name, html, script) => {
+  fs.mkdirSync(path.join(base, name));
+  fs.writeFileSync(path.join(base, name, 'index.html'), html);
+  if (script !== undefined) fs.writeFileSync(path.join(base, name, 'a.js'), script);
+};
+const page = '<!doctype html><body><div id="root"></div><script type="module" src="/a.js"></script>';
+site('good', page, 'document.getElementById("root").innerHTML = "<h1>Hello</h1>"');
+site('throws', page, 'throw new Error("boom")');
+site('empty', '<!doctype html><body><div id="root"></div>');
+site('missing', '<!doctype html><body><div id="root">hi</div><script type="module" src="/gone.js"></script>');
+site('console', '<!doctype html><body><div id="root"><p>x</p></div><script type="module" src="/a.js"></script>', 'console.error("bad thing")');
+
+let failed = 0;
+const expect = (ok, what, detail = '') => {
+  if (!ok) {
+    failed++;
+    console.log(`FAIL ${what} ${detail}`);
+  }
+};
+const at = (name, e) => checkPage(path.join(base, name), e, browser);
+let r = await at('good', { selector: '#root', text: 'Hello' });
+expect(r.ok && r.text === 'Hello', 'a working page passes', JSON.stringify(r));
+r = await at('throws');
+expect(!r.ok && r.problems.some((p) => p.startsWith('uncaught: Error: boom')), 'an uncaught error is found', JSON.stringify(r));
+r = await at('empty');
+expect(!r.ok && r.problems.includes('the page shows nothing'), 'an empty page is found', JSON.stringify(r));
+r = await at('missing');
+expect(!r.ok && r.problems.includes('404 for /gone.js'), 'a missing file of the site is found', JSON.stringify(r));
+r = await at('console');
+expect(!r.ok && r.problems.some((p) => p.includes('bad thing')), 'a console error is found', JSON.stringify(r));
+r = await at('console', { allowErrors: ['bad thing'] });
+expect(r.ok, 'an error that is allowed is not reported', JSON.stringify(r));
+r = await at('good', { text: 'Goodbye' });
+expect(!r.ok, 'text that is not on the page is found', JSON.stringify(r));
+fs.rmSync(base, { recursive: true, force: true });
+console.log(failed ? `${failed} failure(s)` : 'browser-check agrees');
+process.exit(failed ? 1 : 0);

@@ -1,5 +1,5 @@
 {
-  "note": "Pinned open-source projects built with rkp (tools/run-corpus.mjs). Each entry is a repository at one commit; `build` is the rkp command line run in `dir`; `expect` says what a good build looks like. `installArgs` adds options to `pnpm install` (`--trust-lockfile` skips pnpm's supply-chain check of a lockfile it distrusts); `dropLockfile` resolves versions afresh when the project's lockfile is in a format this pnpm cannot read, so that project is not pinned past its commit. `dir` is a folder of a larger repository (only it is fetched). The `vite-template-*` projects have no lockfile, so their dependencies are resolved when the run happens: a failure in one may come from a newer release of a dependency, not only from rkp.",
+  "note": "Pinned open-source projects built with rkp (tools/run-corpus.mjs). Each entry is a repository at one commit; `build` is the rkp command line run in `dir`; `expect` says what a good build looks like. `installArgs` adds options to `pnpm install` (`--trust-lockfile` skips pnpm's supply-chain check of a lockfile it distrusts); `dropLockfile` resolves versions afresh when the project's lockfile is in a format this pnpm cannot read, so that project is not pinned past its commit. `dir` is a folder of a larger repository (only it is fetched). The `vite-template-*` projects have no lockfile, so their dependencies are resolved when the run happens: a failure in one may come from a newer release of a dependency, not only from rkp. `kind: cli` is a program built for Node: `expect.run` runs the output with the given arguments and matches what it prints. `expectFail` records a known gap with its reason: the run shows it as expected, and flags it when it starts to pass.",
   "projects": [
     {
       "name": "vue3-realworld",
@@ -485,6 +485,89 @@
         "index.html",
         "--outdir",
         "dist"
+      ],
+      "expect": {
+        "files": [
+          "dist/index.html"
+        ]
+      }
+    },
+    {
+      "name": "json-server",
+      "kind": "cli",
+      "repo": "https://github.com/typicode/json-server",
+      "sha": "89a34a44b7a6a5311dc84f3b8a1b8b45c0905aea",
+      "build": [
+        "bundle",
+        "src/bin.ts",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/bin.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/bin.mjs"
+        ],
+        "run": [
+          {
+            "args": [
+              "--help"
+            ],
+            "stdout": "Usage: json-server"
+          },
+          {
+            "args": [
+              "--version"
+            ],
+            "stdout": "^\\d+\\.\\d+"
+          }
+        ]
+      }
+    },
+    {
+      "name": "rspack-code-splitting",
+      "kind": "app",
+      "repo": "https://github.com/rstackjs/rstack-examples",
+      "sha": "6011232ead8dd3005969dd7b90a09cef6acd9432",
+      "dir": "rspack/code-splitting",
+      "installArgs": [
+        "--ignore-workspace"
+      ],
+      "build": [
+        "bundle",
+        "index.js",
+        "--outdir",
+        "dist",
+        "--config",
+        "rspack.config.js"
+      ],
+      "expect": {
+        "files": [
+          "dist/index.html"
+        ],
+        "page": {
+          "selector": "#root",
+          "text": "."
+        }
+      }
+    },
+    {
+      "name": "rspack-html-webpack-plugin",
+      "kind": "app",
+      "repo": "https://github.com/rstackjs/rstack-examples",
+      "sha": "6011232ead8dd3005969dd7b90a09cef6acd9432",
+      "dir": "rspack/html-webpack-plugin",
+      "installArgs": [
+        "--ignore-workspace"
+      ],
+      "build": [
+        "bundle",
+        "src/index.js",
+        "--outdir",
+        "dist",
+        "--config",
+        "rspack.config.js"
       ],
       "expect": {
         "files": [

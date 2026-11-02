@@ -177,6 +177,21 @@ fn plugins_of_every_kind_run_in_the_host() {
 }
 
 #[test]
+fn the_page_checker_finds_what_a_visitor_would_hit() {
+    if Command::new("node").arg("--version").output().is_err() {
+        eprintln!("node not found; skipping the page checker");
+        return;
+    }
+    let output = Command::new("node")
+        .arg("tools/test-browser-check.mjs")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output_within()
+        .expect("run the page checker script");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "the page checker misbehaves:\n{text}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+#[test]
 fn watch_mode_rebuilds_and_tells_plugins() {
     if Command::new("node").arg("--version").output().is_err() {
         eprintln!("node not found; skipping the watch suite");

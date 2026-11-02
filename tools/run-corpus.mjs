@@ -1,10 +1,11 @@
 // Builds pinned open-source projects (corpus/projects.json) with rkp and checks the result.
 //
-//   node tools/run-corpus.mjs [name ...] [--dir DIR] [--json FILE]
+//   node tools/run-corpus.mjs [name ...] [--dir DIR] [--json FILE] [--no-browser]
 //
 // Each project is cloned at its pinned commit into DIR (default: a new folder under the system temp folder), its dependencies are
 // installed with pnpm and `--ignore-scripts`, and the `build` command line is run with rkp. A build passes when rkp exits with 0,
-// the expected files exist, and, for a library, importing the output in Node gives the expected exports. This runs code from
+// the expected files exist, and, for a library, importing the output in Node gives the expected exports; an app is also loaded in headless
+// Chromium (unless --no-browser, or no browser is found) and must run without uncaught errors, console errors or missing files. This runs code from
 // other projects (their configuration files and plugins), so it is not part of the test battery: run it by hand or from the
 // corpus workflow. Exit status is 1 if any project failed.
 import { spawnSync } from 'node:child_process';
@@ -12,12 +13,15 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
+import { checkPage, findBrowser } from './lib/browser-check.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
 const flag = (name) => { const i = args.indexOf(name); if (i < 0) return null; const [, v] = args.splice(i, 2); return v; };
 const dir = path.resolve(flag('--dir') || fs.mkdtempSync(path.join(os.tmpdir(), 'rkp-corpus-')));
 const jsonOut = flag('--json');
+const noBrowser = args.includes('--no-browser') && args.splice(args.indexOf('--no-browser'), 1);
+const browser = noBrowser ? null : findBrowser();
 const wanted = args;
 const rkp = process.env.RATHKIT_PACK_BIN || path.join(root, 'target', 'release', process.platform === 'win32' ? 'rkp.exe' : 'rkp');
 if (!fs.existsSync(rkp)) { console.error(`rkp not found at ${rkp}; run cargo build --release or set RATHKIT_PACK_BIN`); process.exit(2); }
@@ -29,7 +33,7 @@ const run = (cmd, argv, cwd, limit = 600) => {
 };
 const tail = (text, n = 12) => text.split('\n').slice(-n).join('\n');
 
-function one(p) {
+async function one(p) {
   let where = path.join(dir, p.name);
   const step = (what, r) => ({ ok: false, step: what, detail: tail(r.out) });
   fs.mkdirSync(where, { recursive: true });
@@ -56,6 +60,17 @@ function one(p) {
   const ms = Date.now() - started;
   if (!r.ok) return { ...step('build', r), ms };
   for (const f of p.expect?.files || []) if (!fs.existsSync(path.join(where, f))) return { ok: false, step: 'output', detail: `missing ${f}`, ms };
+  // `run`: a program built for Node is run with arguments and must print what is expected.
+  for (const check of p.expect?.run || []) {
+    r = run(process.execPath, [path.join(where, p.expect.files[0]), ...check.args], where, 60);
+    if (!r.ok) return { ...step('run', r), ms };
+    if (!new RegExp(check.stdout, 'm').test(r.out)) return { ok: false, step: 'run', detail: `${check.args.join(' ')} printed ${JSON.stringify(r.out.slice(0, 200))}, expected /${check.stdout}/`, ms };
+  }
+  if (p.kind === 'app' && browser) {
+    const outdir = p.build[p.build.indexOf('--outdir') + 1] || 'dist';
+    const page = await checkPage(path.join(where, outdir), p.expect?.page, browser);
+    if (!page.ok) return { ok: false, step: 'page', detail: page.problems.join('\n'), ms };
+  }
   if (p.kind === 'library' && p.expect?.exports) {
     const file = path.join(where, p.expect.files[0]);
     const probe = `import(${JSON.stringify(pathToFileURL(file).href)}).then((m) => console.log(JSON.stringify(Object.keys(m))), (e) => { console.error(e.stack || e); process.exit(1); })`;
@@ -79,11 +94,15 @@ function one(p) {
 const results = [];
 for (const p of list) {
   process.stdout.write(`${p.name.padEnd(24)}`);
-  const r = { name: p.name, kind: p.kind, sha: p.sha, ...one(p) };
+  let r = { name: p.name, kind: p.kind, sha: p.sha, ...(await one(p)) };
+  // A known gap is expected to fail; one that passes is news (the entry should lose its `expectFail`).
+  if (p.expectFail) r = r.ok ? { ...r, flagged: true } : { ...r, ok: true, expected: true, step: r.step, detail: r.detail };
   results.push(r);
-  console.log(r.ok ? `ok   ${r.ms} ms` : `FAIL ${r.step}\n${(r.detail || '').split('\n').map((l) => '    ' + l).join('\n')}`);
+  const lines = (text) => (text || '').split('\n').map((l) => '    ' + l).join('\n');
+  if (p.expectFail) console.log(r.expected ? `xfail ${r.step}: ${p.expectFail}\n${lines(r.detail)}` : `XPASS ${r.ms} ms: this passes now, so remove its expectFail (${p.expectFail})`);
+  else console.log(r.ok ? `ok   ${r.ms} ms` : `FAIL ${r.step}\n${lines(r.detail)}`);
 }
-const passed = results.filter((r) => r.ok).length;
-console.log(`\n${passed} of ${results.length} built and checked out (work folder ${dir}, left in place)`);
+const passed = results.filter((r) => r.ok && !r.flagged).length;
+console.log(`\n${browser ? '' : '(no browser: apps were built but not loaded)\n'}${passed} of ${results.length} built and checked out (work folder ${dir}, left in place)`);
 if (jsonOut) fs.writeFileSync(jsonOut, JSON.stringify({ rkp: spawnSync(rkp, ['--version'], { encoding: 'utf8' }).stdout.trim(), results }, null, 2) + '\n');
 process.exit(passed === results.length ? 0 : 1);
