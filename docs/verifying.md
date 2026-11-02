@@ -51,10 +51,25 @@ hand and have no provenance statement (the release notes say which); later ones 
 
 ## crates.io
 
-`cargo install rathkit-pack --version <version>` builds the program from the crate on crates.io. crates.io has no provenance
-statements, so nothing there says which commit a crate came from. The tag does: the signed `v<version>` tag, and the
-checksums and signatures of the release files above, are the record of what that version is, and the crate's source is the
-`src` folder of that tag.
+`cargo install rathkit-pack --version <version> --locked` builds the program from the crate on crates.io. Versions published
+by the release workflow (trusted publishing) carry the run that made them: the crates.io version API has a `trustpub_data`
+field with the workflow run id and the commit.
+
+```
+curl -s -H "User-Agent: verify" https://crates.io/api/v1/crates/rathkit-pack/<version> | node -e "console.log(JSON.parse(require('fs').readFileSync(0)).version.trustpub_data)"
+```
+
+For `0.1.0-alpha.1` that is run 41267948577 and commit 7484b538a2dcf4fbae2bf35f7c0de1e2888139a4. `0.1.0-alpha.0` was published by hand and has none. The signed
+`v<version>` tag, and the checksums and signatures of the release files above, are the record of what a version is, and the
+crate's source is the `src` folder of that tag. To compare:
+
+```
+curl -sL -o crate.tgz https://static.crates.io/crates/rathkit-pack/rathkit-pack-<version>.crate
+tar -xzf crate.tgz
+diff -r rathkit-pack-<version>/src <checkout of the tag>/src      # empty
+```
+
+The crate has no dependencies (`cargo tree` shows one line).
 
 ## Zero dependencies
 
