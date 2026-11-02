@@ -1,0 +1,45 @@
+{
+  "note": "Pinned open-source projects built with rkp (tools/run-corpus.mjs). Each entry is a repository at one commit; `build` is the rkp command line run in `dir`; `expect` says what a good build looks like.",
+  "projects": [
+    {
+      "name": "vue3-realworld",
+      "kind": "app",
+      "repo": "https://github.com/mutoe/vue3-realworld-example-app",
+      "sha": "741c215ef0f674f90fcb03c5493a1b3a3a7f1b03",
+      "build": ["bundle", "index.html", "--outdir", "dist", "--config", "vite.config.ts"],
+      "expect": { "files": ["dist/index.html"] }
+    },
+    {
+      "name": "mitt",
+      "kind": "library",
+      "repo": "https://github.com/developit/mitt",
+      "sha": "6b41670516ed8e8b738612f60491995470aa63b3",
+      "build": ["bundle", "src/index.ts", "--format", "esm", "--outfile", "out/mitt.mjs"],
+      "expect": { "files": ["out/mitt.mjs"], "exports": ["default"] }
+    },
+    {
+      "name": "zustand",
+      "kind": "library",
+      "repo": "https://github.com/pmndrs/zustand",
+      "sha": "382d29c485e67018c06e75ec7235130d0968522c",
+      "build": ["bundle", "src/vanilla.ts", "--format", "esm", "--outfile", "out/vanilla.mjs"],
+      "expect": { "files": ["out/vanilla.mjs"], "exports": ["createStore"] }
+    },
+    {
+      "name": "nanoid",
+      "kind": "library",
+      "repo": "https://github.com/ai/nanoid",
+      "sha": "35ea7d02c9f01d7f3d2293cc97829ff16d1e8117",
+      "build": ["bundle", "index.js", "--format", "esm", "--platform-browser", "--outfile", "out/nanoid.mjs"],
+      "expect": { "files": ["out/nanoid.mjs"], "exports": ["nanoid", "customAlphabet"] }
+    },
+    {
+      "name": "immer",
+      "kind": "library",
+      "repo": "https://github.com/immerjs/immer",
+      "sha": "75a290e44ba14bd723c8ef8546b6559c8ef3ae88",
+      "build": ["bundle", "src/immer.ts", "--format", "esm", "--outfile", "out/immer.mjs"],
+      "expect": { "files": ["out/immer.mjs"], "exports": ["produce", "enablePatches"] }
+    }
+  ]
+}
