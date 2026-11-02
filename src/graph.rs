@@ -832,15 +832,24 @@ impl Context<'_> {
         }
         // In a style sheet `/fonts/a.woff2` is a file of the project (its root, then `public/`) before it is a place on the disk;
         // one that is nowhere stays as written, to be found when the page loads.
-        if relative_first && specifier.starts_with('/') && !specifier.starts_with("//") {
+        // The same for an import in a script (`import icons from '/icons.svg'`, which a Vue template becomes) when no such file is on the disk.
+        let on_disk = specifier.starts_with('/') && self.resolver.file_system().is_file(Path::new(specifier.split(['?', '#']).next().unwrap_or(specifier)));
+        if specifier.starts_with('/') && !specifier.starts_with("//") && (relative_first || !on_disk) {
             let inside = specifier.trim_start_matches('/');
+            let (inside, query) = match inside.split_once('?') {
+                Some((bare, query)) => (bare, Some(query)),
+                None => (inside, None),
+            };
             for base in [self.cwd.to_path_buf(), self.cwd.join("public")] {
                 let candidate = base.join(inside);
                 if self.resolver.file_system().is_file(&candidate) {
-                    return Target::Path(candidate);
+                    return Target::Path(match query {
+                        Some(query) => PathBuf::from(format!("{}?{query}", candidate.to_string_lossy())),
+                        None => candidate,
+                    });
                 }
             }
-            if !self.resolver.file_system().is_file(Path::new(specifier)) {
+            if relative_first && !on_disk {
                 return Target::Unresolved;
             }
         }

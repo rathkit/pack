@@ -30,14 +30,20 @@ const run = (cmd, argv, cwd, limit = 600) => {
 const tail = (text, n = 12) => text.split('\n').slice(-n).join('\n');
 
 function one(p) {
-  const where = path.join(dir, p.name);
+  let where = path.join(dir, p.name);
   const step = (what, r) => ({ ok: false, step: what, detail: tail(r.out) });
   fs.mkdirSync(where, { recursive: true });
   let r = run('git', ['init', '-q'], where);
-  r = run('git', ['fetch', '-q', '--depth', '1', p.repo, p.sha], where);
+  // `dir`: a project that is a folder of a larger repository; only that folder is fetched.
+  if (p.dir) {
+    r = run('git', ['sparse-checkout', 'set', p.dir], where);
+    if (!r.ok) return step('sparse-checkout', r);
+  }
+  r = run('git', ['fetch', '-q', '--depth', '1', ...(p.dir ? ['--filter=blob:none'] : []), p.repo, p.sha], where);
   if (!r.ok) return step('fetch', r);
   r = run('git', ['checkout', '-q', 'FETCH_HEAD'], where);
   if (!r.ok) return step('checkout', r);
+  if (p.dir) where = path.join(where, p.dir);
   // `install: false` is for a project with no dependencies to build (the source is all there is).
   if (p.install !== false) {
     if (p.dropLockfile) fs.rmSync(path.join(where, 'pnpm-lock.yaml'), { force: true });

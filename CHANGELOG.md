@@ -26,6 +26,8 @@ about stability.
 
 ### Fixed
 
+- A script may import a file of `public/` by its address (`import icons from '/icons.svg'`, which a Vue template with `<use href="/icons.svg#a">`
+  becomes): the project folder is tried, then `public/`, when no such file is on the disk.
 - `import.meta.glob` patterns may start with an alias (`@/views/**/*.vue`), from `--alias` or the configuration's `resolve.alias`
   when it maps a name to a path.
 - A configuration file that imports another file without its extension (`./config/options`, usual in a TypeScript `vite.config.ts`)

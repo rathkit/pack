@@ -1,5 +1,5 @@
 {
-  "note": "Pinned open-source projects built with rkp (tools/run-corpus.mjs). Each entry is a repository at one commit; `build` is the rkp command line run in `dir`; `expect` says what a good build looks like. `installArgs` adds options to `pnpm install` (`--trust-lockfile` skips pnpm's supply-chain check of a lockfile it distrusts); `dropLockfile` resolves versions afresh when the project's lockfile is in a format this pnpm cannot read, so that project is not pinned past its commit.",
+  "note": "Pinned open-source projects built with rkp (tools/run-corpus.mjs). Each entry is a repository at one commit; `build` is the rkp command line run in `dir`; `expect` says what a good build looks like. `installArgs` adds options to `pnpm install` (`--trust-lockfile` skips pnpm's supply-chain check of a lockfile it distrusts); `dropLockfile` resolves versions afresh when the project's lockfile is in a format this pnpm cannot read, so that project is not pinned past its commit. `dir` is a folder of a larger repository (only it is fetched). The `vite-template-*` projects have no lockfile, so their dependencies are resolved when the run happens: a failure in one may come from a newer release of a dependency, not only from rkp.",
   "projects": [
     {
       "name": "vue3-realworld",
@@ -373,6 +373,124 @@
         "--trust-lockfile",
         "--shamefully-hoist"
       ]
+    },
+    {
+      "name": "vite-template-react-ts",
+      "kind": "app",
+      "repo": "https://github.com/vitejs/vite",
+      "sha": "b3cb0575aff63004a71301a1ec798aeea2aa05d7",
+      "dir": "packages/create-vite/template-react-ts",
+      "build": [
+        "bundle",
+        "index.html",
+        "--outdir",
+        "dist",
+        "--config",
+        "vite.config.ts"
+      ],
+      "expect": {
+        "files": [
+          "dist/index.html"
+        ]
+      }
+    },
+    {
+      "name": "vite-template-vue-ts",
+      "kind": "app",
+      "repo": "https://github.com/vitejs/vite",
+      "sha": "b3cb0575aff63004a71301a1ec798aeea2aa05d7",
+      "dir": "packages/create-vite/template-vue-ts",
+      "build": [
+        "bundle",
+        "index.html",
+        "--outdir",
+        "dist",
+        "--config",
+        "vite.config.ts"
+      ],
+      "expect": {
+        "files": [
+          "dist/index.html"
+        ]
+      }
+    },
+    {
+      "name": "vite-template-svelte-ts",
+      "kind": "app",
+      "repo": "https://github.com/vitejs/vite",
+      "sha": "b3cb0575aff63004a71301a1ec798aeea2aa05d7",
+      "dir": "packages/create-vite/template-svelte-ts",
+      "build": [
+        "bundle",
+        "index.html",
+        "--outdir",
+        "dist",
+        "--config",
+        "vite.config.ts"
+      ],
+      "expect": {
+        "files": [
+          "dist/index.html"
+        ]
+      }
+    },
+    {
+      "name": "vite-template-preact-ts",
+      "kind": "app",
+      "repo": "https://github.com/vitejs/vite",
+      "sha": "b3cb0575aff63004a71301a1ec798aeea2aa05d7",
+      "dir": "packages/create-vite/template-preact-ts",
+      "build": [
+        "bundle",
+        "index.html",
+        "--outdir",
+        "dist",
+        "--config",
+        "vite.config.ts"
+      ],
+      "expect": {
+        "files": [
+          "dist/index.html"
+        ]
+      }
+    },
+    {
+      "name": "vite-template-solid-ts",
+      "kind": "app",
+      "repo": "https://github.com/vitejs/vite",
+      "sha": "b3cb0575aff63004a71301a1ec798aeea2aa05d7",
+      "dir": "packages/create-vite/template-solid-ts",
+      "build": [
+        "bundle",
+        "index.html",
+        "--outdir",
+        "dist",
+        "--config",
+        "vite.config.ts"
+      ],
+      "expect": {
+        "files": [
+          "dist/index.html"
+        ]
+      }
+    },
+    {
+      "name": "vite-template-lit-ts",
+      "kind": "app",
+      "repo": "https://github.com/vitejs/vite",
+      "sha": "b3cb0575aff63004a71301a1ec798aeea2aa05d7",
+      "dir": "packages/create-vite/template-lit-ts",
+      "build": [
+        "bundle",
+        "index.html",
+        "--outdir",
+        "dist"
+      ],
+      "expect": {
+        "files": [
+          "dist/index.html"
+        ]
+      }
     }
   ]
 }
