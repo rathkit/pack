@@ -144,6 +144,24 @@ jobs:
       - run: node tools/diff-semver.mjs
       - run: node tools/diff-real.mjs "$GITHUB_WORKSPACE/bench"
 
+  # docs/ROADMAP.md and the issues agree: a ticked item has a closed issue and the reverse. In a pull request the issue is still open (the
+  # merge closes it), so there a ticked item with an open issue is a warning. Not a required check.
+  roadmap:
+    name: roadmap and issues agree
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: node tools/test-check-roadmap.mjs
+      - run: node tools/check-roadmap.mjs ${{ github.event_name == 'pull_request' && '--warn-open' || '' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
   # What must never be in the repository: secrets, and the words of the private list (when the list is set as a secret; a fork's pull
   # request has no secrets, so only the secret scan runs there). The whole history is scanned by hand: history-scan.yml.
   hygiene:
