@@ -27,7 +27,18 @@ fn shown(cwd: &Path, path: &str) -> String {
     let (path, root) = (plain(path), plain(&cwd.to_string_lossy()));
     let root = root.trim_end_matches('/');
     let inside = |p: &str, r: &str| p.len() > r.len() && p.is_char_boundary(r.len()) && p.as_bytes()[r.len()] == b'/' && if cfg!(windows) { p[..r.len()].eq_ignore_ascii_case(r) } else { &p[..r.len()] == r };
-    if !root.is_empty() && inside(&path, root) { path[root.len() + 1..].to_string() } else { path }
+    if !root.is_empty() && inside(&path, root) {
+        return path[root.len() + 1..].to_string();
+    }
+    // Windows writes one folder with a short name (`RUNNER~1`) or a long one; the files' real names agree.
+    if let (Ok(real_path), Ok(real_root)) = (Path::new(&path).canonicalize(), cwd.canonicalize()) {
+        let (real_path, real_root) = (plain(&real_path.to_string_lossy()), plain(&real_root.to_string_lossy()));
+        let real_root = real_root.trim_end_matches('/');
+        if !real_root.is_empty() && inside(&real_path, real_root) {
+            return real_path[real_root.len() + 1..].to_string();
+        }
+    }
+    path
 }
 
 fn kind_name(kind: RequestKind) -> &'static str {
