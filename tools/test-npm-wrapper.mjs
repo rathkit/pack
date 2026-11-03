@@ -89,7 +89,7 @@ const wrapped = await build({ metafile: 'dist/meta.json', entries: 'api-main.js'
 const wrappedText = readFileSync('dist/wrapped.mjs', 'utf8');
 check(wrapped.ok && wrappedText.startsWith('// top\\n') && wrappedText.includes('// bottom') && !wrappedText.includes('console.log'), 'banner, footer and drop ' + wrappedText);
 check(readFileSync('dist/wrapped.css', 'utf8').startsWith('/* top */'), 'the css banner');
-check(wrapped.metafile && wrapped.metafile.inputs['api-main.js'] && Object.keys(wrapped.metafile.outputs).includes('wrapped.mjs'), 'the metafile in the result ' + JSON.stringify(wrapped.metafile && Object.keys(wrapped.metafile.outputs)));
+check(wrapped.metafile && wrapped.metafile.inputs['api-main.js'] && Object.keys(wrapped.metafile.outputs).includes('wrapped.mjs'), 'the metafile in the result ' + JSON.stringify(wrapped.metafile && { inputs: Object.keys(wrapped.metafile.inputs), outputs: Object.keys(wrapped.metafile.outputs) }) + ' cwd ' + process.cwd());
 
 // A page, with a folder of output.
 const page = await build({ entries: 'index.html', outdir: 'dist/page' });
