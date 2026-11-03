@@ -154,7 +154,7 @@ try {
   rmSync(join(dir, 'extra.js'));
   const dropped = await wait2c;
   check(dropped && dropped.removed.some((k) => k.endsWith('extra.js')), 'a module that is gone is reported', JSON.stringify(dropped));
-  check((await globalThis.__rathkit_hmr.update(dropped)) === true, 'and the update is applied without it');
+  check((await globalThis.__rathkit_hmr.update(dropped)) === true, 'and the update is applied without it', JSON.stringify({ dropped, log: globalThis.log.slice(-4) }));
 
   // 3. lib.cjs is imported by main.js, which accepts nothing about it: the change reaches an entry, so the page reloads.
   const wait3 = next('hmr');
