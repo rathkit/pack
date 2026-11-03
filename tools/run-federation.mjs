@@ -6,7 +6,7 @@
 import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, writeFileSync, mkdtempSync, rmSync, cpSync, symlinkSync, mkdirSync, statSync } from 'node:fs';
-import { join, dirname, extname } from 'node:path';
+import { join, dirname, extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir, homedir } from 'node:os';
 
@@ -45,8 +45,8 @@ const types = { '.js': 'text/javascript', '.mjs': 'text/javascript', '.json': 'a
 const servers = [];
 const serve = (port, dir) => {
   const server = http.createServer((req, res) => {
-    const path = join(dir, decodeURIComponent(req.url.split('?')[0]).replace(/\/$/, '/index.html'));
-    if (!existsSync(path)) {
+    const path = resolve(dir, '.' + decodeURIComponent(req.url.split('?')[0]).replace(/\/$/, '/index.html'));
+    if (!path.startsWith(resolve(dir) + sep) || !existsSync(path)) {
       res.writeHead(404, { 'access-control-allow-origin': '*' });
       res.end('missing');
       return;
@@ -121,7 +121,7 @@ const openPage = async (url, { wait = 3000 } = {}) => {
       await new Promise((r) => setTimeout(r, 200));
       const file = join(profile, 'DevToolsActivePort');
       if (!existsSync(file)) continue;
-      const port = readFileSync(file, 'utf8').split('\n')[0];
+      const port = Number.parseInt(readFileSync(file, 'utf8'), 10);
       targets = await fetch(`http://127.0.0.1:${port}/json`).then((r) => r.json()).catch(() => undefined);
     }
     if (!targets) child.kill();

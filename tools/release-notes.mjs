@@ -10,7 +10,7 @@ if (!version) {
   process.exit(2);
 }
 const text = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'CHANGELOG.md'), 'utf8');
-const heading = new RegExp(`^## \\[?${version.replace(/[.+-]/g, '\\$&')}\\]?(?: .*)?$`, 'm').exec(text);
+const heading = new RegExp(`^## \\[?${version.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&')}\\]?(?: .*)?$`, 'm').exec(text);
 if (!heading) {
   console.error(`CHANGELOG.md has no section for ${version}`);
   process.exit(1);

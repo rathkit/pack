@@ -97,7 +97,7 @@ function statement(scope, depth, inLoop) {
       () => `if (a) if (${pick(["b", "true", "false"])}) ${single(scope, depth - 1, inLoop)} else ${single(scope, depth - 1, inLoop)}`,
       () => `if (a) { if (b) ${single(scope, depth - 1, inLoop)} } else ${single(scope, depth - 1, inLoop)}`,
       () => `if (a) for (let i = 0; i < 2; i++) { if (b > i) ${single(scope, depth - 1, true)} } else ${single(scope, depth - 1, inLoop)}`,
-      () => `for (let i = 0; i < 3; i++) ${body().replace(/^\{/, "{ ").replace(/\}$/, "}")}`,
+      () => `for (let i = 0; i < 3; i++) ${body().replace(/^\{/, "{ ")}`,
       () => `{ let n = 3; while (n-- > 0) ${block(scope, depth - 1, true)} }`,
       () => `lab: for (const i of [1, 2, 3]) { if (i === 2) ${pick(["continue lab;", "break lab;"])} r += i; }`,
       () => `try { ${statement(scope, depth - 1, inLoop)} } catch (e) { r += "E"; }`,

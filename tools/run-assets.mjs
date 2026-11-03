@@ -71,7 +71,7 @@ const cases = [
     name: 'page as an iife', page: 'two-scripts.html', flags: ['--format', 'iife'], config: 'unfonts-inline.config.mjs',
     verify: (out) => {
       const html = readFileSync(join(out, 'two-scripts.html'), 'utf8');
-      const scripts = html.match(/<script[^>]*><\/script>/g) ?? [];
+      const scripts = html.match(/<script\b[^>]*>\s*<\/script\s*>/gi) ?? [];
       if (scripts.length !== 1 || !/src="\.\/bundle\.js"/.test(scripts[0])) return `the page loads ${JSON.stringify(scripts)}`;
       if ((html.match(/<link rel="stylesheet"/g) ?? []).length !== 1 || !/href="\.\/bundle\.css"/.test(html)) return `the page links ${html}`;
       const js = readFileSync(join(out, 'bundle.js'), 'utf8');

@@ -76,7 +76,7 @@ export async function checkPage(dir, expect = {}, browser = findBrowser()) {
       await until(async () => {
         const f = path.join(profile, 'DevToolsActivePort');
         if (!fs.existsSync(f)) return false;
-        const list = await fetch(`http://127.0.0.1:${fs.readFileSync(f, 'utf8').split('\n')[0]}/json`).then((r) => r.json()).catch(() => undefined);
+        const list = await fetch(`http://127.0.0.1:${Number.parseInt(fs.readFileSync(f, 'utf8'), 10)}/json`).then((r) => r.json()).catch(() => undefined);
         if (Array.isArray(list) && list.some((t) => t.type === 'page')) targets = list;
         return Boolean(targets);
       }, 30000);
