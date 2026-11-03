@@ -41,6 +41,11 @@ about stability.
   as a call (`const a = f()` followed by a line `useEffect(...)` became `f()(0, ...)`); the `;` the author left out is written.
 - A dynamic import with a variable may start with an alias (`import(\`@/layouts/${name}/index.vue\`)`, as Vue's `defineAsyncComponent` is
   usually written), and the variable may be in the name of a folder (`${name}/index.vue`), not only in the last name; the extension must still be written out.
+- A build driven by a `webpack.config.*` or `rspack.config.*` names the chunk of the default entry `main.js`, as webpack and Rspack do, not
+  `bundle.js`, so a page template that says `<script src="./main.js">` finds it.
+- Rspack's `HtmlRspackPlugin` (from `@rspack/core`) works: the compiler takes Rspack's built-in plugins through `__internal__registerBuiltinPlugin`,
+  and writes the page (the template with `<%= htmlWebpackPlugin.options.title %>`, `meta`, `base`, `inject`, `scriptLoading`, `filename`) with a
+  `<script>` and `<link>` for each initial chunk. Another built-in plugin is named in a warning.
 - A JSX spread child (`<List>{...items}</List>`) builds in the automatic runtime (`children: [...items]`).
 - A decorator on a class field uses the output's names for what it refers to (it kept the source name when the bundler had renamed an
   import, as with Lit's `@property`).

@@ -726,6 +726,39 @@ fn a_page_gets_an_empty_module_for_a_node_builtin_and_a_program_for_node_keeps_t
 }
 
 #[test]
+fn a_build_driven_by_a_webpack_or_rspack_config_names_the_default_chunk_main() {
+    let dir = std::env::temp_dir().join(format!("rkp-main-chunk-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("index.js"), "console.log('hello');\n").unwrap();
+    std::fs::write(dir.join("rspack.config.js"), "module.exports = { plugins: [] };\n").unwrap();
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_rkp")).args(args).current_dir(&dir).output().expect("rkp starts");
+        assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    run(&["bundle", "index.js", "--outdir", "dist", "--config", "rspack.config.js"]);
+    assert!(dir.join("dist/main.js").is_file(), "the chunk of the default entry is main.js, as in webpack and Rspack");
+    assert!(!dir.join("dist/bundle.js").exists());
+    run(&["bundle", "index.js", "--outdir", "plain"]);
+    assert!(dir.join("plain/bundle.js").is_file(), "without such a config the name is unchanged");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn rspacks_html_plugin_writes_the_page_for_the_entry_chunk() {
+    let dir = std::env::temp_dir().join(format!("rkp-rspack-html-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("index.js"), "console.log('hello');\n").unwrap();
+    std::fs::write(dir.join("index.html"), "<!doctype html><html><head><title><%= htmlWebpackPlugin.options.title %></title></head><body><div id=\"root\"></div></body></html>").unwrap();
+    // `@rspack/core`'s `HtmlRspackPlugin` calls the compiler with its name and prepared options, as written here.
+    std::fs::write(dir.join("rspack.config.js"), "module.exports = { plugins: [{ apply(compiler) { compiler.__internal__registerBuiltinPlugin({ name: 'HtmlRspackPlugin', options: { template: 'index.html', title: 'Rkp page', filename: ['index.html'], inject: 'head', scriptLoading: 'defer', meta: {} } }); } }] };\n").unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_rkp")).args(["bundle", "index.js", "--outdir", "dist", "--config", "rspack.config.js"]).current_dir(&dir).output().expect("rkp starts");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let html = std::fs::read_to_string(dir.join("dist/index.html")).expect("the page was written");
+    assert!(html.contains("<title>Rkp page</title>") && html.contains("<script defer src=\"main.js\"></script></head>") && html.contains("id=\"root\""), "{html}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn a_page_follows_the_browser_field_of_a_package_and_a_program_for_node_does_not() {
     let dir = std::env::temp_dir().join(format!("rkp-browser-field-{}", std::process::id()));
     let pkg = dir.join("node_modules").join("lib");

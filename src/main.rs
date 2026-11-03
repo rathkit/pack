@@ -1401,6 +1401,12 @@ fn child_build(job: &Job, entry: &str, _global: &str) -> Result<(String, Vec<(St
     }
 }
 
+/// Whether a configuration file is webpack's or Rspack's (`webpack.config.js`, `rspack.config.ts`, ...).
+fn is_webpack_config(file: &str) -> bool {
+    let name = std::path::Path::new(file).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    name.starts_with("webpack.config.") || name.starts_with("rspack.config.")
+}
+
 /// One build: plugins' `buildStart`, the graph, link, shake, bundle, the output hooks, and
 /// writing the files.
 fn run_build(job: &Job) -> Outcome {
@@ -1545,6 +1551,10 @@ fn run_build(job: &Job) -> Outcome {
     // Files written beside the output (style sheets) are named after it.
     if let Some(name) = outfile.as_ref().and_then(|f| std::path::Path::new(f).file_name()) {
         bundle_options.file_name = Some(name.to_string_lossy().into_owned());
+    } else if outfile.is_none() && job.config_file.as_deref().is_some_and(is_webpack_config) {
+        // webpack and Rspack name the chunk of the default entry `main` (`[name].js`); a page template written for
+        // them (`<script src="./main.js">`) depends on it.
+        bundle_options.file_name = Some("main.js".to_string());
     }
     if bundle_options.sourcemap != rathkit_pack::bundle::SourceMapMode::None && job.serve.is_none() {
         // The map names the original files relative to where the output will be.

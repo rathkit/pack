@@ -1199,7 +1199,80 @@ const outputFileSystem = Object.assign(Object.create(fs), {
   dirname: (p) => path.dirname(p),
 });
 
+/**
+ * Rspack's own plugins are written in Rust; `@rspack/core` hands them to the compiler as `{ name, options }` through
+ * `__internal__registerBuiltinPlugin`. The ones here are carried out in JavaScript; any other is named in a warning.
+ */
+const builtinPlugins = {
+  /** The page for the entries: the template (or a default one) with a `<script>` for each initial chunk, as `HtmlRspackPlugin` writes it. */
+  HtmlRspackPlugin(compiler, options) {
+    const names = options.filename?.length ? options.filename : ['index.html'];
+    compiler.hooks.compilation.tap('HtmlRspackPlugin', (compilation) => {
+      compilation.hooks.processAssets.tapPromise({ name: 'HtmlRspackPlugin', stage: Compilation.PROCESS_ASSETS_STAGE_OPTIMIZE_INLINE }, async () => {
+        const scripts = [];
+        const styles = [];
+        for (const chunk of compilation.chunks) {
+          if (!chunk.canBeInitial()) continue;
+          if (options.chunks && !options.chunks.includes(chunk.name)) continue;
+          if (options.excludeChunks?.includes(chunk.name)) continue;
+          for (const file of chunk.files) {
+            if (/\.[cm]?js$/.test(file)) scripts.push(file);
+            else if (/\.css$/.test(file)) styles.push(file);
+          }
+        }
+        const publicPath = options.publicPath ?? (typeof compilation.outputOptions.publicPath === 'string' && compilation.outputOptions.publicPath !== 'auto' ? compilation.outputOptions.publicPath : '');
+        const url = (file) => publicPath + file + (options.hash ? `?${compilation.hash ?? ''}` : '');
+        const tag = (tagName, attributes, voidTag) => ({ tagName, voidTag: !!voidTag, attributes });
+        const headTags = [];
+        const bodyTags = [];
+        if (options.base) headTags.push(tag('base', typeof options.base === 'string' ? { href: options.base } : options.base, true));
+        headTags.push(tag('meta', { charset: 'utf-8' }, true));
+        for (const meta of Object.values(options.meta ?? {})) headTags.push(tag('meta', meta, true));
+        if (options.inject !== 'false') {
+          for (const file of styles) headTags.push(tag('link', { href: url(file), rel: 'stylesheet' }, true));
+          for (const file of scripts) {
+            const script = tag('script', options.scriptLoading === 'module' ? { src: url(file), type: 'module' } : options.scriptLoading === 'blocking' ? { src: url(file) } : { defer: true, src: url(file) });
+            (options.inject === 'body' ? bodyTags : headTags).push(script);
+          }
+        }
+        const render = (t) => `<${t.tagName}${Object.entries(t.attributes).filter(([, v]) => v === '' || v).map(([k, v]) => (v === true ? ` ${k}` : ` ${k}="${String(v).replace(/"/g, '&quot;')}"`)).join('')}${t.voidTag ? '/>' : `></${t.tagName}>`}`;
+        const context = compiler.options.context || compiler.context || process.cwd();
+        let html;
+        if (options.template) {
+          html = await fs.promises.readFile(path.resolve(context, options.template.split('?')[0].replace(/^.*!/, '')), 'utf8');
+        } else if (options.templateContent) {
+          html = options.templateContent;
+        } else {
+          html = '<!doctype html><html><head><meta charset="utf-8"><title><%= htmlWebpackPlugin.options.title %></title></head><body></body></html>';
+        }
+        const data = { options: { title: options.title ?? 'Rspack App', ...options }, tags: { headTags, bodyTags }, files: { js: scripts.map(url), css: styles.map(url) } };
+        html = html.replace(/<%=\s*([\s\S]*?)\s*%>/g, (all, expr) => {
+          try {
+            return String(new Function('htmlWebpackPlugin', 'compilation', `with (htmlWebpackPlugin) { return (${expr}); }`)(data, compilation) ?? '');
+          } catch {
+            return '';
+          }
+        });
+        const inject = (position, text) => {
+          if (!text) return;
+          const at = html.search(position === 'head' ? /<\/head\s*>/i : /<\/body\s*>/i);
+          html = at < 0 ? (position === 'head' ? text + html : html + text) : html.slice(0, at) + text + html.slice(at);
+        };
+        inject('head', headTags.map(render).join(''));
+        inject('body', bodyTags.map(render).join(''));
+        if (options.minify) html = html.replace(/>\s+</g, '><').trim();
+        for (const name of names) compilation.emitAsset(name, new RawSource(Buffer.from(html)));
+      });
+    });
+  },
+};
+
 class Compiler {
+  __internal__registerBuiltinPlugin(plugin) {
+    const make = builtinPlugins[plugin.name];
+    if (make) make(this, plugin.options || {});
+    else log('warn', `Rspack's built-in plugin ${plugin.name} is not carried out`);
+  }
   constructor(context, options) {
     this.hooks = tolerant(compilerHookTable());
     this.webpack = webpackNamespace;
