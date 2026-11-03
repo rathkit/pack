@@ -25,7 +25,7 @@ Windows, and the steps in [verifying.md](verifying.md) pass.
 ## 1. Learn what breaks on real projects
 
 - [x] 1.1 A pinned list of 20 or more open-source projects (Vite apps for React, Vue and Svelte; libraries; command line tools; a webpack or rspack app) built with `rkp` and loaded in a browser, run by `tools/run-corpus.mjs` (by hand, or the weekly `corpus` workflow). Each failure became a fixture and a fix. 24 projects, all passing.
-- [ ] 1.2 The full test battery on Windows and macOS in CI, and fewer tests that run on Unix only.
+- [ ] 1.2 The full test battery on Windows and macOS in CI, and fewer tests that run on Unix only. The legs run (macOS 15 and 26 on arm64 and Intel, Windows 2022, 2025 and 11 on arm64); they become required checks after several green runs.
 - [x] 1.3 Issue templates, including a compatibility report (tool, plugin, versions), and labels.
 - [ ] 1.4 The development server, `--hmr` and federation scenarios in Firefox and WebKit as well as Chromium.
 
@@ -39,6 +39,7 @@ In this order, subject to what 1.1 finds.
 - [ ] 2.4 `--target es5` and an optional browserslist input.
 - [ ] 2.5 Plugins on Node versions older than 24 where possible, and a longer tested plugin list.
 - [ ] 2.6 webpack plugins that use compilation or chunk-graph internals, and `SplitChunksPlugin` settings, only if projects need them.
+- [ ] 2.7 Windows on arm64: a release build and an npm platform package. The program already builds and passes its tests on `windows-11-arm` in CI; the npm launcher test is skipped there until the package exists. Creating the package and its trusted publisher is a *(maintainer)* step.
 
 ## 3. Performance in real workflows
 
