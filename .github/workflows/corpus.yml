@@ -1,0 +1,56 @@
+name: corpus
+
+# Builds the pinned open-source projects of corpus/projects.json with rkp and loads the apps in a browser (tools/run-corpus.mjs).
+# It runs other projects' configuration files and plugins, so it is never part of the checks a change needs: run it by hand, or on
+# the weekly schedule, to learn what a change or a new release of a dependency broke. It has no secrets and a read-only token.
+on:
+  workflow_dispatch:
+    inputs:
+      projects:
+        description: "Names of the projects to run, separated by spaces (all when empty)"
+        required: false
+        default: ""
+  schedule:
+    - cron: "17 5 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: corpus
+  cancel-in-progress: false
+
+jobs:
+  corpus:
+    name: corpus
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CHROME: google-chrome
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/setup@a0881977cd8ea73b1ed212236c99ca10dcc80cf4
+        with:
+          runtime: node@24
+          working-directory: bench
+          install: false
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - run: cargo build --release
+      - name: Build and check the projects
+        env:
+          PROJECTS: ${{ inputs.projects }}
+        run: |
+          set -o pipefail
+          # PROJECTS is names only; the shell splits it into arguments, nothing in it is run.
+          node tools/run-corpus.mjs $PROJECTS --json "$RUNNER_TEMP/corpus.json" 2>&1 | tee "$RUNNER_TEMP/corpus.txt"
+      - name: Results
+        if: always()
+        run: |
+          {
+            echo '### Corpus'
+            echo '```'
+            cat "$RUNNER_TEMP/corpus.txt" 2>/dev/null || echo 'no output'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
