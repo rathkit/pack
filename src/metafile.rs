@@ -23,7 +23,19 @@ fn object(fields: Vec<(&str, Json)>) -> Json {
 /// A path as the metafile writes it: relative to the project when it is inside, with `/` between the parts.
 fn shown(cwd: &Path, path: &str) -> String {
     let p = Path::new(path);
-    p.strip_prefix(cwd).unwrap_or(p).to_string_lossy().replace('\\', "/")
+    if let Ok(inside) = p.strip_prefix(cwd) {
+        return inside.to_string_lossy().replace('\\', "/");
+    }
+    // The folder may be written another way than the module's path (Windows' short names, `RUNNER~1` for `runneradmin`).
+    if p.is_absolute() {
+        if let Ok(real) = cwd.canonicalize() {
+            let real = real.to_string_lossy().trim_start_matches(r"\\?\").to_string();
+            if let Ok(inside) = p.strip_prefix(Path::new(&real)) {
+                return inside.to_string_lossy().replace('\\', "/");
+            }
+        }
+    }
+    p.to_string_lossy().replace('\\', "/")
 }
 
 fn kind_name(kind: RequestKind) -> &'static str {
