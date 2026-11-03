@@ -801,3 +801,22 @@ fn a_name_that_becomes_a_parenthesized_expression_does_not_join_the_line_before_
     assert!(text.contains("if (z)\n  (0, require_cj().run)()"), "{text}");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn a_dynamic_import_with_a_variable_may_start_with_an_alias() {
+    let dir = std::env::temp_dir().join(format!("rkp-dyn-alias-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("src/layouts/empty")).unwrap();
+    std::fs::create_dir_all(dir.join("src/layouts/full")).unwrap();
+    std::fs::write(dir.join("src/layouts/empty/index.mjs"), "export default 'EMPTY';\n").unwrap();
+    std::fs::write(dir.join("src/layouts/full/index.mjs"), "export default 'FULL';\n").unwrap();
+    // The way Vue's `defineAsyncComponent(() => import(`@/layouts/${name}/index.vue`))` is written.
+    std::fs::write(dir.join("main.mjs"), "const load = (name) => import(`@/layouts/${name}/index.mjs`);\nconst a = await load('empty');\nconst b = await load('full');\nconsole.log(a.default, b.default);\n").unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_rkp")).args(["bundle", "main.mjs", "--outfile", "o.mjs", "--alias", "@=./src", "--format", "esm"]).current_dir(&dir).output().expect("rkp starts");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = std::fs::read_to_string(dir.join("o.mjs")).unwrap();
+    assert!(text.contains("\"@/layouts/empty/index.mjs\"") && text.contains("\"@/layouts/full/index.mjs\""), "{text}");
+    if let Ok(run) = std::process::Command::new("node").arg("o.mjs").current_dir(&dir).output() {
+        assert!(run.status.success() && String::from_utf8_lossy(&run.stdout).trim() == "EMPTY FULL", "{}{}", String::from_utf8_lossy(&run.stdout), String::from_utf8_lossy(&run.stderr));
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}

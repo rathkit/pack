@@ -39,6 +39,8 @@ about stability.
   behind files of re-exports (`export * from`) is kept; it was left out of every chunk (naive-ui's `createDiscreteApi`).
 - Code written without semicolons: a name that the bundle writes as `(0, x.y)` or `(x)` (a CommonJS import) no longer joins the line before it
   as a call (`const a = f()` followed by a line `useEffect(...)` became `f()(0, ...)`); the `;` the author left out is written.
+- A dynamic import with a variable may start with an alias (`import(\`@/layouts/${name}/index.vue\`)`, as Vue's `defineAsyncComponent` is
+  usually written), and the variable may be in the name of a folder (`${name}/index.vue`), not only in the last name; the extension must still be written out.
 - A JSX spread child (`<List>{...items}</List>`) builds in the automatic runtime (`children: [...items]`).
 - A decorator on a class field uses the output's names for what it refers to (it kept the source name when the bundler had renamed an
   import, as with Lit's `@property`).

@@ -708,7 +708,7 @@ impl Context<'_> {
                 if parsed.ast.variable_import {
                     let mut dirs = Vec::new();
                     let mut warnings = Vec::new();
-                    let rewritten = crate::glob::rewrite_dynamic_imports(&source, path, self.cwd, self.resolver.file_system(), &mut dirs, &mut warnings);
+                    let rewritten = crate::glob::rewrite_dynamic_imports(&source, path, self.cwd, &self.options.resolve.alias, self.resolver.file_system(), &mut dirs, &mut warnings);
                     self.state.0.lock().unwrap().watch_dirs.extend(dirs);
                     diagnostics.extend(warnings.into_iter().map(|message| Diagnostic { severity: Severity::Warning, message, file: Some(path.to_path_buf()), pos: None }));
                     if let Some(rewritten) = rewritten {

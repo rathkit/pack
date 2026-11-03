@@ -347,8 +347,16 @@
       "expect": {
         "files": [
           "dist/index.html"
-        ]
+        ],
+        "page": {
+          "allowErrors": [
+            "fetchTopicList error"
+          ],
+          "selector": "#root",
+          "text": "CONDUIT"
+        }
       },
+      "note": "The app asks a backend (http://localhost:3000/api/) that is not running while the page is checked; its own error message for that is allowed, and the page must still render its header.",
       "dropLockfile": true
     },
     {

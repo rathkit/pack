@@ -877,12 +877,13 @@ fn argument_parts(arg: &str) -> Option<Vec<Part>> {
 }
 
 /// Why a pattern from the pieces cannot be turned into files; the one-segment glob when it can.
-fn dynamic_pattern(parts: &[Part]) -> Result<String, String> {
+fn dynamic_pattern(parts: &[Part], rooted: bool) -> Result<String, String> {
     let first = match parts.first() {
         Some(Part::Text(t)) => t,
         _ => return Err("the path must start with ./ or ../ as text".into()),
     };
-    if !(first.starts_with("./") || first.starts_with("../")) {
+    // `rooted`: the path began with an alias that points into the project, and is now `/inside/the/project`.
+    if !(first.starts_with("./") || first.starts_with("../") || (rooted && first.starts_with('/'))) {
         // Not a relative path: a package name or an address, which this does not try to look for.
         return Err(String::new());
     }
@@ -904,8 +905,10 @@ fn dynamic_pattern(parts: &[Part]) -> Result<String, String> {
             }
         }
     }
-    let tail = pattern.rsplit('*').next().unwrap_or("");
-    if !tail.contains('.') || tail.contains('/') || tail.ends_with('.') {
+    // The last segment names the extension (`${name}/index.vue` and `${name}.js` both do); a variable in a folder's name is one name deep.
+    let tail = pattern.rsplit('/').next().unwrap_or("");
+    let tail = tail.rsplit('*').next().unwrap_or("");
+    if !tail.contains('.') || tail.ends_with('.') {
         return Err("the file extension must be written out in the path (`.js` after the last variable) so that the files can be told".into());
     }
     if pattern.starts_with("*") {
@@ -917,7 +920,7 @@ fn dynamic_pattern(parts: &[Part]) -> Result<String, String> {
 /// Each `import(\`./dir/${name}.js\`)` whose path can be known (it starts with ./ or ../, a variable stands for one name, and the extension is
 /// written out) becomes a call of a function that has an `import()` of each file the pattern reaches, and chooses by the path:
 /// the same rules as `@rollup/plugin-dynamic-import-vars`. What does not fit is left as it is; `warnings` says why, for a relative path.
-pub fn rewrite_dynamic_imports(source: &str, module: &Path, root: &Path, fs: &dyn FileSystem, dirs: &mut Vec<PathBuf>, warnings: &mut Vec<String>) -> Option<String> {
+pub fn rewrite_dynamic_imports(source: &str, module: &Path, root: &Path, aliases: &[Alias], fs: &dyn FileSystem, dirs: &mut Vec<PathBuf>, warnings: &mut Vec<String>) -> Option<String> {
     let calls = import_calls(source);
     if calls.is_empty() {
         return None;
@@ -931,8 +934,25 @@ pub fn rewrite_dynamic_imports(source: &str, module: &Path, root: &Path, fs: &dy
         // One argument: it ends at the `)` that closes the call.
         let Some(end) = argument_end(source, open + 1) else { continue };
         let argument = &source[open + 1..end];
-        let Some(parts) = argument_parts(argument) else { continue };
-        let pattern = match dynamic_pattern(&parts) {
+        let Some(mut parts) = argument_parts(argument) else { continue };
+        // `import(\`@/views/${name}.vue\`)`: the alias is written the way the program passes it at run time (the keys of the table), and the
+        // files are looked for where it points.
+        let mut alias_written: Option<(String, String)> = None;
+        if let Some(Part::Text(first)) = parts.first() {
+            if !first.starts_with("./") && !first.starts_with("../") && !first.starts_with('/') {
+                let mut through = through_aliases(first, aliases, root, module_dir);
+                // A path drops its trailing slash on the way, and what follows the text is a name inside that folder.
+                if through != *first && first.ends_with('/') && !through.ends_with('/') {
+                    through.push('/');
+                }
+                if through != *first {
+                    alias_written = Some((first.clone(), through.clone()));
+                    parts[0] = Part::Text(through);
+                }
+            }
+        }
+        let rooted = alias_written.as_ref().is_some_and(|(_, to)| to.starts_with('/'));
+        let pattern = match dynamic_pattern(&parts, rooted) {
             Ok(p) => p,
             Err(why) => {
                 if !why.is_empty() {
@@ -958,9 +978,18 @@ pub fn rewrite_dynamic_imports(source: &str, module: &Path, root: &Path, fs: &dy
         }
         let name = format!("__rkDynamicImport{counter}");
         counter += 1;
-        let table: Vec<String> = files.iter().map(|f| {
-            let key = relative_from(module_dir, f);
-            format!("{}: () => import({})", quote(&key), quote(&key))
+        let table: Vec<String> = files.iter().filter_map(|f| {
+            let target = relative_from(module_dir, f);
+            let key = match &alias_written {
+                // The leading text is what the alias stood for; the rest of the path is the same on both sides.
+                Some((written, to)) => {
+                    let full = if rooted { format!("/{}", f.strip_prefix(root).ok()?.to_string_lossy().replace('\\', "/")) } else { target.clone() };
+                    let rest = full.strip_prefix(to.as_str())?;
+                    format!("{written}{rest}")
+                }
+                None => target.clone(),
+            };
+            Some(format!("{}: () => import({})", quote(&key), quote(&target)))
         }).collect();
         helpers.push_str(&format!(
             "\nfunction {name}(path) {{ var table = {{ {} }}; var load = table[path]; return load ? load() : Promise.reject(new Error(\"Unknown variable dynamic import: \" + path)); }}",
@@ -1039,15 +1068,16 @@ mod tests {
 
     #[test]
     fn what_a_variable_import_can_be() {
-        let pattern = |arg: &str| argument_parts(arg).ok_or_else(|| "no parts".to_string()).and_then(|p| dynamic_pattern(&p));
+        let pattern = |arg: &str| argument_parts(arg).ok_or_else(|| "no parts".to_string()).and_then(|p| dynamic_pattern(&p, false));
         assert_eq!(pattern("`./mods/${n}.js`"), Ok("./mods/*.js".to_string()));
         assert_eq!(pattern("'./mods/' + n + '.js'"), Ok("./mods/*.js".to_string()));
         assert_eq!(pattern("`../x/${a}/${b}.json`"), Ok("../x/*/*.json".to_string()));
+        assert_eq!(pattern("`./layouts/${n}/index.vue`"), Ok("./layouts/*/index.vue".to_string()));
         assert_eq!(pattern("`./mods/${n}`").unwrap_err().contains("extension"), true);
         assert_eq!(pattern("`./mods/${a}${b}.js`").unwrap_err().contains("next to each other"), true);
         assert_eq!(pattern("`./mods/*/${n}.js`").unwrap_err().contains("character a pattern uses"), true);
         // Not paths of this kind: left alone without a word.
-        assert_eq!(dynamic_pattern(&argument_parts("`pkg/${n}.js`").unwrap()), Err(String::new()));
+        assert_eq!(dynamic_pattern(&argument_parts("`pkg/${n}.js`").unwrap(), false), Err(String::new()));
         assert_eq!(argument_parts("n"), None);
         assert_eq!(argument_parts("`./static.js`"), None);
         assert_eq!(argument_parts("'./a' + '.js'"), None);
