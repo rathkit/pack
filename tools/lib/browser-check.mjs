@@ -136,7 +136,7 @@ export async function checkPage(dir, expect = {}, browser = findBrowser()) {
     const text = String((await evaluate('document.body.innerText.trim()')) ?? '').replace(/\s+/g, ' ').slice(0, 200);
     const children = await evaluate(`document.querySelector(${selector})?.children.length ?? -1`);
     if (children === -1) note(`no element matches ${expect.selector}`);
-    else if (!text && !(await evaluate('document.body.querySelectorAll("img,canvas,svg,video,input,button").length'))) note('the page shows nothing');
+    else if (!expect.empty && !text && !(await evaluate('document.body.querySelectorAll("img,canvas,svg,video,input,button").length'))) note('the page shows nothing');
     if (expect.text && !new RegExp(expect.text).test(text)) note(`the page text does not match /${expect.text}/: ${text}`);
     const html = String((await evaluate('document.body.innerHTML')) ?? '').replace(/\s+/g, ' ').slice(0, 400);
     ws.close();

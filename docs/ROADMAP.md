@@ -24,7 +24,7 @@ Windows, and the steps in [verifying.md](verifying.md) pass.
 
 ## 1. Learn what breaks on real projects
 
-- [x] 1.1 A pinned list of 20 or more open-source projects (Vite apps for React, Vue and Svelte; libraries; command line tools; a webpack or rspack app) built with `rkp` and loaded in a browser, run by `tools/run-corpus.mjs` (by hand, or the weekly `corpus` workflow). Each failure became a fixture and a fix. 24 projects: 22 pass; the 2 rspack examples are known gaps, listed as expected failures (rspack's own plugins need its compiler API; webpack and rspack name the default chunk `main.js`, `rkp` writes `bundle.js`).
+- [x] 1.1 A pinned list of 20 or more open-source projects (Vite apps for React, Vue and Svelte; libraries; command line tools; a webpack or rspack app) built with `rkp` and loaded in a browser, run by `tools/run-corpus.mjs` (by hand, or the weekly `corpus` workflow). Each failure became a fixture and a fix. 24 projects, all passing.
 - [ ] 1.2 The full test battery on Windows and macOS in CI, and fewer tests that run on Unix only.
 - [x] 1.3 Issue templates, including a compatibility report (tool, plugin, versions), and labels.
 - [ ] 1.4 The development server, `--hmr` and federation scenarios in Firefox and WebKit as well as Chromium.

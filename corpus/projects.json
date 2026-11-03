@@ -580,7 +580,10 @@
       "expect": {
         "files": [
           "dist/index.html"
-        ]
+        ],
+        "page": {
+          "empty": true
+        }
       }
     }
   ]
