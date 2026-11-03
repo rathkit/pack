@@ -2,11 +2,11 @@
 // in the test: how modules are found, which copy of a shared package is picked, and what plugins can change.
 //   node tools/test-federation-runtime.mjs
 import assert from 'node:assert/strict';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { join, dirname } from 'node:path';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const rt = await import(join(root, 'src', 'federation', 'runtime.js'));
+const rt = await import(pathToFileURL(join(root, 'src', 'federation', 'runtime.js')).href);
 
 let count = 0;
 const tests = [];
