@@ -4,7 +4,7 @@
 // runs once as written and twice bundled (tree-shaking on and off); all three must agree.
 import { spawnSync } from 'node:child_process';
 import { writeFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -106,9 +106,9 @@ for (const [name, code] of Object.entries(scenarios)) {
   if (expected.code !== 0) { console.log(`skip ${name}: does not run in plain Node (${expected.err.slice(0, 100)})`); skipped++; continue; }
   for (const flags of [[], ['--no-treeshake'], ['--splitting'], ['--minify'], ['--minify', '--sourcemap']]) {
     const split = flags.includes('--splitting');
-    const out = split ? file.replace(/\.mjs$/, '-chunks/' + file.split('/').pop().replace(/\.mjs$/, '.js')) : file.replace(/\.mjs$/, flags.length ? '.' + flags.join('').replace(/--/g, '') + '.mjs' : '.bundle.mjs');
+    const out = split ? file.replace(/\.mjs$/, '-chunks/' + basename(file).replace(/\.mjs$/, '.js')) : file.replace(/\.mjs$/, flags.length ? '.' + flags.join('').replace(/--/g, '') + '.mjs' : '.bundle.mjs');
     const t = Date.now();
-    const b = spawnSync(bin, ['bundle', file, ...(split ? ['--outdir', out.replace(/\/[^/]*$/, '')] : ['--outfile', out]), '--condition', 'node', '--main-field', 'main', '--original-paths', ...flags], { cwd: project, encoding: 'utf8', timeout: 120000 });
+    const b = spawnSync(bin, ['bundle', file, ...(split ? ['--outdir', dirname(out)] : ['--outfile', out]), '--condition', 'node', '--main-field', 'main', '--original-paths', ...flags], { cwd: project, encoding: 'utf8', timeout: 120000 });
     const took = Date.now() - t;
     if (b.status !== 0) { failed++; console.log(`FAIL ${name}: bundler: ${b.stderr.split('\\n').find((l) => /error/.test(l))?.slice(0, 200)}`); continue; }
     const got = run(out);

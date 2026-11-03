@@ -2924,8 +2924,14 @@ impl Bundler<'_> {
 
 /// `"file:///a/b%20c.js"` for an absolute path, as `import.meta.url` reads in Node.
 fn file_url(path: &std::path::Path) -> String {
+    // On Windows a path is `C:\a\b` or `\\?\C:\a\b`; its URL is `file:///C:/a/b`.
+    let text = path.to_string_lossy().replace('\\', "/");
+    let text = text.trim_start_matches("//?/");
     let mut url = String::from("file://");
-    for b in path.to_string_lossy().bytes() {
+    if !text.starts_with('/') {
+        url.push('/');
+    }
+    for b in text.bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' | b'!' | b'$' | b'&' | b'\'' | b'(' | b')' | b'*' | b'+' | b',' | b';' | b'=' | b':' | b'@' => url.push(b as char),
             _ => {
@@ -4506,5 +4512,18 @@ impl Scanner<'_, '_> {
             _ => {}
         }
         entries
+    }
+}
+
+#[cfg(test)]
+mod file_url_tests {
+    use super::file_url;
+    use std::path::Path;
+
+    #[test]
+    fn a_path_is_a_file_url_on_unix_and_on_windows() {
+        assert_eq!(file_url(Path::new("/a/b c.js")), "\"file:///a/b%20c.js\"");
+        assert_eq!(file_url(Path::new(r"D:\a\b c.js")), "\"file:///D:/a/b%20c.js\"");
+        assert_eq!(file_url(Path::new(r"\\?\D:\a\b.js")), "\"file:///D:/a/b.js\"");
     }
 }
