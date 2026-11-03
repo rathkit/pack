@@ -589,7 +589,7 @@ impl Federation {
                         continue;
                     }
                     if let Edge::Module(target) = edge {
-                        let target_path = graph.module(*target).path.to_string_lossy().into_owned();
+                        let target_path = graph.module(*target).path.to_string_lossy().replace('\\', "/");
                         match target_path.strip_prefix(&prefix).and_then(|rest| rest.strip_suffix(".js")) {
                             Some(read) => {
                                 reads.insert(format!("shared:{read}"));
@@ -614,7 +614,7 @@ impl Federation {
         };
         for module in &graph.modules {
             let stub = |request: usize| match module.edges.get(request) {
-                Some(Edge::Module(t)) => graph.module(*t).path.to_string_lossy().strip_prefix(&prefix).and_then(|r| r.strip_suffix(".js")).map(String::from),
+                Some(Edge::Module(t)) => graph.module(*t).path.to_string_lossy().replace('\\', "/").strip_prefix(&prefix).and_then(|r| r.strip_suffix(".js")).map(String::from),
                 _ => None,
             };
             let mut seen_requests = BTreeSet::new();
@@ -707,7 +707,8 @@ impl Federation {
 
     /// The module for an import of a remote or a shared package: what was loaded before anything ran.
     fn stub(&self, path: &Path) -> Option<String> {
-        let rest = path.to_str()?.strip_prefix(ROOT)?.strip_prefix('/')?;
+        let text = path.to_str()?.replace('\\', "/");
+        let rest = text.strip_prefix(ROOT)?.strip_prefix('/')?;
         let (what, key) = rest.split_once('/')?;
         let key = key.strip_suffix(".js")?;
         if what != "shared" && what != "remote" {
@@ -1306,8 +1307,9 @@ impl Federation {
 
     /// The files others read: the entry that names the container, and the manifest.
     pub fn finish(self: &Arc<Self>, output: &mut Output, hot: bool, repeated: bool) -> Result<(), String> {
-        let core = self.core_path().to_string_lossy().into_owned();
-        let core_file = output.chunks.iter().find(|c| c.facade_module.as_deref() == Some(core.as_str())).map(|c| c.file.clone()).ok_or("the federation runtime was not built; the build needs the esm format with splitting")?;
+        // The module's path is written with the platform's separators (`\@rathkit\...` on Windows); the constant is not.
+        let core = self.core_path().to_string_lossy().replace('\\', "/");
+        let core_file = output.chunks.iter().find(|c| c.facade_module.as_deref().map(|m| m.replace('\\', "/")).as_deref() == Some(core.as_str())).map(|c| c.file.clone()).ok_or("the federation runtime was not built; the build needs the esm format with splitting")?;
         if !self.exposes.is_empty() {
             let styles: Vec<(String, Vec<String>)> = self.expose_assets(output).into_iter().filter(|(_, _, _, css)| !css.is_empty()).map(|(e, _, _, css)| (e.key.clone(), css)).collect();
             output.files.push(OutputFile { name: self.filename.clone(), code: self.remote_entry(&core_file, hot && self.live_reload, &styles), map: None, data: None, original: None });
