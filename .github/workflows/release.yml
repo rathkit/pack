@@ -36,14 +36,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, target: linux-x64-gnu }
+          - { os: ubuntu-24.04, target: linux-x64-gnu }
           - { os: ubuntu-24.04-arm, target: linux-arm64-gnu }
           # Static builds for Alpine and other musl systems (the program has no C dependencies).
-          - { os: ubuntu-latest, target: linux-x64-musl, triple: x86_64-unknown-linux-musl }
+          - { os: ubuntu-24.04, target: linux-x64-musl, triple: x86_64-unknown-linux-musl }
           - { os: ubuntu-24.04-arm, target: linux-arm64-musl, triple: aarch64-unknown-linux-musl }
-          - { os: macos-latest, target: macos-arm64 }
+          - { os: macos-15, target: macos-arm64 }
           - { os: macos-15-intel, target: macos-x64 }
-          - { os: windows-latest, target: windows-x64 }
+          - { os: windows-2025, target: windows-x64 }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -104,7 +104,7 @@ jobs:
 
   release:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write # create the release
       id-token: write # the keyless signature is made with this run's identity
@@ -162,7 +162,7 @@ jobs:
   npm-pack:
     # Every run: the npm packages are made from the tarballs and packed, so a mistake shows before a tag does.
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -189,7 +189,7 @@ jobs:
 
   crate-pack:
     # Every run: the crate is packed and built from its own files (nothing outside the include list is there), so a mistake shows before a tag does.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -208,7 +208,7 @@ jobs:
     # Trusted publishing (OIDC) needs each package to name this repository, this workflow and the npm environment in its npm settings.
     needs: build
     if: github.event_name == 'push' && vars.NPM_PUBLISH == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: npm
     permissions:
       contents: read
@@ -254,7 +254,7 @@ jobs:
     # no extra action has to be allowed in the organization.)
     needs: build
     if: github.event_name == 'push' && vars.CRATES_PUBLISH == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: crates-io
     permissions:
       contents: read

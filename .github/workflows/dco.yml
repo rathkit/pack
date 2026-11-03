@@ -16,7 +16,7 @@ jobs:
   commits:
     # The name is what a branch ruleset lists as the required check.
     name: dco
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Check sign-off and signatures
         env:

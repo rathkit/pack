@@ -15,7 +15,8 @@ concurrency:
 jobs:
   check:
     # glibc: x64 and arm64, the oldest and the newest Node that runs the plugin host. The musl job below runs the same checks.
-    # The job names are what the main ruleset requires; keep them as they are.
+    # Runner images are pinned to a version, never `-latest`, so what runs does not change under us. The job names are what the main
+    # ruleset requires: renaming or adding a leg means changing the ruleset too.
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -23,8 +24,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: "ubuntu-latest node 24", os: ubuntu-latest, node: 24, browser: true }
-          - { name: "ubuntu-latest node 26", os: ubuntu-latest, node: 26, browser: true }
+          - { name: "ubuntu-24.04 node 24", os: ubuntu-24.04, node: 24, browser: true }
+          - { name: "ubuntu-24.04 node 26", os: ubuntu-24.04, node: 26, browser: true }
+          - { name: "ubuntu-26.04 node 24", os: ubuntu-26.04, node: 24, browser: true }
+          - { name: "ubuntu-26.04 node 26", os: ubuntu-26.04, node: 26, browser: true }
           - { name: "ubuntu-24.04-arm node 24", os: ubuntu-24.04-arm, node: 24 }
           - { name: "ubuntu-24.04-arm node 26", os: ubuntu-24.04-arm, node: 26 }
     env:
@@ -86,9 +89,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: "macos-latest node 24", os: macos-latest, node: 24 }
+          - { name: "macos-15 node 24", os: macos-15, node: 24 }
           - { name: "macos-15-intel node 24", os: macos-15-intel, node: 24 }
-          - { name: "windows-latest node 24", os: windows-latest, node: 24 }
+          - { name: "windows-2025 node 24", os: windows-2025, node: 24 }
+          - { name: "windows-2022 node 24", os: windows-2022, node: 24 }
     defaults:
       run:
         shell: bash
@@ -132,7 +136,7 @@ jobs:
   # request has no secrets, so only the secret scan runs there). The whole history is scanned by hand: history-scan.yml.
   hygiene:
     name: secrets and words
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
       RATHKIT_DENYLIST: ${{ secrets.RATHKIT_DENYLIST }}
@@ -167,8 +171,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: "alpine (musl) node 24", os: ubuntu-latest, node: 24 }
-          - { name: "alpine (musl) node 26", os: ubuntu-latest, node: 26 }
+          - { name: "alpine (musl) node 24", os: ubuntu-24.04, node: 24 }
+          - { name: "alpine (musl) node 26", os: ubuntu-24.04, node: 26 }
           - { name: "alpine (musl, arm64) node 24", os: ubuntu-24.04-arm, node: 24 }
           - { name: "alpine (musl, arm64) node 26", os: ubuntu-24.04-arm, node: 26 }
     steps:
