@@ -20,22 +20,14 @@ fn object(fields: Vec<(&str, Json)>) -> Json {
     Json::Object(fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
 }
 
-/// A path as the metafile writes it: relative to the project when it is inside, with `/` between the parts.
+/// A path as the metafile writes it: relative to the project when it is inside, with `/` between the parts. Both are compared
+/// as text with `/` and without a `\\?\` prefix, and without regard to case on Windows, where one folder is written in several ways.
 fn shown(cwd: &Path, path: &str) -> String {
-    let p = Path::new(path);
-    if let Ok(inside) = p.strip_prefix(cwd) {
-        return inside.to_string_lossy().replace('\\', "/");
-    }
-    // The folder may be written another way than the module's path (Windows' short names, `RUNNER~1` for `runneradmin`).
-    if p.is_absolute() {
-        if let Ok(real) = cwd.canonicalize() {
-            let real = real.to_string_lossy().trim_start_matches(r"\\?\").to_string();
-            if let Ok(inside) = p.strip_prefix(Path::new(&real)) {
-                return inside.to_string_lossy().replace('\\', "/");
-            }
-        }
-    }
-    p.to_string_lossy().replace('\\', "/")
+    let plain = |text: &str| text.replace('\\', "/").trim_start_matches("//?/").to_string();
+    let (path, root) = (plain(path), plain(&cwd.to_string_lossy()));
+    let root = root.trim_end_matches('/');
+    let inside = |p: &str, r: &str| p.len() > r.len() && p.is_char_boundary(r.len()) && p.as_bytes()[r.len()] == b'/' && if cfg!(windows) { p[..r.len()].eq_ignore_ascii_case(r) } else { &p[..r.len()] == r };
+    if !root.is_empty() && inside(&path, root) { path[root.len() + 1..].to_string() } else { path }
 }
 
 fn kind_name(kind: RequestKind) -> &'static str {
@@ -126,4 +118,19 @@ pub fn build(graph: &Graph, output: &Output, cwd: &Path) -> String {
     let mut text = Json::Object(vec![("inputs".to_string(), Json::Object(inputs)), ("outputs".to_string(), Json::Object(outputs))]).to_string();
     text.push('\n');
     text
+}
+
+#[cfg(test)]
+mod shown_tests {
+    use super::shown;
+    use std::path::Path;
+
+    #[test]
+    fn a_folder_written_in_two_ways_still_holds_its_files() {
+        assert_eq!(shown(Path::new(r"\\?\C:\work\project"), "C:/work/project/src/a.js"), "src/a.js");
+        assert_eq!(shown(Path::new(r"C:\work\project"), r"C:\work\project\src\a.js"), "src/a.js");
+        assert_eq!(shown(Path::new("/work/project"), "/work/project/a.js"), "a.js");
+        // A sibling folder with the same beginning is not inside.
+        assert_eq!(shown(Path::new("/work/project"), "/work/project-two/a.js"), "/work/project-two/a.js");
+    }
 }
