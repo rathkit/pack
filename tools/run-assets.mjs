@@ -119,7 +119,7 @@ for (const c of cases) {
     else if (JSON.stringify(got) !== JSON.stringify(c.out)) problem = `printed ${JSON.stringify(got)}, expected ${JSON.stringify(c.out)}`;
     if (!problem && c.verify) problem = await c.verify(out, dir);
     for (const f of c.files ?? []) {
-      const found = f instanceof RegExp ? existsSync(out) && filesUnder(out).some((n) => f.test(n.replace(/^.*\//, ''))) : existsSync(join(out, f)) || existsSync(join(dir, f));
+      const found = f instanceof RegExp ? existsSync(out) && filesUnder(out).some((n) => f.test(n.replace(/^.*[\\/]/, ''))) : existsSync(join(out, f)) || existsSync(join(dir, f));
       if (!problem && !found) problem = `missing file ${f}`;
     }
   }
