@@ -508,5 +508,5 @@ if (failed) {
   console.log(`${failed} failure(s)`);
   process.exit(1);
 }
-rmSync(dir, { recursive: true, force: true });
+try { rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch {} // Windows may still hold a file of a process that just ended
 console.log('hmr: all checks pass');

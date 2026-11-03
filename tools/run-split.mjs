@@ -58,5 +58,5 @@ for (const [name, extra] of names.flatMap((n) => [[n, []], [n, ['--minify', '--k
   }
 }
 console.log(failed ? `${failed} failure(s)` : `all ${names.length} split programs agree`);
-if (!failed) rmSync(tmp, { recursive: true, force: true });
+if (!failed) try { rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch {} // Windows may still hold a file of a process that just ended
 process.exit(failed ? 1 : 0);

@@ -212,6 +212,6 @@ for (let p = 0; p < programs; p++) {
   }
 }
 console.log(failures ? `${failures} failure(s) in ${checked} frames` : `all ${checked} stack frames map back to their source`);
-if (!failures) rmSync(tmp, { recursive: true, force: true });
+if (!failures) try { rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch {} // Windows may still hold a file of a process that just ended
 else console.log(`kept ${tmp}`);
 process.exit(failures ? 1 : 0);

@@ -101,7 +101,7 @@ check(existsSync(join(bare, 'dist', 'bundle.js')), 'the bundle itself is still w
   check(compile.status === 0, 'a strict consumer type-checks against it', compile.stdout);
 }
 
-rmSync(tmp, { recursive: true, force: true });
+try { rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch {} // Windows may still hold a file of a process that just ended
 if (failed) {
   console.log(`${failed} failure(s)`);
   process.exit(1);
