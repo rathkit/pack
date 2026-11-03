@@ -975,6 +975,19 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     // there (`NODE_ENV` of the environment if it is set), and a `--define` of it wins.
     if serve || !options.node_builtins || entries.iter().any(|e| e.to_ascii_lowercase().ends_with(".html")) {
         bundle_options.browser = true;
+        // Only when a page loads the output: a program the dev server builds from a script entry may still run in Node.
+        let page = !options.node_builtins || entries.iter().any(|e| e.to_ascii_lowercase().ends_with(".html"));
+        options.empty_builtins = options.node_builtins && page;
+        // As in Vite for a browser: the `browser` condition and field, and the `browser` map of a package (axios swaps its Node adapter for the browser one).
+        if page {
+            options.resolve.browser_map = true;
+            if !options.resolve.conditions.iter().any(|c| c == "browser") {
+                options.resolve.conditions.push("browser".to_string());
+            }
+            if options.resolve.main_fields == ["module", "main"] {
+                options.resolve.main_fields.insert(0, "browser".to_string());
+            }
+        }
         let value = std::env::var("NODE_ENV").ok().filter(|v| !v.is_empty()).unwrap_or_else(|| if serve { "development" } else { "production" }.to_string());
         if let Ok(define) = rathkit_pack::define::Define::parse("process.env.NODE_ENV", &format!("{value:?}")) {
             options.defines.add_default(define);

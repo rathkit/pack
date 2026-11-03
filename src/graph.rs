@@ -195,6 +195,8 @@ pub struct GraphOptions {
     pub external: Vec<String>,
     /// Treat Node's built-in modules (`fs`, `node:path`, ...) as external.
     pub node_builtins: bool,
+    /// A program for a browser: a Node built-in (`crypto`, `fs`) that no plugin supplies is an empty module, as in Vite, not an import the page cannot load.
+    pub empty_builtins: bool,
     /// Leave every package import (a name that is not a path, nor made into one by an alias) out of the bundle.
     pub packages_external: bool,
     /// Worker threads; 0 means one per core.
@@ -212,7 +214,7 @@ pub type WorkerBuilder = dyn Fn(&Path) -> Result<Vec<u8>, String> + Send + Sync;
 
 impl Default for GraphOptions {
     fn default() -> Self {
-        GraphOptions { plugins: None, resolve: ResolveOptions::default(), jsx: JsxOptions::default(), decorator_metadata: false, experimental_decorators: false, strict_null_checks: false, loaders: Vec::new(), asset_names: "[name]-[hash]".to_string(), public_path: "./".to_string(), defines: Default::default(), pure_calls: Vec::new(), inject: Vec::new(), external: Vec::new(), node_builtins: true, packages_external: false, threads: 0, cache: None, federation: None, worker_builder: None }
+        GraphOptions { plugins: None, resolve: ResolveOptions::default(), jsx: JsxOptions::default(), decorator_metadata: false, experimental_decorators: false, strict_null_checks: false, loaders: Vec::new(), asset_names: "[name]-[hash]".to_string(), public_path: "./".to_string(), defines: Default::default(), pure_calls: Vec::new(), inject: Vec::new(), external: Vec::new(), node_builtins: true, empty_builtins: false, packages_external: false, threads: 0, cache: None, federation: None, worker_builder: None }
     }
 }
 
@@ -482,8 +484,13 @@ impl Context<'_> {
             plugin_text = Some(wasm_init_module(&quote(&format!("./{file}"))));
             module_type = Some("js".to_string());
         }
+        if id.starts_with("\0browser-external:") {
+            // CommonJS, so that `import { resolve } from "path"` (axios) is a property that is not there, not a link error.
+            plugin_text = Some("module.exports = {};\n".to_string());
+            module_type = Some("js".to_string());
+        }
         let host = self.options.plugins.as_ref().filter(|_| worker.is_none());
-        if let Some(host) = host {
+        if let Some(host) = host.filter(|_| plugin_text.is_none()) {
             if let Some(loaded) = host.load(&id).map_err(plugin_error)? {
                 plugin_text = loaded.code;
                 plugin_bytes = loaded.bytes;
@@ -830,6 +837,9 @@ impl Context<'_> {
                 }
             }
         }
+        if self.options.empty_builtins && is_node_builtin(specifier) {
+            return Target::Path(PathBuf::from(format!("\0browser-external:{}", specifier.trim_start_matches("node:"))));
+        }
         // In a style sheet `/fonts/a.woff2` is a file of the project (its root, then `public/`) before it is a place on the disk;
         // one that is nowhere stays as written, to be found when the page loads.
         // The same for an import in a script (`import icons from '/icons.svg'`, which a Vue template becomes) when no such file is on the disk.
@@ -888,7 +898,7 @@ impl Context<'_> {
     }
 
     fn is_external(&self, specifier: &str) -> bool {
-        if self.options.node_builtins && is_node_builtin(specifier) {
+        if self.options.node_builtins && !self.options.empty_builtins && is_node_builtin(specifier) {
             return true;
         }
         if self.options.packages_external && is_package_name(specifier) && !self.options.resolve.alias.iter().any(|a| a.matches(specifier)) {

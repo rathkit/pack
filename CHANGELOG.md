@@ -30,6 +30,11 @@ about stability.
   for the server, or the environment's `NODE_ENV`; `--define` wins), as in Vite. Those outputs also no longer start with
   `import ... from "node:module"` or `"node:url"` (the `require` and `__dirname` shims), which a browser cannot load and which
   stopped every chunk of a page that had any CommonJS code in it.
+- In a page build, a Node built-in (`crypto`, `fs`, `node:path`, ...) that no plugin supplies is an empty module, as in Vite, so a library that
+  reaches for `crypto` when it is there no longer leaves `import "crypto"` in a script a browser cannot load. A program for Node keeps the import.
+- In a page build (and `--platform-browser`), the `browser` condition of `exports`, the `browser` field as an entry, and the object form of
+  a package's `browser` field (`"./lib/node.js": "./lib/web.js"`, `"fs": false`) are followed, as in Vite; axios and many other packages need it
+  to keep their Node code out of a page.
 - A JSX spread child (`<List>{...items}</List>`) builds in the automatic runtime (`children: [...items]`).
 - A decorator on a class field uses the output's names for what it refers to (it kept the source name when the bundler had renamed an
   import, as with Lit's `@property`).

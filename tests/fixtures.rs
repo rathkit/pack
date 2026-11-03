@@ -702,3 +702,53 @@ fn a_page_has_node_env_as_a_constant_and_a_program_for_node_keeps_it() {
     assert!(read("node.mjs").contains("process.env.NODE_ENV") && read("node.mjs").contains("node:module"), "{}", read("node.mjs"));
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn a_page_gets_an_empty_module_for_a_node_builtin_and_a_program_for_node_keeps_the_import() {
+    let dir = std::env::temp_dir().join(format!("rkp-empty-builtin-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("index.html"), "<!doctype html><script type=\"module\" src=\"/main.js\"></script>").unwrap();
+    // A library that reaches for Node's `crypto` when it is there, and an import of `node:fs` that a page never calls.
+    std::fs::write(dir.join("main.js"), "import fs from 'node:fs';\nimport { resolve } from 'path';\nimport { EventEmitter } from 'events';\nimport lib from './lib.cjs';\nconsole.log('LIB', lib, typeof fs, typeof resolve, typeof EventEmitter);\n").unwrap();
+    std::fs::write(dir.join("lib.cjs"), "let c; try { c = require('crypto'); } catch (e) {}\nmodule.exports = typeof c;\n").unwrap();
+    let build = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_rkp")).args(args).current_dir(&dir).output().expect("rkp starts");
+        assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    build(&["bundle", "index.html", "--outdir", "page"]);
+    let page = std::fs::read_dir(dir.join("page")).unwrap().filter_map(|e| e.ok()).map(|e| e.path()).find(|p| p.extension().is_some_and(|e| e == "js")).expect("a script was written");
+    let script = std::fs::read_to_string(page).unwrap();
+    assert!(!script.contains("\"crypto\"") && !script.contains("\"node:fs\"") && !script.contains("from \"fs\""), "a page cannot load a bare Node module: {script}");
+    build(&["bundle", "main.js", "--outfile", "node.mjs"]);
+    let node = std::fs::read_to_string(dir.join("node.mjs")).unwrap();
+    assert!(node.contains("node:fs") && node.contains("require('crypto')"), "{node}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_page_follows_the_browser_field_of_a_package_and_a_program_for_node_does_not() {
+    let dir = std::env::temp_dir().join(format!("rkp-browser-field-{}", std::process::id()));
+    let pkg = dir.join("node_modules").join("lib");
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::write(dir.join("index.html"), "<!doctype html><script type=\"module\" src=\"/main.js\"></script>").unwrap();
+    std::fs::write(dir.join("main.js"), "import { which } from 'lib';\nimport cond from 'lib/cond';\nconsole.log(which, cond);\n").unwrap();
+    // `./node.js` becomes `./web.js` and `fs` is nothing, as the field says; `exports` has a `browser` condition.
+    std::fs::write(pkg.join("package.json"), r#"{"name":"lib","main":"index.js","browser":{"./node.js":"./web.js","fs":false},"exports":{".":"./index.js","./cond":{"browser":"./cond-web.js","default":"./cond-node.js"}}}"#).unwrap();
+    std::fs::write(pkg.join("index.js"), "import node from './node.js';\nexport const which = node;\n").unwrap();
+    std::fs::write(pkg.join("node.js"), "import util from 'util';\nutil.inherits(function A() {}, function B() {});\nexport default 'NODE_FILE';\n").unwrap();
+    std::fs::write(pkg.join("web.js"), "export default 'WEB_FILE';\n").unwrap();
+    std::fs::write(pkg.join("cond-web.js"), "export default 'COND_WEB';\n").unwrap();
+    std::fs::write(pkg.join("cond-node.js"), "export default 'COND_NODE';\n").unwrap();
+    let build = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_rkp")).args(args).current_dir(&dir).output().expect("rkp starts");
+        assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    build(&["bundle", "index.html", "--outdir", "page"]);
+    let page = std::fs::read_dir(dir.join("page")).unwrap().filter_map(|e| e.ok()).map(|e| e.path()).find(|p| p.extension().is_some_and(|e| e == "js")).expect("a script was written");
+    let script = std::fs::read_to_string(page).unwrap();
+    assert!(script.contains("WEB_FILE") && !script.contains("NODE_FILE") && script.contains("COND_WEB") && !script.contains("COND_NODE"), "{script}");
+    build(&["bundle", "main.js", "--outfile", "node.mjs"]);
+    let node = std::fs::read_to_string(dir.join("node.mjs")).unwrap();
+    assert!(node.contains("NODE_FILE") && node.contains("COND_NODE") && !node.contains("WEB_FILE"), "{node}");
+    std::fs::remove_dir_all(&dir).ok();
+}

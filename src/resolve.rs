@@ -188,6 +188,9 @@ pub struct ResolveOptions {
     pub conditions: Vec<String>,
     /// Keep symlinked paths as they are instead of resolving them to the real file.
     pub preserve_symlinks: bool,
+    /// Honor the object form of a package's `browser` field: a file (or a package) it names is replaced by another file, or by an empty
+    /// module when the value is `false`. For a program that a page loads.
+    pub browser_map: bool,
 }
 
 impl Default for ResolveOptions {
@@ -206,6 +209,7 @@ impl Default for ResolveOptions {
             main_files: vec!["index".to_string()],
             conditions: ["module"].map(String::from).to_vec(),
             preserve_symlinks: false,
+            browser_map: false,
         }
     }
 }
@@ -324,6 +328,11 @@ impl Resolver {
         if specifier.is_empty() {
             return Err(ResolveError::InvalidSpecifier { specifier: String::new() });
         }
+        if self.options.browser_map {
+            if let Some(found) = self.browser_before(from_dir, specifier, kind)? {
+                return Ok(found);
+            }
+        }
         let path = if is_relative(specifier) || Path::new(specifier).is_absolute() {
             let joined = normalize(&from_dir.join(specifier));
             // A trailing slash says "directory"; a bare `.` or `..` does too.
@@ -339,7 +348,63 @@ impl Resolver {
         // A `package.json` that does not parse only costs the file its package metadata: Node
         // too reads it only when it needs something from it. `package_for` reports the error.
         let package = self.package_for(&path).unwrap_or(None);
+        if self.options.browser_map {
+            if let Some(found) = self.browser_after(&path, package.as_deref(), kind)? {
+                return Ok(found);
+            }
+        }
         Ok(Resolved { path, package })
+    }
+
+    /// What a package's `browser` map says about `specifier` as written in a file of `from_dir`.
+    fn browser_before(&self, from_dir: &Path, specifier: &str, kind: ResolveKind) -> Result<Option<Resolved>, ResolveError> {
+        let Some(package) = self.package_for(&from_dir.join("_")).ok().flatten() else { return Ok(None) };
+        let Some(map) = package.field("browser").and_then(Json::as_object) else { return Ok(None) };
+        if is_relative(specifier) {
+            let joined = normalize(&from_dir.join(specifier));
+            let found = self.load_path(&joined, false).ok().flatten();
+            for (key, value) in map {
+                if !is_relative(key) {
+                    continue;
+                }
+                let at = normalize(&package.dir.join(key));
+                if at == joined || (found.is_some() && (found.as_ref() == Some(&at) || found == self.load_file(&at))) {
+                    return self.browser_target(&package, key, value, specifier, kind);
+                }
+            }
+        } else if !Path::new(specifier).is_absolute() {
+            for (key, value) in map {
+                if key == specifier {
+                    return self.browser_target(&package, key, value, specifier, kind);
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// What the `browser` map of the package that holds `path` says about that file.
+    fn browser_after(&self, path: &Path, package: Option<&Package>, kind: ResolveKind) -> Result<Option<Resolved>, ResolveError> {
+        let Some(package) = package else { return Ok(None) };
+        let Some(map) = package.field("browser").and_then(Json::as_object) else { return Ok(None) };
+        for (key, value) in map {
+            if !is_relative(key) {
+                continue;
+            }
+            let at = normalize(&package.dir.join(key));
+            if at == path || self.load_file(&at).as_deref() == Some(path) {
+                return self.browser_target(package, key, value, key, kind);
+            }
+        }
+        Ok(None)
+    }
+
+    fn browser_target(&self, package: &Package, key: &str, value: &Json, written: &str, kind: ResolveKind) -> Result<Option<Resolved>, ResolveError> {
+        match value {
+            Json::Bool(false) => Ok(Some(Resolved { path: PathBuf::from(format!("\0browser-external:{key}")), package: None })),
+            // A file or a package in its place; a map that points a name at itself is no replacement.
+            Json::String(target) if !target.is_empty() && target != written && target != key => self.resolve(&package.dir, target, kind).map(Some),
+            _ => Ok(None),
+        }
     }
 
     pub fn is_file(&self, path: &Path) -> bool {
