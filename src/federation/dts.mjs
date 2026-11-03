@@ -690,10 +690,16 @@ const hasDefault = (text) => /export\s+default\b|export\s*\{[^}]*\bas\s+default\
 // `import "remote/expose"` is found through `paths` in tsconfig.json, one exact entry for each exposed module.
 function mapPaths(paths) {
   const file = path.join(cwd, 'tsconfig.json');
-  if (!fs.existsSync(file) || !Object.keys(paths).length) return;
+  if (!Object.keys(paths).length) return;
+  let raw;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch {
+    return; // no tsconfig.json
+  }
   let config;
   try {
-    config = JSON.parse(fs.readFileSync(file, 'utf8'));
+    config = JSON.parse(raw);
   } catch {
     // Comments would be lost by writing the file again; it is left as it is.
     note(`tsconfig.json has comments, so it was not changed; add to "compilerOptions": "paths": ${JSON.stringify(paths)}`);
@@ -703,7 +709,6 @@ function mapPaths(paths) {
   const before = JSON.stringify(config.compilerOptions.paths || {});
   config.compilerOptions.paths = { ...(config.compilerOptions.paths || {}), ...paths };
   if (JSON.stringify(config.compilerOptions.paths) === before) return;
-  const raw = fs.readFileSync(file, 'utf8');
   const indent = /^\t/m.test(raw) ? '\t' : /^( +)\S/m.exec(raw)?.[1].length ?? 2;
   fs.writeFileSync(file, JSON.stringify(config, null, indent) + '\n');
 }
@@ -784,7 +789,11 @@ async function consume({ remotes, typesFolder = '@mf-types', updateTsConfig = fa
       // The same zip as last time: the files stay as they are (an editor watching them has nothing to read again).
       const stamp = path.join(folder, '.zip-sha256');
       const sha = createHash('sha256').update(zip).digest('hex');
-      if (!(fs.existsSync(stamp) && fs.readFileSync(stamp, 'utf8') === sha)) {
+      let stamped;
+      try {
+        stamped = fs.readFileSync(stamp, 'utf8');
+      } catch {}
+      if (stamped !== sha) {
         fs.rmSync(folder, { recursive: true, force: true });
         for (const [file, data] of files) {
           const target = path.join(folder, file);
