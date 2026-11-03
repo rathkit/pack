@@ -333,8 +333,11 @@ impl Resolver {
                 return Ok(found);
             }
         }
-        let path = if is_relative(specifier) || Path::new(specifier).is_absolute() {
-            let joined = normalize(&from_dir.join(specifier));
+        // A name that starts with `/` is a path from the root. On Windows it has no drive, so `Path` does not call it absolute and
+        // joining it to a folder would put the drive of that folder in front of it; the virtual modules of a build (`/@rathkit/...`) are named so.
+        let rooted = specifier.starts_with('/') && !Path::new(specifier).is_absolute();
+        let path = if is_relative(specifier) || rooted || Path::new(specifier).is_absolute() {
+            let joined = normalize(&if rooted { PathBuf::from(specifier) } else { from_dir.join(specifier) });
             // A trailing slash says "directory"; a bare `.` or `..` does too.
             let directory_only = specifier.ends_with('/') || specifier == "." || specifier == "..";
             self.load_path(&joined, directory_only)?
