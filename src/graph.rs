@@ -262,8 +262,7 @@ pub fn build_with_fs(fs: Box<dyn FileSystem>, cwd: &Path, entries: &[String], op
             }
         }
         // `.hidden/x.js` is a path, not a relative specifier: only `./` and `../` are.
-        let relative = entry == "." || entry == ".." || entry.starts_with("./") || entry.starts_with("../");
-        let specifier = if relative || Path::new(entry).is_absolute() { entry.clone() } else { format!("./{entry}") };
+        let specifier = entry_specifier(entry);
         match resolver.resolve(cwd, &specifier, ResolveKind::Import) {
             Ok(found) => entry_slots.push(shared.register(found.path)),
             Err(e) => diagnostics.push(Diagnostic { severity: Severity::Error, message: format!("Entry point: {e}"), file: None, pos: None }),
@@ -1103,4 +1102,24 @@ fn query_loader(query: &str) -> Option<Loader> {
         "inline" => Some(Loader::DataUrl),
         _ => None,
     })
+}
+
+/// How an entry is written as an import: a path is kept, a bare name is taken as relative to the project. A name that starts
+/// with `/` is kept too, on Windows as well (there `/@rathkit/federation/core.js` is not an absolute path, but it is not
+/// relative either: it is the id of a module a plugin supplies).
+fn entry_specifier(entry: &str) -> String {
+    let relative = entry == "." || entry == ".." || entry.starts_with("./") || entry.starts_with("../");
+    if relative || entry.starts_with('/') || Path::new(entry).is_absolute() { entry.to_string() } else { format!("./{entry}") }
+}
+
+#[cfg(test)]
+mod entry_tests {
+    use super::entry_specifier;
+
+    #[test]
+    fn an_entry_that_starts_with_a_slash_is_not_made_relative() {
+        assert_eq!(entry_specifier("/@rathkit/federation/core.js"), "/@rathkit/federation/core.js");
+        assert_eq!(entry_specifier("src/main.js"), "./src/main.js");
+        assert_eq!(entry_specifier("../x.js"), "../x.js");
+    }
 }
