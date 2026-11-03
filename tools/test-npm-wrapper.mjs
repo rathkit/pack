@@ -16,6 +16,13 @@ const fail = (message) => {
   process.exit(1);
 };
 
+// The platforms with a package (the list in make-npm-packages.mjs). On another one (Windows on arm64) there is nothing to launch yet.
+const built = ['linux-x64', 'linux-arm64', 'darwin-x64', 'darwin-arm64', 'win32-x64'];
+if (!built.includes(`${process.platform}-${process.arch}`)) {
+  console.log(`skip npm wrapper: there is no package for ${process.platform}-${process.arch}`);
+  process.exit(0);
+}
+
 const m = run(process.execPath, [join(root, 'tools', 'make-npm-packages.mjs'), '--out', made, '--local']);
 if (m.status !== 0) fail(`cannot make the packages: ${m.stderr}${m.stdout}`);
 
