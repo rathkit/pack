@@ -71,7 +71,8 @@ const cases = [
     name: 'page as an iife', page: 'two-scripts.html', flags: ['--format', 'iife'], config: 'unfonts-inline.config.mjs',
     verify: (out) => {
       const html = readFileSync(join(out, 'two-scripts.html'), 'utf8');
-      const scripts = html.match(/<script\b[^>]*>\s*<\/script[^>]*>/gi) ?? [];
+      // The opening tag of each script, found by splitting the text (no pattern over the tag, which cannot cover every way HTML may be written).
+      const scripts = html.split(/<script\b/i).slice(1).map((rest) => `<script${rest.slice(0, rest.indexOf('>') + 1)}`);
       if (scripts.length !== 1 || !/src="\.\/bundle\.js"/.test(scripts[0])) return `the page loads ${JSON.stringify(scripts)}`;
       if ((html.match(/<link rel="stylesheet"/g) ?? []).length !== 1 || !/href="\.\/bundle\.css"/.test(html)) return `the page links ${html}`;
       const js = readFileSync(join(out, 'bundle.js'), 'utf8');
