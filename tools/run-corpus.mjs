@@ -1,13 +1,15 @@
 // Builds pinned open-source projects (corpus/projects.json) with rkp and checks the result.
 //
-//   node tools/run-corpus.mjs [name ...] [--dir DIR] [--json FILE] [--no-browser]
+//   node tools/run-corpus.mjs [name ...] [--dir DIR] [--keep] [--json FILE] [--no-browser]
 //
-// Each project is cloned at its pinned commit into DIR (default: a new folder under the system temp folder), its dependencies are
+// Each project is cloned at its pinned commit into DIR (default: a new folder under ~/.cache/rkp-corpus, not the system temp folder, which is often a small
+// memory-backed volume that a hundred thousand files of node_modules fill), its dependencies are
 // installed with pnpm and `--ignore-scripts`, and the `build` command line is run with rkp. A build passes when rkp exits with 0,
 // the expected files exist, and, for a library, importing the output in Node gives the expected exports; an app is also loaded in headless
 // Chromium (unless --no-browser, or no browser is found) and must run without uncaught errors, console errors or missing files. This runs code from
 // other projects (their configuration files and plugins), so it is not part of the test battery: run it by hand or from the
-// corpus workflow. Exit status is 1 if any project failed.
+// corpus workflow. The work folder is deleted when the run ends (also after a failure or Ctrl-C) unless --keep or --dir is given.
+// Exit status is 1 if any project failed.
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -18,7 +20,15 @@ import { checkPage, findBrowser } from './lib/browser-check.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
 const flag = (name) => { const i = args.indexOf(name); if (i < 0) return null; const [, v] = args.splice(i, 2); return v; };
-const dir = path.resolve(flag('--dir') || fs.mkdtempSync(path.join(os.tmpdir(), 'rkp-corpus-')));
+const keep = args.includes('--keep') && args.splice(args.indexOf('--keep'), 1);
+const given = flag('--dir');
+const cache = path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'rkp-corpus');
+fs.mkdirSync(cache, { recursive: true });
+const dir = path.resolve(given || fs.mkdtempSync(path.join(cache, 'run-')));
+const temporary = !given && !keep;
+const cleanup = () => { if (temporary) try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch {} };
+process.on('exit', cleanup);
+for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => process.exit(130));
 const jsonOut = flag('--json');
 const noBrowser = args.includes('--no-browser') && args.splice(args.indexOf('--no-browser'), 1);
 const browser = noBrowser ? null : findBrowser();
@@ -103,6 +113,6 @@ for (const p of list) {
   else console.log(r.ok ? `ok   ${r.ms} ms` : `FAIL ${r.step}\n${lines(r.detail)}`);
 }
 const passed = results.filter((r) => r.ok && !r.flagged).length;
-console.log(`\n${browser ? '' : '(no browser: apps were built but not loaded)\n'}${passed} of ${results.length} built and checked out (work folder ${dir}, left in place)`);
+console.log(`\n${browser ? '' : '(no browser: apps were built but not loaded)\n'}${passed} of ${results.length} built and checked out (${temporary ? 'work folder deleted' : `work folder ${dir}, left in place`})`);
 if (jsonOut) fs.writeFileSync(jsonOut, JSON.stringify({ rkp: spawnSync(rkp, ['--version'], { encoding: 'utf8' }).stdout.trim(), results }, null, 2) + '\n');
 process.exit(passed === results.length ? 0 : 1);
