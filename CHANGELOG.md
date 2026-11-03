@@ -35,6 +35,10 @@ about stability.
 - In a page build (and `--platform-browser`), the `browser` condition of `exports`, the `browser` field as an entry, and the object form of
   a package's `browser` field (`"./lib/node.js": "./lib/web.js"`, `"fs": false`) are followed, as in Vite; axios and many other packages need it
   to keep their Node code out of a page.
+- When the build is split into chunks, a member read through a namespace import (`import * as N from "pkg"; N.make()`) whose declaration is
+  behind files of re-exports (`export * from`) is kept; it was left out of every chunk (naive-ui's `createDiscreteApi`).
+- Code written without semicolons: a name that the bundle writes as `(0, x.y)` or `(x)` (a CommonJS import) no longer joins the line before it
+  as a call (`const a = f()` followed by a line `useEffect(...)` became `f()(0, ...)`); the `;` the author left out is written.
 - A JSX spread child (`<List>{...items}</List>`) builds in the automatic runtime (`children: [...items]`).
 - A decorator on a class field uses the output's names for what it refers to (it kept the source name when the bundler had renamed an
   import, as with Lit's `@property`).

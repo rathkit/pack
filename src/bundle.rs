@@ -34,7 +34,7 @@ use crate::link::{Binding, Linked, export_names, resolve_export};
 use crate::module::{ImportName, RequestKind};
 use crate::semantic::{ScopeKind, Semantic, SymbolId, SymbolKind};
 use crate::enums::{EnumValue, number_text};
-use crate::shake::Shaken;
+use crate::shake::{Shaken, Use};
 
 /// A thing that needs a name in the output.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -1698,7 +1698,31 @@ impl<'a> Bundler<'a> {
     fn bound_modules(&self, id: ModuleId) -> Vec<ModuleId> {
         // Only imports that are used: one the shaker found no use for does not make the module it names part of the entry.
         let shaken = &self.shaken.modules[id.index()];
-        self.linked.imports[id.index()].iter().filter(|(symbol, _)| !shaken.demand_known || shaken.demanded.contains(symbol)).filter_map(|(_, b)| self.binding_module(b)).collect()
+        let mut modules: Vec<ModuleId> = self.linked.imports[id.index()].iter().filter(|(symbol, _)| !shaken.demand_known || shaken.demanded.contains(symbol)).filter_map(|(_, b)| self.binding_module(b)).collect();
+        // `import * as N from "pkg"` and `N.name`: the name is declared in a module that only files of re-exports (left out of the output)
+        // connect to `pkg`, so the module that declares what is used is added here.
+        for (part, live) in shaken.parts.iter().zip(&shaken.live) {
+            if !live {
+                continue;
+            }
+            for used in &part.uses {
+                match used {
+                    Use::Member(symbol, name) => {
+                        if let Some(Binding::Namespace(target)) = self.linked.binding(id, *symbol) {
+                            modules.extend(resolve_export(self.graph, *target, name).and_then(|b| self.binding_module(&b)));
+                        }
+                    }
+                    Use::Symbol(symbol) => {
+                        if let Some(Binding::Namespace(target)) = self.linked.binding(id, *symbol) {
+                            for name in export_names(self.graph, *target) {
+                                modules.extend(resolve_export(self.graph, *target, &name).and_then(|b| self.binding_module(&b)));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        modules
     }
 
     /// Whether loading `target` this way starts a chunk of its own: `import()` of an ES module. A
@@ -2024,7 +2048,7 @@ impl<'a> Bundler<'a> {
             self.code.insert(id, Code::Wrapped { edits: Vec::new(), json: true, require_cases: None });
             return;
         };
-        let mut scanner = Scanner { bundler: self, module, places: None, private_scopes: Vec::new(), private_refs: HashMap::new(), chain_members: HashSet::new(), call_callees: HashSet::new(), ast: &parsed.ast, semantic: &parsed.semantic, edits: Vec::new(), shorthand: HashSet::new(), skip: HashSet::new(), written: HashSet::new(), fn_depth: 0, async_ctx: Vec::new(), site_next: HashMap::new(), has_tla: false, needs_require: false, top_decl: None, in_wrapper: false, name_hint: None, shared_names: None };
+        let mut scanner = Scanner { bundler: self, module, places: None, private_scopes: Vec::new(), private_refs: HashMap::new(), chain_members: HashSet::new(), call_callees: HashSet::new(), ast: &parsed.ast, semantic: &parsed.semantic, edits: Vec::new(), statement_starts: HashSet::new(), shorthand: HashSet::new(), skip: HashSet::new(), written: HashSet::new(), fn_depth: 0, async_ctx: Vec::new(), site_next: HashMap::new(), has_tla: false, needs_require: false, top_decl: None, in_wrapper: false, name_hint: None, shared_names: None };
         let code = if module.kind == ModuleKind::Esm && scanner.bundler.registry { scanner.scan_registry(id) } else if module.kind == ModuleKind::Esm { scanner.scan_esm(id) } else { scanner.scan_wrapped(id) };
         self.code.insert(id, code);
     }
@@ -2088,6 +2112,8 @@ struct Scanner<'b, 'a> {
     semantic: &'a Semantic,
     edits: Vec<Edit>,
     /// Identifiers written as `{ a }` in an object, which become `{ a: renamed }`.
+    /// Where the expression statements of a statement list (a block, a function body, a case, the program) begin.
+    statement_starts: HashSet<u32>,
     shorthand: HashSet<NodeId>,
     /// Identifiers already handled by the statement form.
     skip: HashSet<NodeId>,
@@ -2296,9 +2322,43 @@ impl<'a> Scanner<'_, 'a> {
         }
     }
 
-    fn push(&mut self, node: NodeId, pieces: Vec<Piece>) {
+    fn push(&mut self, node: NodeId, mut pieces: Vec<Piece>) {
         let (start, end) = self.span(node);
+        self.guard_line_start(start, &mut pieces);
         self.edits.push(Edit { start, end, pieces, shorthand: None, transparent: false });
+    }
+
+    /// Code written without semicolons: a line that begins with a name the bundle now writes as `(0, x.y)` or `(x)` would be read as a call
+    /// of what the line before it ends with. When that line does not end a statement, the new text starts with the `;` the author left out.
+    fn guard_line_start(&self, start: u32, pieces: &mut Vec<Piece>) {
+        let opens = match pieces.first() {
+            Some(Piece::Text(text)) => text.starts_with('(') || text.starts_with('['),
+            _ => false,
+        };
+        if !opens {
+            return;
+        }
+        // Only the first token of a statement that stands in a list: `if (a)\n b()` has no statement before `b()` to end.
+        if !self.statement_starts.contains(&start) {
+            return;
+        }
+        let before = &self.module.source[..start as usize];
+        let trimmed = before.trim_end();
+        // Only a name that begins a line can be a statement of its own.
+        if trimmed.len() == before.len() || !before[trimmed.len()..].contains('\n') {
+            return;
+        }
+        let Some(last) = trimmed.chars().next_back() else { return };
+        let ends_expression = last.is_alphanumeric() || matches!(last, '_' | '$' | ')' | ']' | '}' | '\'' | '"' | '`');
+        if !ends_expression {
+            return;
+        }
+        // `return` and its like are followed by an expression, not by a new statement.
+        let word: String = trimmed.chars().rev().take_while(|c| c.is_alphanumeric() || matches!(c, '_' | '$')).collect::<Vec<_>>().into_iter().rev().collect();
+        if matches!(word.as_str(), "return" | "typeof" | "void" | "delete" | "throw" | "await" | "yield" | "new" | "in" | "of" | "instanceof" | "case" | "else" | "do" | "extends" | "default" | "async") {
+            return;
+        }
+        pieces.insert(0, Piece::Text(";".into()));
     }
 
     fn ident(&mut self, node: NodeId) {
@@ -2342,6 +2402,10 @@ impl<'a> Scanner<'_, 'a> {
     fn push_ident_edit(&mut self, node: NodeId, pieces: Vec<Piece>) {
         let (start, end) = self.span(node);
         let shorthand = self.shorthand.contains(&node).then(|| self.module.source[start as usize..end as usize].to_string());
+        let mut pieces = pieces;
+        if shorthand.is_none() {
+            self.guard_line_start(start, &mut pieces);
+        }
         self.edits.push(Edit { start, end, pieces, shorthand, transparent: false });
     }
 
@@ -2471,6 +2535,13 @@ impl<'a> Scanner<'_, 'a> {
     fn walk_in(&mut self, node: NodeId, wrapped: bool, this_bound: bool) {
         let ast = self.ast;
         self.note_name_hint(node);
+        if let NodeKind::Program(list) | NodeKind::Block(list) | NodeKind::StaticBlock(list) | NodeKind::Case { body: list, .. } = ast[node].kind {
+            for &statement in ast.list(list) {
+                if matches!(ast[statement].kind, NodeKind::ExprStmt(_)) {
+                    self.statement_starts.insert(ast[statement].span.start);
+                }
+            }
+        }
         if self.bundler.registry {
             if let NodeKind::Call { callee, .. } | NodeKind::TaggedTemplate { tag: callee, .. } = ast[node].kind {
                 if matches!(ast[callee].kind, NodeKind::Ident(_)) {

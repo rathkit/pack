@@ -752,3 +752,52 @@ fn a_page_follows_the_browser_field_of_a_package_and_a_program_for_node_does_not
     assert!(node.contains("NODE_FILE") && node.contains("COND_NODE") && !node.contains("WEB_FILE"), "{node}");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn a_namespace_member_declared_behind_files_of_reexports_is_kept_when_the_build_is_split() {
+    let dir = std::env::temp_dir().join(format!("rkp-ns-split-{}", std::process::id()));
+    let pkg = dir.join("node_modules").join("pkg").join("es").join("discrete").join("src");
+    std::fs::create_dir_all(&pkg).unwrap();
+    let root = dir.join("node_modules").join("pkg");
+    std::fs::write(root.join("package.json"), r#"{"name":"pkg","version":"1.0.0","sideEffects":false,"module":"es/index.mjs","main":"es/index.mjs"}"#).unwrap();
+    // `export *` through two files that hold nothing but re-exports, as naive-ui does.
+    std::fs::write(root.join("es/index.mjs"), "export * from './components.mjs';\nexport { darkTheme } from './themes.mjs';\n").unwrap();
+    std::fs::write(root.join("es/components.mjs"), "export * from './discrete/index.mjs';\n").unwrap();
+    std::fs::write(root.join("es/discrete/index.mjs"), "export { createDiscreteApi } from './src/discrete.mjs';\n").unwrap();
+    std::fs::write(root.join("es/discrete/src/discrete.mjs"), "export function createDiscreteApi(a) { return 'DISCRETE' + a; }\n").unwrap();
+    std::fs::write(root.join("es/themes.mjs"), "export const darkTheme = 'DARK';\n").unwrap();
+    std::fs::write(dir.join("util.js"), "import * as N from 'pkg';\nexport function setup() { return [N.darkTheme, N.createDiscreteApi(1)]; }\n").unwrap();
+    // `darkTheme` is also wanted by a lazy chunk, so the build is split.
+    std::fs::write(dir.join("main.js"), "import { darkTheme } from 'pkg';\nimport { setup } from './util.js';\nconsole.log(darkTheme, setup());\nimport('./lazy.js');\n").unwrap();
+    std::fs::write(dir.join("lazy.js"), "import { darkTheme } from 'pkg';\nconsole.log('lazy', darkTheme);\n").unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_rkp")).args(["bundle", "main.js", "--outdir", "out", "--splitting", "--format", "esm"]).current_dir(&dir).output().expect("rkp starts");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let all: String = std::fs::read_dir(dir.join("out")).unwrap().filter_map(|e| e.ok()).map(|e| std::fs::read_to_string(e.path()).unwrap()).collect();
+    assert!(all.contains("function createDiscreteApi"), "the function is declared nowhere:\n{all}");
+    let run = std::process::Command::new("node").arg("out/main.js").current_dir(&dir).output();
+    if let Ok(run) = run {
+        assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_name_that_becomes_a_parenthesized_expression_does_not_join_the_line_before_it() {
+    let dir = std::env::temp_dir().join(format!("rkp-asi-{}", std::process::id()));
+    let pkg = dir.join("node_modules").join("cj");
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::write(pkg.join("package.json"), r#"{"name":"cj","main":"index.js"}"#).unwrap();
+    std::fs::write(pkg.join("index.js"), "exports.run = function () { globalThis.n = (globalThis.n || 0) + 1 }; exports.val = 5\n").unwrap();
+    // No semicolons: `run()` on the next line is read as the call `val(...)`'s continuation unless the bundle writes the `;` the author left out.
+    std::fs::write(dir.join("main.js"), "import { run, val } from 'cj'\nfunction f() {\n  const x = val\n  run()\n  const y = [1]\n  run()\n  return x\n}\nconst z = f()\nrun()\nif (z)\n  run()\nconsole.log(z, globalThis.n)\n").unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_rkp")).args(["bundle", "main.js", "--outfile", "o.mjs"]).current_dir(&dir).output().expect("rkp starts");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    if let Ok(run) = std::process::Command::new("node").arg("o.mjs").current_dir(&dir).output() {
+        assert!(run.status.success() && String::from_utf8_lossy(&run.stdout).trim() == "5 4", "{}{}", String::from_utf8_lossy(&run.stdout), String::from_utf8_lossy(&run.stderr));
+    }
+    let text = std::fs::read_to_string(dir.join("o.mjs")).unwrap();
+    assert!(text.contains(";(0, require_cj().run)()"), "{text}");
+    // The body of an `if` is not a statement after another one: a `;` there would end the `if`.
+    assert!(text.contains("if (z)\n  (0, require_cj().run)()"), "{text}");
+    std::fs::remove_dir_all(&dir).ok();
+}
