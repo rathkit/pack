@@ -76,6 +76,58 @@ jobs:
       - run: python3 tools/fuzz-bundle.py --count 300
       - run: node tools/diff-real.mjs "$GITHUB_WORKSPACE/bench"
 
+  # macOS and Windows: the same checks as the glibc job, not yet required by the ruleset (it is made to require them after several green runs).
+  # Steps that need Linux (the localhost note, Chrome) are left out; a step that fails here shows what still assumes Unix.
+  check-os:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: "macos-latest node 24", os: macos-latest, node: 24 }
+          - { name: "macos-15-intel node 24", os: macos-15-intel, node: 24 }
+          - { name: "windows-latest node 24", os: windows-latest, node: 24 }
+    defaults:
+      run:
+        shell: bash
+    env:
+      TS_MODULE: ${{ github.workspace }}/bench/node_modules/ts5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/setup@a0881977cd8ea73b1ed212236c99ca10dcc80cf4
+        with:
+          runtime: node@${{ matrix.node }}
+          working-directory: bench
+          cache: true
+          require-lockfile: true
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - run: node --version
+      - run: node tools/check-zero-deps.mjs
+      - run: node tools/make-sbom.mjs "$RUNNER_TEMP/sbom.cdx.json" && node -e "process.exit(require(process.argv[1]).components.length)" "$RUNNER_TEMP/sbom.cdx.json"
+      - run: cargo build --release
+      - run: ./target/release/rkp --version
+      - run: cargo test --release
+      - run: node tools/run-fixtures.mjs
+      - run: node tools/run-defines.mjs
+      - run: node tools/run-loaders.mjs
+      - run: node tools/run-plugins.mjs
+      - run: node tools/run-assets.mjs
+      - run: node tools/run-target.mjs
+      - run: node tools/test-npm-wrapper.mjs
+      - run: node tools/check-promises.mjs
+      - run: node tools/run-split.mjs
+      - run: node tools/run-sourcemaps.mjs
+      - run: node tools/run-watch.mjs
+      - run: node tools/run-serve.mjs
+      - run: node tools/run-jsx.mjs
+      - run: node tools/test-federation-runtime.mjs
+      - run: node tools/diff-semver.mjs
+      - run: node tools/diff-real.mjs "$GITHUB_WORKSPACE/bench"
+
   # What must never be in the repository: secrets, and the words of the private list (when the list is set as a secret; a fork's pull
   # request has no secrets, so only the secret scan runs there). The whole history is scanned by hand: history-scan.yml.
   hygiene:
