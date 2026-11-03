@@ -752,7 +752,7 @@ impl Context<'_> {
             }
         };
         // Imports in a module a plugin made up are relative to where the plugin says, else to the project.
-        let virtual_dir = if resolve_dir.is_none() && path.is_absolute() && !id.starts_with('\0') { None } else { Some(resolve_dir.clone().unwrap_or_else(|| self.cwd.to_path_buf())) };
+        let virtual_dir = if resolve_dir.is_none() && (path.is_absolute() || path.has_root()) && !id.starts_with('\0') { None } else { Some(resolve_dir.clone().unwrap_or_else(|| self.cwd.to_path_buf())) };
         let dir = virtual_dir.as_deref().unwrap_or_else(|| path.parent().unwrap_or(Path::new("/")));
         let mut targets = Vec::with_capacity(record.requests.len());
         for request in &record.requests {
@@ -1107,7 +1107,7 @@ fn query_loader(query: &str) -> Option<Loader> {
 /// How an entry is written as an import: a path is kept, a bare name is taken as relative to the project. A name that starts
 /// with `/` is kept too, on Windows as well (there `/@rathkit/federation/core.js` is not an absolute path, but it is not
 /// relative either: it is the id of a module a plugin supplies).
-fn entry_specifier(entry: &str) -> String {
+pub(crate) fn entry_specifier(entry: &str) -> String {
     let relative = entry == "." || entry == ".." || entry.starts_with("./") || entry.starts_with("../");
     if relative || entry.starts_with('/') || Path::new(entry).is_absolute() { entry.to_string() } else { format!("./{entry}") }
 }

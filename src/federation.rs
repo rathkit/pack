@@ -1012,8 +1012,7 @@ impl Federation {
         let mut absolute: Vec<PathBuf> = Vec::new();
         let mut problems = Vec::new();
         for entry in entries {
-            let relative = entry == "." || entry == ".." || entry.starts_with("./") || entry.starts_with("../");
-            let specifier = if relative || Path::new(entry).is_absolute() { entry.clone() } else { format!("./{entry}") };
+            let specifier = crate::graph::entry_specifier(entry);
             match resolver.resolve(cwd, &specifier, ResolveKind::Import) {
                 Ok(found) => absolute.push(found.path),
                 Err(e) => problems.push(Diagnostic { severity: Severity::Error, message: format!("Entry point: {e}"), file: None, pos: None }),
