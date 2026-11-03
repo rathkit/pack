@@ -49,7 +49,8 @@ function selfSigned(names) {
   const now = Date.now();
   const alt = names.map((n) => (net.isIP(n) ? der(0x87, ipBytes(n)) : der(0x82, Buffer.from(n))));
   const serial = crypto.randomBytes(16);
-  serial[0] &= 0x7f;
+  // A DER integer has no leading zero byte unless the next byte has its top bit set, so the first byte is 0x40 to 0x7f (positive, never zero).
+  serial[0] = (serial[0] & 0x3f) | 0x40;
   const signature = sequence(oid('1.2.840.10045.4.3.2'));
   const tbs = sequence(
     der(0xa0, der(0x02, Buffer.from([2]))),
