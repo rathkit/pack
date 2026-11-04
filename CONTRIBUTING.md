@@ -2,7 +2,7 @@
 
 Thank you for wanting to help. This page is the whole process, in the order you will meet it.
 
-**Status: alpha.** We take outside pull requests only once both of these are true: this repository is public, and the first alpha release is published. A pull request sent before then may be closed without review. Questions are welcome on Discord (see the end of this page).
+**Status: alpha.** This repository is public and 0.1.0-alpha.1 is on npm and crates.io, so outside pull requests are welcome for issues a maintainer has labeled `accepted`. Questions are welcome on Discord (see the end of this page).
 
 ## The short version
 
