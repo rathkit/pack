@@ -42,7 +42,7 @@ Stable base: required CI on Linux, macOS and Windows; corpus 24 of 24 on every r
 
 - [ ] [1.2](https://github.com/rathkit/pack/issues/1) macOS and Windows legs required in the ruleset *(maintainer)* `P0`
 - [x] [1.4](https://github.com/rathkit/pack/issues/2) Firefox and WebKit for the dev server, HMR and federation scenarios `P1`
-- [ ] [4.5](https://github.com/rathkit/pack/issues/3) Options reference and plugin docs pages `P1`
+- [x] [4.5](https://github.com/rathkit/pack/issues/3) Options reference and plugin docs pages `P1`
 - [ ] [1.5](https://github.com/rathkit/pack/issues/4) Corpus run on every release and weekly, results kept `P1`
 - [ ] [1.6](https://github.com/rathkit/pack/issues/5) Explain the flaky tests seen in CI `P1`
 - [ ] [5.5](https://github.com/rathkit/pack/issues/6) Security alerts at zero and kept there `P1`
