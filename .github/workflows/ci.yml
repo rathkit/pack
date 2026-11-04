@@ -24,8 +24,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: "ubuntu-24.04 node 24", os: ubuntu-24.04, node: 24, browser: true }
-          - { name: "ubuntu-24.04 node 26", os: ubuntu-24.04, node: 26, browser: true }
+          - { name: "ubuntu-24.04 node 24", os: ubuntu-24.04, node: 24, browser: true, other-browsers: true }
+          - { name: "ubuntu-24.04 node 26", os: ubuntu-24.04, node: 26, browser: true, other-browsers: true }
           - { name: "ubuntu-26.04 node 24", os: ubuntu-26.04, node: 24, browser: true }
           - { name: "ubuntu-26.04 node 26", os: ubuntu-26.04, node: 26, browser: true }
           - { name: "ubuntu-24.04-arm node 24", os: ubuntu-24.04-arm, node: 24 }
@@ -78,6 +78,17 @@ jobs:
         run: node tools/run-federation.mjs
         env:
           CHROME: google-chrome
+      # The same scenarios in Firefox and WebKit, the builds Playwright ships (tools/lib/browsers.mjs drives them with no dependency of
+      # ours; the version is pinned so the builds, and the protocol WebKit speaks, do not change under us).
+      - if: matrix.other-browsers
+        run: pnpm dlx playwright@1.64.1 install --with-deps firefox webkit
+      - if: matrix.other-browsers
+        run: |
+          for browser in firefox webkit; do
+            BROWSER=$browser node tools/test-browser-check.mjs
+            BROWSER=$browser node tools/run-federation.mjs
+            BROWSER=$browser node tools/run-hmr.mjs
+          done
       - run: python3 tools/fuzz-bundle.py --count 300
       - run: node tools/diff-real.mjs "$GITHUB_WORKSPACE/bench"
 

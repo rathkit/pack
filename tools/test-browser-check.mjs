@@ -1,13 +1,14 @@
 // Checks tools/lib/browser-check.mjs on small sites made here: one that works and four that each break in a different way.
-// Skipped without a Chromium-based browser (set CHROME to name one).
+// Runs in the browser BROWSER names (chromium, firefox or webkit; see lib/browsers.mjs). Skipped when that browser is not installed.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { checkPage, findBrowser } from './lib/browser-check.mjs';
+import { checkPage } from './lib/browser-check.mjs';
+import { browserKind, findBrowser } from './lib/browsers.mjs';
 
 const browser = findBrowser();
 if (!browser) {
-  console.log('browser-check: no Chromium-based browser found (set CHROME); skipped');
+  console.log(`browser-check: no ${browserKind()} browser found (see tools/lib/browsers.mjs); skipped`);
   process.exit(0);
 }
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'browser-check-'));
@@ -49,5 +50,5 @@ expect(!r.ok, 'text that is not on the page is found', JSON.stringify(r));
 try {
   fs.rmSync(base, { recursive: true, force: true });
 } catch {}
-console.log(failed ? `${failed} failure(s)` : 'browser-check agrees');
+console.log(failed ? `${failed} failure(s)` : `browser-check agrees (${browserKind()})`);
 process.exit(failed ? 1 : 0);

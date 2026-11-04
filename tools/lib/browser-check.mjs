@@ -1,32 +1,17 @@
-// Loads a built site in headless Chromium and reports what a visitor would hit: uncaught exceptions, console errors, files of the site
-// that fail to load, and a page with nothing in it. No dependencies: the browser is driven over the DevTools protocol.
+// Loads a built site in a headless browser (Chromium, Firefox or WebKit; BROWSER picks, see browsers.mjs) and reports what a visitor
+// would hit: uncaught exceptions, console errors, files of the site that fail to load, and a page with nothing in it. No dependencies.
 //
 //   import { findBrowser, checkPage } from './lib/browser-check.mjs';
 //   const result = await checkPage('/path/to/dist', { allowErrors: ['regex'], text: 'regex', selector: '#root' });
 //   // { ok, problems: [string], text: 'what the page shows (first 200 characters)', html: 'the start of the body, to see what is there', log: ['console messages and outside requests'] }
-import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
-import os from 'node:os';
 import path from 'node:path';
+import { findBrowser, openBrowser, browserKind } from './browsers.mjs';
 
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.ico': 'image/x-icon', '.woff': 'font/woff', '.woff2': 'font/woff2', '.wasm': 'application/wasm', '.map': 'application/json', '.txt': 'text/plain' };
 
-/** The path of a Chromium-based browser, or null. `CHROME` names one; else Playwright's download or one on the PATH. */
-export function findBrowser() {
-  if (process.env.CHROME) return process.env.CHROME;
-  const cache = path.join(os.homedir(), '.cache', 'ms-playwright');
-  if (fs.existsSync(cache)) {
-    for (const [prefix, rest] of [['chromium_headless_shell', ['chrome-headless-shell-linux64', 'chrome-headless-shell']], ['chromium-', ['chrome-linux64', 'chrome']]]) {
-      for (const d of fs.readdirSync(cache).filter((d) => d.startsWith(prefix)).sort().reverse()) {
-        const found = path.join(cache, d, ...rest);
-        if (fs.existsSync(found)) return found;
-      }
-    }
-  }
-  for (const name of ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser', 'chrome']) if (spawnSync('which', [name], { encoding: 'utf8' }).status === 0) return name;
-  return null;
-}
+export { findBrowser };
 
 const until = async (test, ms) => {
   const end = Date.now() + ms;
@@ -60,75 +45,50 @@ export async function checkPage(dir, expect = {}, browser = findBrowser()) {
   const allowed = (expect.allowErrors ?? []).map((r) => new RegExp(r));
   const { server, port } = await serve(path.resolve(dir));
   const origin = `http://127.0.0.1:${port}`;
-  const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'page-check-'));
-  let chrome;
   const problems = [];
   const log = [];
   const note = (text) => {
     if (!allowed.some((r) => r.test(text)) && !problems.includes(text)) problems.push(text);
   };
+  let page;
   try {
-    let targets;
-    // A first launch can be slow: two tries of 30 seconds.
-    for (let attempt = 0; attempt < 2 && !targets; attempt++) {
-      chrome?.kill();
-      chrome = spawn(browser, ['--no-sandbox', '--disable-gpu', '--headless=new', `--user-data-dir=${profile}`, '--remote-debugging-port=0', 'about:blank'], { stdio: 'ignore' });
-      await until(async () => {
-        const f = path.join(profile, 'DevToolsActivePort');
-        if (!fs.existsSync(f)) return false;
-        const list = await fetch(`http://127.0.0.1:${Number.parseInt(fs.readFileSync(f, 'utf8'), 10)}/json`).then((r) => r.json()).catch(() => undefined);
-        if (Array.isArray(list) && list.some((t) => t.type === 'page')) targets = list;
-        return Boolean(targets);
-      }, 30000);
+    try {
+      page = await openBrowser(browserKind(), browser);
+    } catch (error) {
+      return { ok: false, problems: [error.message], text: '' };
     }
-    if (!targets) return { ok: false, problems: ['the browser did not open a page to control'], text: '' };
-    const ws = new WebSocket(targets.find((t) => t.type === 'page').webSocketDebuggerUrl);
-    await new Promise((r) => (ws.onopen = r));
-    let id = 0;
-    const pending = new Map();
     let loaded = false;
     const requests = new Map();
-    ws.onmessage = (m) => {
-      const d = JSON.parse(m.data);
-      if (d.id && pending.has(d.id)) {
-        pending.get(d.id)(d.result);
-        pending.delete(d.id);
-        return;
-      }
-      const p = d.params ?? {};
-      switch (d.method) {
-        case 'Page.loadEventFired':
+    page.onEvent((e) => {
+      switch (e.type) {
+        case 'load':
           loaded = true;
           break;
-        case 'Runtime.exceptionThrown':
-          note(`uncaught: ${p.exceptionDetails?.exception?.description ?? p.exceptionDetails?.text}`.split('\n').slice(0, 3).join(' | '));
+        case 'exception':
+          note(`uncaught: ${e.text}`.split('\n').slice(0, 3).join(' | '));
           break;
-        case 'Runtime.consoleAPICalled':
-          if (log.length < 20) log.push(`${p.type}: ${(p.args ?? []).map((a) => a.value ?? a.description ?? '').join(' ')}`.slice(0, 200));
-          if (p.type === 'error') note(`console.error: ${(p.args ?? []).map((a) => a.value ?? a.description ?? '').join(' ')}`.slice(0, 300));
+        case 'console':
+          if (log.length < 20) log.push(`${e.level}: ${e.text}`.slice(0, 200));
+          if (e.level === 'error') note(`console.error: ${e.text}`.slice(0, 300));
           break;
-        case 'Network.requestWillBeSent':
-          requests.set(p.requestId, p.request.url);
+        case 'request':
+          requests.set(e.id, e.url);
           // `node:module` and the like: a browser cannot load them, and the failure of a module graph is otherwise silent.
-          if (!/^(https?|data|blob|about|chrome-extension):/.test(p.request.url)) note(`request for ${p.request.url.slice(0, 80)}, which a browser cannot load`);
-          if (log.length < 20 && !p.request.url.startsWith(origin)) log.push(`request: ${p.request.url.slice(0, 120)}`);
+          if (!/^(https?|data|blob|about|chrome-extension|moz-extension):/.test(e.url)) note(`request for ${e.url.slice(0, 80)}, which a browser cannot load`);
+          if (log.length < 20 && !e.url.startsWith(origin)) log.push(`request: ${e.url.slice(0, 120)}`);
           break;
-        case 'Network.responseReceived':
+        case 'response':
           // Only the site's own files count; a page that calls an outside service gets what the network gives it.
           // A browser asks for /favicon.ico by itself; a page that has none is not broken.
-          if (p.response.status >= 400 && p.response.url.startsWith(origin) && !p.response.url.endsWith('/favicon.ico')) note(`${p.response.status} for ${p.response.url.slice(origin.length)}`);
+          if (e.status >= 400 && e.url.startsWith(origin) && !e.url.endsWith('/favicon.ico')) note(`${e.status} for ${e.url.slice(origin.length)}`);
           break;
-        case 'Network.loadingFailed':
-          if ((requests.get(p.requestId) ?? '').startsWith(origin) && !p.canceled) note(`failed to load ${requests.get(p.requestId).slice(origin.length)}: ${p.errorText}`);
+        case 'failed':
+          if (e.url.startsWith(origin) && !e.canceled) note(`failed to load ${e.url.slice(origin.length)}: ${e.text}`);
           break;
       }
-    };
-    const send = (method, params = {}) => new Promise((r) => { const i = ++id; pending.set(i, r); ws.send(JSON.stringify({ id: i, method, params })); });
-    const evaluate = async (expression) => (await send('Runtime.evaluate', { expression, returnByValue: true })).result?.value;
-    await send('Runtime.enable');
-    await send('Network.enable');
-    await send('Page.enable');
-    await send('Page.navigate', { url: `${origin}/` });
+    });
+    const evaluate = (expression) => page.evaluate(expression);
+    await page.navigate(`${origin}/`);
     if (!(await until(() => loaded, 30000))) note('the page did not finish loading in 30 seconds');
     // Scripts that start the page after load get a moment.
     const selector = JSON.stringify(expect.selector ?? 'body');
@@ -139,18 +99,9 @@ export async function checkPage(dir, expect = {}, browser = findBrowser()) {
     else if (!expect.empty && !text && !(await evaluate('document.body.querySelectorAll("img,canvas,svg,video,input,button").length'))) note('the page shows nothing');
     if (expect.text && !new RegExp(expect.text).test(text)) note(`the page text does not match /${expect.text}/: ${text}`);
     const html = String((await evaluate('document.body.innerHTML')) ?? '').replace(/\s+/g, ' ').slice(0, 400);
-    ws.close();
     return { ok: problems.length === 0, problems, text, html, log };
   } finally {
-    if (chrome && chrome.exitCode === null) {
-      const gone = new Promise((resolve) => chrome.once('exit', resolve));
-      chrome.kill();
-      await Promise.race([gone, new Promise((resolve) => setTimeout(resolve, 5000))]);
-    }
+    await page?.close();
     server.close();
-    // The browser may still be writing to its folder for a moment; leaving a temporary folder behind is not a failure.
-    try {
-      fs.rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
-    } catch {}
   }
 }

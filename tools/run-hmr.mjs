@@ -6,8 +6,9 @@ import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { tmpdir, homedir } from 'node:os';
-import { existsSync, readdirSync, cpSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { browserKind, findBrowser, openBrowser } from './lib/browsers.mjs';
+import { existsSync, cpSync, symlinkSync } from 'node:fs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const bin = process.env.RATHKIT_PACK_BIN ?? join(root, 'target', 'release', 'rkp');
@@ -45,7 +46,9 @@ let output = '';
 child.stdout.on('data', (d) => (output += d));
 child.stderr.on('data', (d) => (output += d));
 let failed = 0;
+let checks = 0;
 const check = (ok, what, detail = '') => {
+  checks++;
   if (!ok) {
     failed++;
     console.log(`FAIL ${what}${detail ? '\n  ' + detail : ''}`);
@@ -298,25 +301,10 @@ for (const name of ['rxjs', 'lodash', 'three']) {
 
 // In a browser: the page client applies the updates, and the page is not reloaded.
 {
-  const findBrowser = () => {
-    if (process.env.CHROME) return process.env.CHROME;
-    const cache = join(homedir(), '.cache', 'ms-playwright');
-    if (existsSync(cache)) {
-      for (const d of readdirSync(cache).filter((d) => d.startsWith('chromium_headless_shell')).sort().reverse()) {
-        const found = join(cache, d, 'chrome-headless-shell-linux64', 'chrome-headless-shell');
-        if (existsSync(found)) return found;
-      }
-      for (const d of readdirSync(cache).filter((d) => d.startsWith('chromium-')).sort().reverse()) {
-        const found = join(cache, d, 'chrome-linux64', 'chrome');
-        if (existsSync(found)) return found;
-      }
-    }
-    for (const name of ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser', 'chrome']) if (spawnSync('which', [name], { encoding: 'utf8' }).status === 0) return name;
-    return null;
-  };
-  const browser = findBrowser();
+  const kind = browserKind();
+  const browser = findBrowser(kind);
   if (!browser) {
-    console.log('hmr: no Chromium-based browser found (set CHROME); the browser checks are skipped');
+    console.log(`hmr: no ${kind} browser found (see tools/lib/browsers.mjs); the browser checks are skipped`);
   } else {
     const site = join(dir, 'site');
     const put = (name, text) => {
@@ -332,49 +320,13 @@ for (const name of ['rxjs', 'lodash', 'three']) {
     let log = '';
     server.stdout.on('data', (d) => (log += d));
     server.stderr.on('data', (d) => (log += d));
-    let profile;
-    let chrome;
-    const startChrome = () => {
-      profile = mkdtempSync(join(tmpdir(), 'hmr-profile-'));
-      chrome = spawn(browser, ['--no-sandbox', '--disable-gpu', '--headless=new', `--user-data-dir=${profile}`, '--remote-debugging-port=0', 'about:blank'], { stdio: 'ignore' });
-    };
-    startChrome();
+    let tab;
     try {
       if (!(await until(() => /(?:127\.0\.0\.1|localhost):\d+/.test(log)))) throw new Error('the server did not start: ' + log);
       const port = /(?:localhost|127\.0\.0\.1):(\d+)/.exec(log)[1];
-      // The browser picks a free port and says which in a file of its profile. A runner's first launch can be slow, so it gets two
-      // tries of 30 seconds, each waiting for a page it can control, and a browser that never comes up is a clear failure.
-      let targets;
-      for (let attempt = 0; attempt < 2 && !targets; attempt++) {
-        if (attempt > 0) {
-          chrome.kill();
-          startChrome();
-        }
-        await until(async () => {
-          const f = join(profile, 'DevToolsActivePort');
-          if (!existsSync(f)) return false;
-          const list = await fetch(`http://127.0.0.1:${Number.parseInt(readFileSync(f, 'utf8'), 10)}/json`).then((r) => r.json()).catch(() => undefined);
-          if (Array.isArray(list) && list.some((t) => t.type === 'page')) targets = list;
-          return Boolean(targets);
-        }, 30000);
-      }
-      if (!targets) throw new Error('the browser did not open a page to control');
-      const ws = new WebSocket(targets.find((t) => t.type === 'page').webSocketDebuggerUrl);
-      await new Promise((r) => (ws.onopen = r));
-      let id = 0;
-      const pending = new Map();
-      ws.onmessage = (m) => {
-        const d = JSON.parse(m.data);
-        if (d.id && pending.has(d.id)) {
-          pending.get(d.id)(d.result);
-          pending.delete(d.id);
-        }
-      };
-      const send = (method, params = {}) => new Promise((r) => { const i = ++id; pending.set(i, r); ws.send(JSON.stringify({ id: i, method, params })); });
-      const evaluate = async (expression) => (await send('Runtime.evaluate', { expression, returnByValue: true })).result?.value;
-      await send('Runtime.enable');
-      await send('Page.enable');
-      await send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
+      tab = await openBrowser(kind, browser);
+      const evaluate = (expression) => tab.evaluate(expression);
+      await tab.navigate(`http://127.0.0.1:${port}/`);
       check(await until(async () => (await evaluate("document.getElementById('out')?.textContent")) === 'one|a'), 'the page runs the modules');
       const page = await evaluate('window.__page');
 
@@ -403,7 +355,7 @@ for (const name of ['rxjs', 'lodash', 'three']) {
           const reactPort = /(?:localhost|127\.0\.0\.1):(\d+)/.exec(reactLog)[1];
           // The page is opened once the build is there to be served.
           await fetchBuilt(`http://127.0.0.1:${reactPort}`, () => reactLog);
-          await send('Page.navigate', { url: `http://127.0.0.1:${reactPort}/` });
+          await tab.navigate(`http://127.0.0.1:${reactPort}/`);
           const text = () => evaluate("document.getElementById('out')?.textContent");
           check(await until60(async () => (await text()) === 'Hello count 0'), 'the React app renders', String(await text()));
           const first = await evaluate('window.__page');
@@ -436,7 +388,7 @@ for (const name of ['rxjs', 'lodash', 'three']) {
           if (!(await until(() => /(?:127\.0\.0\.1|localhost):\d+/.test(vueLog)))) throw new Error('the Vue server did not start: ' + vueLog);
           const vuePort = /(?:localhost|127\.0\.0\.1):(\d+)/.exec(vueLog)[1];
           await fetchBuilt(`http://127.0.0.1:${vuePort}`, () => vueLog);
-          await send('Page.navigate', { url: `http://127.0.0.1:${vuePort}/` });
+          await tab.navigate(`http://127.0.0.1:${vuePort}/`);
           const text = () => evaluate("document.getElementById('app')?.textContent?.replace(/\\s+/g, ' ').trim()");
           check(await until60(async () => (await text()) === 'count 0Hellochild one'), 'the Vue app renders', String(await text()) + ' ' + vueLog.slice(-300));
           const first = await evaluate('window.__page');
@@ -471,7 +423,7 @@ for (const name of ['rxjs', 'lodash', 'three']) {
           if (!(await until(() => /(?:127\.0\.0\.1|localhost):\d+/.test(svelteLog)))) throw new Error('the Svelte server did not start: ' + svelteLog);
           const sveltePort = /(?:localhost|127\.0\.0\.1):(\d+)/.exec(svelteLog)[1];
           await fetchBuilt(`http://127.0.0.1:${sveltePort}`, () => svelteLog);
-          await send('Page.navigate', { url: `http://127.0.0.1:${sveltePort}/` });
+          await tab.navigate(`http://127.0.0.1:${sveltePort}/`);
           const text = () => evaluate("document.getElementById('app')?.textContent?.replace(/\\s+/g, ' ').trim()");
           check(await until60(async () => /count 0\s*Hello\s*child one/.test((await text()) ?? '')), 'the Svelte app renders', String(await text()) + ' ' + svelteLog.slice(-400));
           const first = await evaluate('window.__page');
@@ -491,13 +443,12 @@ for (const name of ['rxjs', 'lodash', 'three']) {
           svelte.kill();
         }
       }
-      ws.close();
     } catch (error) {
       failed++;
       console.log('FAIL ' + (error?.stack ?? error));
     } finally {
       server.kill();
-      chrome.kill();
+      await tab?.close();
     }
   }
 }
@@ -509,4 +460,4 @@ if (failed) {
   process.exit(1);
 }
 try { rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch {} // Windows may still hold a file of a process that just ended
-console.log('hmr: all checks pass');
+console.log(`hmr: all ${checks} checks pass${process.env.BROWSER ? ` (${process.env.BROWSER})` : ''}`);

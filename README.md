@@ -145,8 +145,8 @@ rkp bundle src/main.ts --outfile dist/app.mjs
       `@rollup/plugin-url`, `@svgr/rollup`, `vite-plugin-svgr`, `rollup-plugin-copy`, webpack's `url-loader`,
       `file-loader` and `@svgr/webpack`, `vite-imagetools`, `vite-plugin-image-optimizer`, `unplugin-fonts` (its style sheet, and the tags it adds to a page in a build and in `serve`), and `vite-plugin-webfont-dl` (downloads from Google Fonts, so it
       is skipped when the network is down) (`tools/run-assets.mjs`), and `@module-federation/vite` and
-      `@module-federation/enhanced` (`tools/run-federation.mjs`, in Chromium).
-      `@vitejs/plugin-vue` and `@sveltejs/vite-plugin-svelte`, edited under `--hmr` with no reload (`tools/run-hmr.mjs`, in Chromium).
+      `@module-federation/enhanced` (`tools/run-federation.mjs`, in Chromium, Firefox and WebKit).
+      `@vitejs/plugin-vue` and `@sveltejs/vite-plugin-svelte`, edited under `--hmr` with no reload (`tools/run-hmr.mjs`, in Chromium, Firefox and WebKit).
     - Tried by hand, not repeated in CI: `@rollup/plugin-json`, `-image`, `-commonjs`, `-node-resolve`, `-babel`,
       `-typescript`; babel-loader; css-loader with style-loader; `copy-webpack-plugin`, `html-webpack-plugin`,
       `mini-css-extract-plugin`, `compression-webpack-plugin`, `webpack-manifest-plugin`,
@@ -361,7 +361,9 @@ agrees with them:
 | Source maps | the other end of every mapping (the token in the generated file is the token in the original, or the identifier the map says was renamed), and Node's own stack traces | 1.3 million mappings in the TypeScript compiler bundle, 20,000 error sites in generated TypeScript/JavaScript/CommonJS programs across 7 output modes, every fixture |
 | JSX, decorators, metadata | `tsc`'s own transform | 18 programs in both JSX modes; the standard-decorator ones also as `cjs`, `iife` and unshaken |
 
-The browser checks (development server, `--hmr`, Fast Refresh, Vue, Svelte, federation) run in headless Chromium only; Firefox and Safari have not been tried.
+The browser checks (development server, `--hmr`, Fast Refresh, Vue, Svelte, federation) run in headless Chromium, Firefox and WebKit
+(`BROWSER=firefox node tools/run-hmr.mjs`; the tools drive the browsers with no dependency, `tools/lib/browsers.mjs`). WebKit is Playwright's
+Linux build, not Safari, which has not been tried.
 
 ```
 cargo test                                    # unit tests and the Node comparisons
@@ -370,7 +372,7 @@ node tools/run-fixtures.mjs                   # bundle fixtures vs Node
 node tools/run-plugins.mjs                    # Rollup, Vite, esbuild, webpack and Parcel plugins through the host
 node tools/run-watch.mjs                      # --watch: rebuilds, plugin hooks, restart on config change, Ctrl-C
 node tools/run-serve.mjs                      # serve: pages, middlewares, html hooks, css swaps, reloads, errors
-node tools/run-federation.mjs                 # module federation in Chromium: our host and remote, rspack's, dev servers, types
+node tools/run-federation.mjs                 # module federation in a browser (BROWSER=chromium|firefox|webkit): our host and remote, rspack's, dev servers, types
 node tools/test-federation-runtime.mjs        # the federation runtime without a browser
 node tools/diff-semver.mjs                    # the runtime's version ranges vs npm's semver
 node tools/check-estree.mjs DIR...            # the ESTree of every .js file against acorn's (needs acorn; ACORN_DIR)

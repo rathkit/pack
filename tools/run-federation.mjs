@@ -1,14 +1,15 @@
 // Module federation in a real browser: applications built by rathkit-pack and by rspack load each other's modules and
 // agree on one copy of React, and two development servers do the same with a change in one reloading the other's page.
 //   node tools/run-federation.mjs [scenario...]
-// Needs a Chromium-based browser (CHROME, a Playwright download, or one on the PATH). The scenarios that involve rspack need
-// `pnpm install --dir bench`. Without a browser it says so and passes.
+// Runs in Chromium, or in Firefox or WebKit with BROWSER=firefox|webkit (tools/lib/browsers.mjs says where the browsers come from). The
+// scenarios that involve rspack need `pnpm install --dir bench`. Without the browser it says so and passes.
 import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
+import { browserKind, findBrowser, openBrowser } from './lib/browsers.mjs';
 import { existsSync, readdirSync, readFileSync, writeFileSync, mkdtempSync, rmSync, cpSync, symlinkSync, mkdirSync, statSync } from 'node:fs';
 import { join, dirname, extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { tmpdir, homedir } from 'node:os';
+import { tmpdir } from 'node:os';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const bin = process.env.RATHKIT_PACK_BIN ?? join(root, 'target', 'release', 'rkp');
@@ -16,27 +17,10 @@ const tests = join(root, 'tests', 'federation');
 const bench = join(root, 'bench');
 const only = process.argv.slice(2);
 
-const findBrowser = () => {
-  if (process.env.CHROME) return process.env.CHROME;
-  const cache = join(homedir(), '.cache', 'ms-playwright');
-  if (existsSync(cache)) {
-    for (const dir of readdirSync(cache).filter((d) => d.startsWith('chromium_headless_shell')).sort().reverse()) {
-      const found = join(cache, dir, 'chrome-headless-shell-linux64', 'chrome-headless-shell');
-      if (existsSync(found)) return found;
-    }
-    for (const dir of readdirSync(cache).filter((d) => d.startsWith('chromium-')).sort().reverse()) {
-      const found = join(cache, dir, 'chrome-linux64', 'chrome');
-      if (existsSync(found)) return found;
-    }
-  }
-  for (const name of ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser', 'chrome']) {
-    if (spawnSync('which', [name], { encoding: 'utf8' }).status === 0) return name;
-  }
-  return null;
-};
-const browser = findBrowser();
+const kind = browserKind();
+const browser = findBrowser(kind);
 if (!browser) {
-  console.log('federation: no Chromium-based browser found (set CHROME); skipped');
+  console.log(`federation: no ${kind} browser found (see tools/lib/browsers.mjs); skipped`);
   process.exit(0);
 }
 
@@ -110,43 +94,18 @@ const buildRspack = async (name) => {
 };
 const haveRspack = existsSync(join(bench, 'node_modules', '@module-federation', 'enhanced')) && existsSync(join(bench, 'node_modules', '@rspack', 'core'));
 
-// A page driven through the browser's debugging protocol.
+// A page of the browser, which collects what the page logs.
 const openPage = async (url, { wait = 3000 } = {}) => {
-  // The browser picks a free port and says which in a file of its profile; a slow start (a runner's first launch) gets time.
-  let child, targets, profile;
-  for (let attempt = 0; attempt < 2 && !targets; attempt++) {
-    profile = mkdtempSync(join(tmp, 'profile-'));
-    child = spawn(browser, ['--no-sandbox', '--disable-gpu', '--headless=new', `--user-data-dir=${profile}`, '--remote-debugging-port=0', 'about:blank'], { stdio: 'ignore' });
-    for (let i = 0; i < 150 && !targets; i++) {
-      await new Promise((r) => setTimeout(r, 200));
-      const file = join(profile, 'DevToolsActivePort');
-      if (!existsSync(file)) continue;
-      const port = Number.parseInt(readFileSync(file, 'utf8'), 10);
-      targets = await fetch(`http://127.0.0.1:${port}/json`).then((r) => r.json()).catch(() => undefined);
-    }
-    if (!targets) child.kill();
-  }
-  if (!targets) throw new Error('the browser did not start');
-  const ws = new WebSocket(targets.find((t) => t.type === 'page').webSocketDebuggerUrl);
-  await new Promise((r) => (ws.onopen = r));
-  let id = 0;
-  const pending = new Map();
+  const tab = await openBrowser(kind, browser);
   const logs = [];
-  ws.onmessage = (m) => {
-    const d = JSON.parse(m.data);
-    if (d.id && pending.has(d.id)) {
-      pending.get(d.id)(d.result);
-      pending.delete(d.id);
-    } else if (d.method === 'Runtime.consoleAPICalled') logs.push(d.params.args.map((a) => a.value ?? a.description).join(' '));
-    else if (d.method === 'Runtime.exceptionThrown') logs.push('EXCEPTION ' + (d.params.exceptionDetails.exception?.description ?? d.params.exceptionDetails.text));
-  };
-  const send = (method, params = {}) => new Promise((r) => { const i = ++id; pending.set(i, r); ws.send(JSON.stringify({ id: i, method, params })); });
-  await send('Runtime.enable');
-  await send('Page.enable');
-  await send('Page.navigate', { url });
+  tab.onEvent((e) => {
+    if (e.type === 'console') logs.push(e.text);
+    else if (e.type === 'exception') logs.push('EXCEPTION ' + e.text);
+  });
+  await tab.navigate(url);
   const page = {
     logs,
-    eval: async (expression) => (await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true })).result?.value,
+    eval: (expression) => tab.evaluate(expression),
     // The text of the page and its title, once its script has finished (or after `wait` ms).
     async settled(timeout = wait) {
       const started = Date.now();
@@ -157,10 +116,7 @@ const openPage = async (url, { wait = 3000 } = {}) => {
       }
       return { title: await page.eval('document.title'), text: await page.eval("document.getElementById('out')?.textContent") };
     },
-    close() {
-      ws.close();
-      child.kill();
-    },
+    close: () => tab.close(),
   };
   return page;
 };

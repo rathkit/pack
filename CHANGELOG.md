@@ -20,6 +20,8 @@ about stability.
 
 ### Added
 
+- The browser checks of the repository (the development server and `--hmr` with React, Vue and Svelte, and module federation) run in Firefox and
+  WebKit as well as Chromium (`BROWSER=firefox` or `webkit`); the three are driven with no dependency of ours and are run in CI on Ubuntu 24.04.
 - Less, Sass (`sass-embedded` or `sass`) and Stylus files are compiled when the compiler is installed in the project, as Vite does,
   and read as style sheets (including `.module.scss`). This applies to builds that use a configuration file, since the
   compilers run in the plugin host; a project that lists its own plugin for one of these languages keeps it.
