@@ -4,15 +4,16 @@
 //   pnpm install && node generate.mjs && node run.mjs [options] [workload...]
 //
 //   --runs N          timed runs per case, after one warm-up run (default 7)
-//   --tools a,b,c     rathkit, esbuild, rolldown, rspack, vite (default rathkit; the others are for development only)
+//   --tools a,b,c     rathkit, esbuild, rolldown, rspack, vite, parcel2, parcel3 (default rathkit; the others are for development only)
 //   --env production  define process.env.NODE_ENV as "production" in every tool (the default), or `none` for no define
 //   --modes a,b       plain, minify, minify+map (default all three)
 //   --markdown        also print the tables as Markdown
 //
 // RATHKIT_PACK_BIN names the rathkit-pack binary (default ../target/release/rkp).
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, rmSync, existsSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, rmSync, existsSync, renameSync, realpathSync } from 'node:fs';
+import { join, dirname, basename, extname } from 'node:path';
+import { createRequire } from 'node:module';
 import { gzipSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { builtinModules } from 'node:module';
@@ -49,9 +50,32 @@ const runnable = new Set(['ts5', 'react', 'rxjs', 'app1500', 'tsapp500']);
 const externals = [...builtinModules, ...builtinModules.map((m) => 'node:' + m)];
 const NODE_ENV = '"production"';
 
+
+// Parcel 3 is a native executable that npm installs as a platform package; the `parcel3` launcher is a Node script that starts it,
+// and timing it would add a Node start-up, so the executable is run directly.
+const parcel3Binary = () => {
+  const need = createRequire(realpathSync(join(here, 'node_modules', 'parcel3', 'package.json')));
+  const base = `@parcel/parcel3-${process.platform}-${process.arch}`;
+  const exe = process.platform === 'win32' ? 'parcel.exe' : 'parcel';
+  for (const pkg of [base, `${base}-gnu`, `${base}-musl`]) {
+    try {
+      return need.resolve(`${pkg}/${exe}`);
+    } catch {}
+  }
+  throw new Error(`no Parcel 3 executable for ${process.platform} ${process.arch}`);
+};
+// Both Parcel versions build from the \`targets\` in package.json (a Node ES module, node_modules included), write to the folder of the case,
+// and name the file after the entry; the file is renamed to out.mjs afterwards. Parcel 2 is told not to keep its disk cache
+// so that every run is a cold build; Parcel 3 has none. Without --optimize Parcel does not minify and does not scope-hoist.
+const parcelCase = ({ entry, minify, map, dir }) => ({
+  entryPath: join(here, entry),
+  flags: ['--dist-dir', dir, '--no-content-hash', '--log-level', 'error', ...(minify ? [] : ['--no-optimize']), ...(map ? [] : ['--no-source-maps'])],
+  produced: join(dir, basename(entry, extname(entry)) + '.js'),
+});
+
 const tools = {
   rathkit: ({ entry, out, minify, map }) => ({ cmd: RK, args: ['bundle', entry, '--outfile', out, '--no-config', ...(production ? ['--define', `process.env.NODE_ENV=${NODE_ENV}`] : []), ...(minify ? ['--minify'] : []), ...(map ? ['--sourcemap'] : [])] }),
-  esbuild: ({ entry, out, minify, map }) => ({ cmd: bin('esbuild'), args: [entry, '--bundle', '--format=esm', '--platform=node', `--outfile=${out}`, '--log-level=error', ...(production ? [`--define:process.env.NODE_ENV=${NODE_ENV}`] : []), ...(minify ? ['--minify'] : []), ...(map ? ['--sourcemap'] : [])] }),
+  esbuild: ({ entry, out, minify, map }) => ({ cmd: bin('esbuild'), args: [entry, '--bundle', '--format=esm', '--platform=node', `--outfile=${out}`, '--log-level=error', '--banner:js=import { createRequire as __rkRequire } from "node:module"; import { fileURLToPath as __rkPath } from "node:url"; import { dirname as __rkDir } from "node:path"; const require = __rkRequire(import.meta.url), __filename = __rkPath(import.meta.url), __dirname = __rkDir(__filename);', ...(production ? [`--define:process.env.NODE_ENV=${NODE_ENV}`] : []), ...(minify ? ['--minify'] : []), ...(map ? ['--sourcemap'] : [])] }),
   rolldown: ({ entry, out, minify, map }) => ({ cmd: bin('rolldown'), args: [entry, '--file', out, '--format', 'esm', '--platform', 'node', ...(production ? ['--transform.define', `process.env.NODE_ENV=${NODE_ENV}`] : []), ...(minify ? ['--minify'] : []), ...(map ? ['--sourcemap'] : [])] }),
   rspack: ({ entry, out, minify, map, dir }) => {
     const config = join(dir, 'rspack.config.mjs');
@@ -68,6 +92,14 @@ const tools = {
       `export default { root: ${JSON.stringify(here)}, logLevel: 'error', configFile: false, define: ${production ? `{ 'process.env.NODE_ENV': ${JSON.stringify(NODE_ENV)} }` : '{}'}, build: { outDir: ${JSON.stringify(dirname(out))}, emptyOutDir: false, minify: ${minify ? "'oxc'" : 'false'}, sourcemap: ${map}, target: 'esnext', lib: { entry: ${JSON.stringify(join(here, entry))}, formats: ['es'], fileName: () => ${JSON.stringify(out.split('/').pop())} }, rollupOptions: { external: ${JSON.stringify(externals)} } } };\n`,
     );
     return { cmd: bin('vite'), args: ['build', '--config', config] };
+  },
+  parcel2: (c) => {
+    const p = parcelCase(c);
+    return { cmd: process.execPath, args: [join(here, 'node_modules/parcel2/lib/bin.js'), 'build', p.entryPath, '--no-cache', '--no-autoinstall', ...p.flags], produced: p.produced };
+  },
+  parcel3: (c) => {
+    const p = parcelCase(c);
+    return { cmd: parcel3Binary(), args: ['build', p.entryPath, ...p.flags], produced: p.produced };
   },
 };
 const selected = option('--tools', 'rathkit').split(',');
@@ -111,6 +143,7 @@ for (const [name, entry] of Object.entries(workloads)) {
       let failed = null;
       for (let i = -1; i < runs; i++) {
         rmSync(out, { force: true });
+        if (spec.produced) rmSync(spec.produced, { force: true });
         const r = run(spec, here);
         if (!r.ok) {
           failed = r.err.trim().split('\n').slice(-2).join(' | ').slice(0, 160);
@@ -120,6 +153,10 @@ for (const [name, entry] of Object.entries(workloads)) {
           times.push(r.ms);
           rss.push(r.rss);
         }
+      }
+      if (!failed && spec.produced) {
+        if (existsSync(spec.produced)) renameSync(spec.produced, out);
+        else failed = `no output at ${spec.produced}`;
       }
       let runs_ = '-';
       if (!failed && runnable.has(name)) {

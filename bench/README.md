@@ -1,6 +1,6 @@
 # Measuring
 
-`run.mjs` builds fixed inputs with Rathkit Pack (and, with `--tools`, esbuild, rolldown, rspack and Vite) and reports for each case the median and best wall time of the whole
+`run.mjs` builds fixed inputs with Rathkit Pack (and, with `--tools`, esbuild, rolldown, rspack, Vite, Parcel 2 and Parcel 3) and reports for each case the median and best wall time of the whole
 command (start-up included), peak memory, output size and gzip size, and whether the output runs and prints what the
 unbundled program prints. Figures are quoted only with this method and the machine they were measured on; the published ones are in [../docs/benchmarks.md](../docs/benchmarks.md).
 
@@ -13,7 +13,7 @@ node run.mjs                   # everything, 7 runs per case: about ten minutes
 node run.mjs --markdown --runs 5 lodash react        # chosen workloads, tables as Markdown
 ```
 
-Options: `--tools rathkit,esbuild,rolldown,rspack,vite` (default: rathkit only), `--modes plain,minify,minify+map`, `--env production|none` (whether `process.env.NODE_ENV`
+Options: `--tools rathkit,esbuild,rolldown,rspack,vite,parcel2,parcel3` (default: rathkit only), `--modes plain,minify,minify+map`, `--env production|none` (whether `process.env.NODE_ENV`
 is defined as `"production"`; the default is production). The binary is `target/release/rkp` unless
 `RATHKIT_PACK_BIN` says otherwise. Results are also written to `results.json`.
 
@@ -24,5 +24,7 @@ For numbers worth quoting: use a machine with nothing else running (`uptime`), a
 the medians. Things to keep in mind when reading them:
 
 - The output is one ESM file for Node.
+- Parcel 2 and Parcel 3 are installed side by side under the names `parcel2` and `parcel3`. Parcel 3 is run as its native executable, not through its Node launcher. Neither is given a disk cache. Without `--optimize` Parcel neither minifies nor scope-hoists, so its plain build differs from the others in that respect.
+- Peak memory is the largest resident size of any one process, so a tool that spreads work over several processes is understated.
 - Time includes the process start-up.
 - Output sizes depend on which package entry point is picked (rxjs has an ESM build and a CommonJS build).

@@ -19,6 +19,8 @@
     "esbuild": "0.28.2",
     "file-loader": "6.2.0",
     "lodash-es": "4.18.1",
+    "parcel2": "npm:parcel@2.16.4",
+    "parcel3": "npm:parcel@3.0.0-alpha.2",
     "react": "19.3.1",
     "react-dom": "19.3.1",
     "react-refresh": "0.18.0",
@@ -41,5 +43,12 @@
     "vite-plugin-webfont-dl": "3.13.1",
     "vue": "3.5.43"
   },
-  "packageManager": "pnpm@12.14.0"
+  "packageManager": "pnpm@12.14.0",
+  "targets": {
+    "bundle": {
+      "context": "node",
+      "outputFormat": "esmodule",
+      "includeNodeModules": true
+    }
+  }
 }
