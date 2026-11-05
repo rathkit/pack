@@ -11,7 +11,12 @@ out('sync', await collect(of(1, 2, 3, 4, 5).pipe(map((x) => x * 2), filter((x) =
 out('merge', await collect(merge(of(1, 2), of(3)).pipe(take(3))));
 out('concat', await collect(concat(of('a'), of('b', 'c'))));
 out('combine', await collect(combineLatest([of(1, 2), of('x')]).pipe(map(([a, b]) => a + b))));
-out('mergeMap', await collect(from([1, 2, 3]).pipe(mergeMap((n) => timer((4 - n) * 15).pipe(map(() => n))))));
+// The inner sources answer in the order 3, 2, 1, which is not the order they were subscribed in. They are opened by hand rather than by
+// timers of 45, 30 and 15 ms: a runner that stalls for 15 ms between two subscriptions would reorder the timers and fail the comparison.
+const gates = [new Subject(), new Subject(), new Subject()];
+const merged = collect(from([1, 2, 3]).pipe(mergeMap((n) => gates[n - 1].pipe(take(1), map(() => n)))));
+[3, 2, 1].forEach((n) => gates[n - 1].next(n));
+out('mergeMap', await merged);
 out('concatMap', await collect(from([1, 2, 3]).pipe(concatMap((n) => timer((4 - n) * 15).pipe(map(() => n))))));
 out('switchMap', await collect(from([1, 2, 3]).pipe(switchMap((n) => of(n * 10)))));
 out('group', await collect(from(['apple', 'avocado', 'banana', 'blueberry', 'cherry']).pipe(groupBy((s) => s[0]), mergeMap((g) => g.pipe(reduce((acc, s) => [...acc, s], [g.key]))))));
