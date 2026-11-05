@@ -87,4 +87,4 @@ cargo build --release --locked
 ```
 
 The plugin host (`node` is used when a config lists plugins) and the federation runtime are scripts inside the binary.
-Packages that the tests need (`bench/package.json`) are never part of a release.
+Packages that the tests need (`test-deps/package.json`) are never part of a release.

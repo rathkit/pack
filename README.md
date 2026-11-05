@@ -15,7 +15,7 @@ generated apps; plain, minified, minified with a source map), the whole command 
 memory in every case, against esbuild, rolldown, rspack and Vite. The closest was the TypeScript compiler minified
 (397 ms against esbuild's 424 ms). Output sizes are about equal, and others are smaller in some cases. The method,
 the machine, the versions and every table: [docs/benchmarks.md](docs/benchmarks.md). One machine, one day: run
-`bench/run.mjs` for yours.
+the container recipe in [rathkit/pack-bench](https://github.com/rathkit/pack-bench) for yours.
 
 ## Install
 
@@ -141,7 +141,7 @@ rkp bundle src/main.ts --outfile dist/app.mjs
     bundler does itself.
   - **What is covered by tests.** Plugin support is claimed only as far as this list goes.
     - Checked in CI on every change: the plugin hooks and contexts above, with small plugins written for the
-      purpose (`tools/run-plugins.mjs`, 10 programs); and these real packages, run from `bench/`:
+      purpose (`tools/run-plugins.mjs`, 10 programs); and these real packages, run from `test-deps/`:
       `@rollup/plugin-url`, `@svgr/rollup`, `vite-plugin-svgr`, `rollup-plugin-copy`, webpack's `url-loader`,
       `file-loader` and `@svgr/webpack`, `vite-imagetools`, `vite-plugin-image-optimizer`, `unplugin-fonts` (its style sheet, and the tags it adds to a page in a build and in `serve`), and `vite-plugin-webfont-dl` (downloads from Google Fonts, so it
       is skipped when the network is down) (`tools/run-assets.mjs`), and `@module-federation/vite` and
