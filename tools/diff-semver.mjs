@@ -4,13 +4,14 @@ import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { join, dirname } from 'node:path';
 import { existsSync } from 'node:fs';
+import { testDeps, testModules, installHint } from './lib/test-deps.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-if (!existsSync(join(root, 'bench', 'node_modules', 'semver'))) {
-  console.log('semver: not installed (pnpm install --dir bench); skipped');
+if (!existsSync(join(testModules, 'semver'))) {
+  console.log('semver: not installed (' + installHint + '); skipped');
   process.exit(0);
 }
-const semver = createRequire(join(root, 'bench', 'package.json'))('semver');
+const semver = createRequire(join(testDeps, 'package.json'))('semver');
 const { satisfy } = await import(pathToFileURL(join(root, 'src', 'federation', 'semver.js')).href);
 
 const versions = [];

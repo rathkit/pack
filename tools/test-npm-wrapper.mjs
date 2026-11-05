@@ -79,6 +79,7 @@ writeFileSync(
   `import { build, serve, run, version, binaryPath, BuildError } from '@rathkit/pack';
 import { readFileSync, existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { testModules } from './lib/test-deps.mjs';
 const problems = [];
 const check = (ok, what) => ok || problems.push(what);
 check(typeof version() === 'string' && version().length > 0, 'version');
@@ -137,7 +138,7 @@ const api = run(process.execPath, ['api.mjs'], { cwd: project, env: { ...process
 if (api.status !== 0 || api.stdout.trim() !== 'api ok') fail(`the API: ${api.stdout}${api.stderr}`);
 
 // The types fit how it is used (when a TypeScript compiler is at hand: bench has one).
-const tsc = join(root, 'bench', 'node_modules', 'typescript', 'bin', 'tsc');
+const tsc = join(testModules, 'typescript', 'bin', 'tsc');
 if (existsSync(tsc)) {
   writeFileSync(join(project, 'use.mts'), `import { build, serve, type Options, BuildError } from '@rathkit/pack';
 const typed: Options = { target: 'es2019', jsxDev: true, tsconfigRaw: { compilerOptions: {} }, inject: ['shim.js'], legalComments: 'linked', entryNames: '[name]-[hash]', chunkNames: 'c-[hash]', outExtension: { '.js': '.mjs' }, pure: ['a.b'], metafile: 'meta.json', entries: 'a.js', banner: { css: 'x' }, footer: 'y', drop: ['console', 'debugger'], packages: 'external', resolveExtensions: ['.ts'], preserveSymlinks: true, envDir: '.', envPrefix: ['A_'], envFiles: false };

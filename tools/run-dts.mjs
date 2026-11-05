@@ -6,12 +6,13 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
+import { testModules, installHint } from './lib/test-deps.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const bin = process.env.RATHKIT_PACK_BIN ?? join(root, 'target', 'release', 'rkp');
-const typescript = join(root, 'bench', 'node_modules', 'typescript');
+const typescript = join(testModules, 'typescript');
 if (!existsSync(typescript)) {
-  console.log('dts: typescript is not installed (pnpm install --dir bench); skipped');
+  console.log('dts: typescript is not installed (' + installHint + '); skipped');
   process.exit(0);
 }
 const tmp = mkdtempSync(join(tmpdir(), 'dts-'));

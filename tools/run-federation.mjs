@@ -10,11 +10,11 @@ import { existsSync, readdirSync, readFileSync, writeFileSync, mkdtempSync, rmSy
 import { join, dirname, extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
+import { testModules, installHint } from './lib/test-deps.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const bin = process.env.RATHKIT_PACK_BIN ?? join(root, 'target', 'release', 'rkp');
 const tests = join(root, 'tests', 'federation');
-const bench = join(root, 'bench');
 const only = process.argv.slice(2);
 
 const kind = browserKind();
@@ -49,7 +49,7 @@ const copy = (name, as = name, links = true) => {
     const dir = join(tmp, as);
     cpSync(join(tests, name), dir, { recursive: true });
     // The packages the projects import are the ones in the bench folder (a project that has no use for them is left alone: the build writes to its node_modules).
-    if (links) symlinkSync(join(bench, 'node_modules'), join(dir, 'node_modules'), 'dir');
+    if (links) symlinkSync(testModules, join(dir, 'node_modules'), 'dir');
     copies.set(as, dir);
   }
   return copies.get(as);
@@ -83,16 +83,16 @@ const withOption = (file, change) => (dir) => {
 let rspack;
 const buildRspack = async (name) => {
   const dir = copy(name);
-  rspack ??= await import(join(bench, 'node_modules', '@rspack', 'core', 'dist', 'index.js')).catch(() => null);
-  if (!rspack) throw new Error('rspack is not installed (pnpm install --dir bench)');
+  rspack ??= await import(join(testModules, '@rspack', 'core', 'dist', 'index.js')).catch(() => null);
+  if (!rspack) throw new Error('rspack is not installed (' + installHint + ')');
   const config = (await import(join(dir, 'rspack.config.mjs'))).default;
   // Resolve the packages from the bench folder.
-  config.resolve = { modules: [join(bench, 'node_modules'), 'node_modules'] };
-  config.resolveLoader = { modules: [join(bench, 'node_modules')] };
+  config.resolve = { modules: [testModules, 'node_modules'] };
+  config.resolveLoader = { modules: [testModules] };
   await new Promise((resolve, reject) => rspack.rspack(config, (error, stats) => (error ? reject(error) : stats.hasErrors() ? reject(new Error(stats.toString({ errors: true }))) : resolve())));
   return join(dir, 'dist');
 };
-const haveRspack = existsSync(join(bench, 'node_modules', '@module-federation', 'enhanced')) && existsSync(join(bench, 'node_modules', '@rspack', 'core'));
+const haveRspack = existsSync(join(testModules, '@module-federation', 'enhanced')) && existsSync(join(testModules, '@rspack', 'core'));
 
 // A page of the browser, which collects what the page logs.
 const openPage = async (url, { wait = 3000 } = {}) => {
@@ -162,7 +162,7 @@ scenario('getPublicPath sets where the container loads from, and options that ch
 });
 
 scenario('dts options: outputDir, generateAPITypes, additionalFilesToCompile, abortOnError, and a remote whose types cannot be read', async () => {
-  if (!existsSync(join(bench, 'node_modules', 'typescript'))) return;
+  if (!existsSync(join(testModules, 'typescript'))) return;
   const dist = await build('remote-types', {
     entry: 'src/index.ts',
     as: 'remote-types-options',
@@ -222,7 +222,7 @@ scenario('dts options: outputDir, generateAPITypes, additionalFilesToCompile, ab
 });
 
 scenario('dts options: compilerInstance, extractThirdParty, extractRemoteTypes, afterGenerate, consumeAPITypes, runtimePkgs, family, remoteTypesFolder', async () => {
-  const tsc = join(bench, 'node_modules', 'typescript', 'bin', 'tsc');
+  const tsc = join(testModules, 'typescript', 'bin', 'tsc');
   if (!existsSync(tsc)) return;
   // A remote whose exposed module imports a package that has types, and a compiler other than tsc (a script that runs it).
   const dist = await build('remote-types', {
@@ -233,7 +233,7 @@ scenario('dts options: compilerInstance, extractThirdParty, extractRemoteTypes, 
       const modules = join(dir, 'node_modules');
       mkdirSync(join(modules, 'typed-pkg'), { recursive: true });
       mkdirSync(join(modules, '.bin'), { recursive: true });
-      symlinkSync(join(bench, 'node_modules', 'typescript'), join(modules, 'typescript'), 'dir');
+      symlinkSync(join(testModules, 'typescript'), join(modules, 'typescript'), 'dir');
       writeFileSync(join(modules, 'typed-pkg', 'package.json'), '{ "name": "typed-pkg", "version": "1.0.0", "types": "index.d.ts" }');
       writeFileSync(join(modules, 'typed-pkg', 'index.d.ts'), 'export interface Shape { sides: number }\n');
       writeFileSync(join(modules, '.bin', 'faketsc'), `#!/usr/bin/env node\nrequire('fs').writeFileSync(${JSON.stringify(join(dir, 'compiler-ran.txt'))}, process.argv.slice(2).join(' '));\nrequire(${JSON.stringify(tsc)});\n`, { mode: 0o755 });
@@ -372,7 +372,7 @@ if (haveRspack) {
   });
 
   scenario('the real Vite federation plugin, run by the plugin layer, makes a remote that a host built here loads', async () => {
-    if (!existsSync(join(bench, 'node_modules', '@module-federation', 'vite'))) return;
+    if (!existsSync(join(testModules, '@module-federation', 'vite'))) return;
     const dir = copy('vite-remote-plugin');
     const built = await new Promise((resolve) => {
       const child = spawn(bin, ['bundle', 'src/main.js', '--outdir', 'dist', '--splitting', '--real-federation-plugin', '--define', 'process.env.NODE_ENV="production"'], { cwd: dir });
@@ -389,9 +389,9 @@ if (haveRspack) {
   });
 
   scenario('a host built by rathkit-pack loads a remote built by Vite with its federation plugin', async () => {
-    const viteBin = join(bench, 'node_modules', 'vite', 'bin', 'vite.js');
-    if (!existsSync(viteBin) || !existsSync(join(bench, 'node_modules', '@module-federation', 'vite'))) {
-      console.log('federation: vite or @module-federation/vite is not installed (pnpm install --dir bench); skipped');
+    const viteBin = join(testModules, 'vite', 'bin', 'vite.js');
+    if (!existsSync(viteBin) || !existsSync(join(testModules, '@module-federation', 'vite'))) {
+      console.log('federation: vite or @module-federation/vite is not installed (' + installHint + '); skipped');
       return;
     }
     const dir = copy('vite-remote');
@@ -413,8 +413,8 @@ if (haveRspack) {
   });
 
   scenario('a host built by Vite with its federation plugin loads a remote built by rathkit-pack', async () => {
-    const viteBin = join(bench, 'node_modules', 'vite', 'bin', 'vite.js');
-    if (!existsSync(viteBin) || !existsSync(join(bench, 'node_modules', '@module-federation', 'vite'))) return;
+    const viteBin = join(testModules, 'vite', 'bin', 'vite.js');
+    if (!existsSync(viteBin) || !existsSync(join(testModules, '@module-federation', 'vite'))) return;
     const remote = await build('remote');
     const dir = copy('vite-host');
     const built = await new Promise((resolve) => {
@@ -446,7 +446,7 @@ if (haveRspack) {
     check('with their React', /same=true/.test(r.text ?? '') && !/same=false/.test(r.text ?? ''), r.text);
   });
 } else {
-  console.log('federation: rspack is not installed (pnpm install --dir bench); the scenarios with it are skipped');
+  console.log('federation: rspack is not installed (' + installHint + '); the scenarios with it are skipped');
 }
 
 scenario('an ES module container, prefix and eager shared packages, runtime plugins', async () => {
@@ -468,9 +468,9 @@ scenario('an ES module container, prefix and eager shared packages, runtime plug
 });
 
 scenario('types: a remote publishes declarations and a host checks its imports against them', async () => {
-  const typescript = join(bench, 'node_modules', 'typescript', 'bin', 'tsc');
+  const typescript = join(testModules, 'typescript', 'bin', 'tsc');
   if (!existsSync(typescript)) {
-    console.log('federation: typescript is not installed (pnpm install --dir bench); the types scenario is skipped');
+    console.log('federation: typescript is not installed (' + installHint + '); the types scenario is skipped');
     return;
   }
   const remote = await build('remote-types', { entry: 'src/index.ts' });
@@ -510,7 +510,7 @@ scenario('types: a remote publishes declarations and a host checks its imports a
 });
 
 scenario('types stay fresh while serving: the folder of a remote in node_modules comes back after packages are installed', async () => {
-  const typescript = join(bench, 'node_modules', 'typescript', 'bin', 'tsc');
+  const typescript = join(testModules, 'typescript', 'bin', 'tsc');
   if (!existsSync(typescript)) return;
   const remote = await build('remote-types', { entry: 'src/index.ts' });
   serve(4260, remote);
@@ -614,7 +614,7 @@ scenario('a shared package written with only the exports the application reads (
 scenario('treeShaking of a package that reads another shared package: its small copy reads the same React', async () => {
   const dir = copy('host-shake-react', 'host-shake-react', false);
   mkdirSync(join(dir, 'node_modules'));
-  symlinkSync(join(bench, 'node_modules', 'react'), join(dir, 'node_modules', 'react'), 'dir');
+  symlinkSync(join(testModules, 'react'), join(dir, 'node_modules', 'react'), 'dir');
   cpSync(join(dir, 'ui-lib'), join(dir, 'node_modules', 'ui-lib'), { recursive: true });
   const host = await build('host-shake-react', { links: false });
   check('a copy with only the exports in use is written', existsSync(join(host, 'shaken-ui-lib.js')), readdirSync(host).join(','));

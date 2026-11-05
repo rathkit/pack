@@ -8,16 +8,16 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } 
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
+import { testModules, installHint } from './lib/test-deps.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const bin = process.env.RATHKIT_PACK_BIN ?? join(root, 'target', 'release', 'rkp');
 const base = join(root, 'tests', 'target');
-const bench = join(root, 'bench', 'node_modules');
 let acorn = null;
 try {
-  acorn = createRequire(join(bench, 'x.js'))('acorn');
+  acorn = createRequire(join(testModules, 'x.js'))('acorn');
 } catch {
-  console.log('target: acorn is not installed (pnpm install --dir bench): the leftover-syntax check is skipped');
+  console.log('target: acorn is not installed (' + installHint + '): the leftover-syntax check is skipped');
 }
 // The targets that lower something; `esnext` and `es2022` leave the programs as they are.
 const targets = ['es2015', 'es2016', 'es2017', 'es2018', 'es2019', 'es2020', 'es2021', 'es2022', 'esnext', 'chrome80', 'safari13', 'firefox78', 'node14', 'ios14.5', 'chrome60,safari12'];

@@ -8,12 +8,12 @@ import { createRequire } from 'node:module';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
+import { testModules, installHint } from './lib/test-deps.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const bin = process.env.RATHKIT_PACK_BIN ?? join(root, 'target', 'release', 'rkp');
-const bench = join(root, 'bench', 'node_modules');
-if (!existsSync(join(bench, '@rollup', 'plugin-url'))) {
-  console.log('assets: skipped (run pnpm install in bench first)');
+if (!existsSync(join(testModules, '@rollup', 'plugin-url'))) {
+  console.log('assets: skipped (run ' + installHint + ' first)');
   process.exit(0);
 }
 const cases = [
@@ -91,7 +91,7 @@ const cases = [
   { name: 'workers', entry: 'worker-main.js', out: ['plain 42 logo-HASH.svg', 'constructor 8 logo-HASH.svg', 'inline function url worker-script-HASH.js'], files: [/^logo-.*\.svg$/, /^worker-script-.*\.js$/] },
   { name: 'rollup-plugin-copy', entry: 'nothing.js', config: 'copy.config.mjs', out: ['copied'], files: ['copied/pic.png'] },
 ];
-const sharp = createRequire(join(bench, 'x.js'))('sharp');
+const sharp = createRequire(join(testModules, 'x.js'))('sharp');
 // All the files under a folder.
 const filesUnder = (d) => readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? filesUnder(join(d, e.name)) : [join(d, e.name)]));
 const tmp = mkdtempSync(join(tmpdir(), 'assets-'));
@@ -103,7 +103,7 @@ for (const c of cases) {
   }
   const dir = join(tmp, c.name.replace(/\W+/g, '-'));
   cpSync(join(root, 'tests', 'assets'), dir, { recursive: true });
-  symlinkSync(bench, join(dir, 'node_modules'), 'dir');
+  symlinkSync(testModules, join(dir, 'node_modules'), 'dir');
   if (c.config) copyFileSync(join(dir, c.config), join(dir, 'rathkit.config.mjs'));
   const out = join(dir, 'dist');
   const file = join(out, 'bundle.mjs');
