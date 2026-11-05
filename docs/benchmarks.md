@@ -24,12 +24,9 @@ run the container recipe in [rathkit/pack-bench](https://github.com/rathkit/pack
   React with react-dom/server, an rxjs pipeline, and two generated apps (1,500 JavaScript modules and 500 TypeScript
   modules, pack-bench's `generate.mjs`). three.js and lodash are timed but not run.
 <!-- pack-bench:begin -->
-- **Machine:** Intel Core i7-11850H (16 threads), 31 GB, Linux 6.6 under WSL2. The machine was not idle: other programs
-  were running and the load average was 2.2 before the run, so every figure is slower than on a quiet machine and the
-  small gaps are noisy. Node 26.12.0; rustc 1.99.1; Rathkit Pack at commit `327a676` (release build); esbuild 0.28.2,
-  rolldown 1.2.15, @rspack/core 2.2.9, Vite 8.3.5, Parcel 2.16.4, Parcel 3.0.0-alpha.2 (an alpha).
+- **Machine:** 11th Gen Intel(R) Core(TM) i7-11850H @ 2.50GHz (8 logical CPUs available to the container, cpuset 2-9), memory limit 12 GB, Linux 6.18.54.1-microsoft-standard-WSL2; WSL2, Docker Desktop 29.9.2, laptop on AC. The machine was idle: the load average was 0.27, 0.8, 0.99 before the run and 2.5, 1.64, 1.27 after it. Node 26.13.0; Rathkit Pack 0.1.0-alpha.1 at commit `4342729` (release build, sha256 `54de6970dedc`); esbuild 0.28.2, rolldown 1.2.15, @rspack/core 2.2.9, Vite 8.3.5, Parcel 2 2.16.4, Parcel 3 3.0.0-alpha.2 (an alpha). Run on 2026-11-05 in the pack-bench container, bench commit `77baa2f`, image `0a0d32b93eca`; tools started through their own executables; 7 timed runs, outputs on a RAM disk.
 
-Reproduce: in [rathkit/pack-bench](https://github.com/rathkit/pack-bench), build Pack at the commit named above with `container/build-pack.sh`, then run `container/run.sh --pack-bin <that binary> -- --tools rathkit,esbuild,rolldown,rspack,vite,parcel2,parcel3 --markdown`. These figures were made on the host, before the container recipe existed; they are replaced by a container run.
+Reproduce: in [rathkit/pack-bench](https://github.com/rathkit/pack-bench) at commit `77baa2f`, build Pack at commit `4342729` with `container/build-pack.sh`, then run `container/run.sh --pack-bin <that binary> -- --work /work --results /results/20261105T205648Z.json --tools rathkit,esbuild,rolldown,rspack,vite,parcel2,parcel3 --markdown`.
 
 ## Time (median ms, lower is better)
 
@@ -37,53 +34,53 @@ Plain:
 
 | | Rathkit Pack | esbuild | rolldown | rspack | Vite | Parcel 2 | Parcel 3 |
 |---|---|---|---|---|---|---|---|
-| TypeScript compiler | 213 | 448 | 754 | 395 | 975 | 2460 | 627 |
-| three.js | 48 | 109 | 170 | 178 | 264 | 820 | 112 |
-| lodash-es | 28 | 77 | 170 | 168 | 244 | 1265 | 9 |
-| React + react-dom/server | 16 | 56 | 129 | 121 | 205 | 693 | 45 |
-| rxjs | 18 | 59 | 156 | 137 | 209 | 832 | 44 |
-| 1,500-module app | 197 | 562 | 282 | 697 | 376 | failed | 236 |
-| 500-module TypeScript app | 78 | 96 | 178 | 392 | 259 | 1694 | 96 |
+| TypeScript compiler | 171 | 352 | 663 | 330 | 858 | 2203 | 570 |
+| three.js | 38 | 60 | 133 | 141 | 225 | 704 | 88 |
+| lodash-es | 22 | 32 | 111 | 121 | 180 | 1047 | 7 |
+| React + react-dom/server | 11 | 17 | 100 | 94 | 171 | 593 | 33 |
+| rxjs | 12 | 20 | 101 | 103 | 158 | 679 | 21 |
+| 1,500-module app | 135 | 481 | 212 | 569 | 305 | failed | 190 |
+| 500-module TypeScript app | 53 | 51 | 137 | 324 | 218 | 1178 | 69 |
 
 Minified:
 
 | | Rathkit Pack | esbuild | rolldown | rspack | Vite | Parcel 2 | Parcel 3 |
 |---|---|---|---|---|---|---|---|
-| TypeScript compiler | 412 | 436 | 927 | 1903 | 1175 | 3973 | 1551 |
-| three.js | 56 | 117 | 171 | 358 | 281 | 1009 | 154 |
-| lodash-es | 31 | 76 | 176 | 216 | 248 | 1375 | 11 |
-| React + react-dom/server | 24 | 58 | 130 | 203 | 208 | 892 | 81 |
-| rxjs | 17 | 60 | 163 | 193 | 222 | 857 | 47 |
-| 1,500-module app | 212 | 576 | 272 | 906 | 374 | failed | 266 |
-| 500-module TypeScript app | 75 | 99 | 177 | 551 | 273 | 1684 | 101 |
+| TypeScript compiler | 369 | 368 | 827 | 1718 | 1012 | 3644 | 1379 |
+| three.js | 45 | 67 | 147 | 294 | 233 | 835 | 128 |
+| lodash-es | 26 | 31 | 114 | 159 | 181 | 1096 | 7 |
+| React + react-dom/server | 19 | 18 | 109 | 167 | 172 | 735 | 60 |
+| rxjs | 14 | 21 | 108 | 150 | 157 | 685 | 25 |
+| 1,500-module app | 142 | 485 | 210 | 774 | 300 | failed | 175 |
+| 500-module TypeScript app | 57 | 54 | 140 | 465 | 219 | 1202 | 73 |
 
 Minified with a source map:
 
 | | Rathkit Pack | esbuild | rolldown | rspack | Vite | Parcel 2 | Parcel 3 |
 |---|---|---|---|---|---|---|---|
-| TypeScript compiler | 544 | 616 | 1041 | 2204 | 1235 | 5322 | 1665 |
-| three.js | 81 | 140 | 206 | 422 | 310 | 1293 | 165 |
-| lodash-es | 43 | 82 | 192 | 230 | 259 | 1440 | 12 |
-| React + react-dom/server | 34 | 61 | 141 | 222 | 217 | 996 | 88 |
-| rxjs | 24 | 71 | 181 | 206 | 222 | 890 | 56 |
-| 1,500-module app | 228 | 583 | 295 | 902 | 409 | failed | 244 |
-| 500-module TypeScript app | 87 | 103 | 185 | 602 | 277 | 1989 | 92 |
+| TypeScript compiler | 479 | 522 | 917 | 1953 | 1107 | 4759 | 1485 |
+| three.js | 62 | 84 | 158 | 338 | 243 | 1037 | 143 |
+| lodash-es | 34 | 36 | 121 | 170 | 184 | 1150 | 7 |
+| React + react-dom/server | 26 | 22 | 110 | 181 | 177 | 839 | 72 |
+| rxjs | 18 | 26 | 117 | 159 | 161 | 721 | 29 |
+| 1,500-module app | 160 | 494 | 223 | 789 | 310 | failed | 182 |
+| 500-module TypeScript app | 64 | 58 | 145 | 512 | 223 | 1378 | 74 |
 
-Geometric mean of each tool's time relative to Rathkit Pack, over the workloads each tool built: plain, esbuild 2.5x, rolldown 4.1x, rspack 4.6x, Vite 5.8x, Parcel 2 27.2x, Parcel 3 1.6x;
-minified, esbuild 2.1x, rolldown 3.5x, rspack 6.7x, Vite 5.1x, Parcel 2 26.3x, Parcel 3 1.8x; minified with a map, esbuild 1.8x, rolldown 2.9x, rspack 5.6x, Vite 4.0x, Parcel 2 22.4x, Parcel 3 1.4x. On the TypeScript compiler, minified, the gap to
-esbuild is small (412 ms against 436 ms).
+Geometric mean of each tool's time relative to Rathkit Pack, over the workloads each tool built: plain, esbuild 1.7x, rolldown 4.1x, rspack 4.9x, Vite 6.4x, Parcel 2 30.2x, Parcel 3 1.6x;
+minified, esbuild 1.4x, rolldown 3.4x, rspack 7.0x, Vite 5.1x, Parcel 2 26.2x, Parcel 3 1.6x;
+minified with a map, esbuild 1.3x, rolldown 2.8x, rspack 6.0x, Vite 4.1x, Parcel 2 23.1x, Parcel 3 1.4x.
 
-## Peak memory (MB, minified with a source map)
+## Peak memory (MB, minified with a map)
 
 | | Rathkit Pack | esbuild | rolldown | rspack | Vite | Parcel 2 | Parcel 3 |
 |---|---|---|---|---|---|---|---|
-| TypeScript compiler | 229 | 265 | 519 | 421 | 479 | 1396 | 380 |
-| three.js | 43 | 61 | 198 | 185 | 229 | 563 | 143 |
-| lodash-es | 22 | 61 | 251 | 150 | 279 | 550 | 30 |
-| React + react-dom/server | 21 | 48 | 205 | 132 | 220 | 507 | 183 |
-| rxjs | 11 | 54 | 241 | 135 | 220 | 431 | 108 |
-| 1,500-module app | 94 | 383 | 480 | 366 | 520 | failed | 282 |
-| 500-module TypeScript app | 31 | 58 | 197 | 183 | 212 | 584 | 107 |
+| TypeScript compiler | 221 | 265 | 497 | 416 | 466 | 1377 | 368 |
+| three.js | 39 | 59 | 205 | 185 | 242 | 564 | 143 |
+| lodash-es | 21 | 56 | 233 | 145 | 261 | 535 | 27 |
+| React + react-dom/server | 19 | 29 | 202 | 131 | 211 | 506 | 170 |
+| rxjs | 9 | 49 | 224 | 130 | 206 | 426 | 88 |
+| 1,500-module app | 92 | 380 | 466 | 353 | 493 | failed | 240 |
+| 500-module TypeScript app | 27 | 55 | 188 | 179 | 205 | 576 | 83 |
 
 ## Output size (KB / gzip KB, minified)
 
@@ -96,6 +93,18 @@ esbuild is small (412 ms against 436 ms).
 | rxjs | 25 / 7 | 157 / 34 | 151 / 27 | 140 / 28 | 35 / 8 | 22 / 7 | 175 / 39 |
 | 1,500-module app | 80 / 20 | 92 / 25 | 80 / 20 | 1 / 0 | 155 / 24 | failed | 406 / 67 |
 | 500-module TypeScript app | 172 / 20 | 187 / 23 | 198 / 20 | 512 / 41 | 263 / 22 | 173 / 30 | 271 / 29 |
+
+## Does the output run and print the same? (plain)
+
+| | Rathkit Pack | esbuild | rolldown | rspack | Vite | Parcel 2 | Parcel 3 |
+|---|---|---|---|---|---|---|---|
+| TypeScript compiler | same | same | fails | same | fails | fails | same |
+| three.js | - | - | - | - | - | - | - |
+| lodash-es | - | - | - | - | - | - | - |
+| React + react-dom/server | same | same | same | same | fails | same | same |
+| rxjs | same | same | same | same | same | same | same |
+| 1,500-module app | same | same | same | same | same | failed | same |
+| 500-module TypeScript app | same | same | same | same | same | same | same |
 <!-- pack-bench:end -->
 
 (*) rspack folds the whole generated app to a constant, so its size says nothing about that case. Parcel 3's 3 KB for
@@ -111,6 +120,6 @@ and 7683 against 8967 KB).
 **Parcel:** minified, Parcel 2 is smaller than Rathkit Pack on rxjs (22 against 25 KB) and on the TypeScript compiler
 (3406 against 3485 KB; gzip 965 against 973), and Parcel 3 is within 2% on the TypeScript compiler (3425 KB). Parcel 3
 is larger on three.js, React, rxjs and both generated apps (its plain build of the 1,500-module app is 6990 KB, against 126
-KB for Rathkit Pack). Parcel 3 is an alpha. Against Parcel 2 it was between 2.6x and 21.5x faster on the inputs both built
+KB for Rathkit Pack). Parcel 3 is an alpha. Against Parcel 2 it was between 2.6x and 32.8x faster on the inputs both built
 and used less memory, apart from the lodash-es case where it kept nothing; this was not close to the 100x its
 announcement gives as the best case, which was measured on other, larger inputs.
