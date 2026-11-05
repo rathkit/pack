@@ -25,7 +25,6 @@
     "semver": "7.7.2",
     "sharp": "0.35.5",
     "svelte": "5.56.0",
-    "svgo": "4.1.0",
     "three": "0.186.1",
     "ts5": "npm:typescript@5.9.3",
     "typescript": "5.9.3",
