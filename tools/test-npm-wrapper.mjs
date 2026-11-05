@@ -137,7 +137,7 @@ console.log('api ok');
 const api = run(process.execPath, ['api.mjs'], { cwd: project, env: { ...process.env, RATHKIT_PACK_BIN: '' } });
 if (api.status !== 0 || api.stdout.trim() !== 'api ok') fail(`the API: ${api.stdout}${api.stderr}`);
 
-// The types fit how it is used (when a TypeScript compiler is at hand: bench has one).
+// The types fit how it is used (when a TypeScript compiler is at hand: test-deps has one).
 const tsc = join(testModules, 'typescript', 'bin', 'tsc');
 if (existsSync(tsc)) {
   writeFileSync(join(project, 'use.mts'), `import { build, serve, type Options, BuildError } from '@rathkit/pack';

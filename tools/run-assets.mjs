@@ -1,5 +1,5 @@
 // Tests for the plugins that deal with images, fonts, SVG and other files, run for real from the
-// bench folder's packages. Each case bundles one entry with one config and runs the result with
+// test-deps folder's packages. Each case bundles one entry with one config and runs the result with
 // Node; the lines it prints must match what is listed here, and files a plugin writes must exist.
 //   node tools/run-assets.mjs
 import { spawnSync } from 'node:child_process';

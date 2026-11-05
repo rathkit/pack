@@ -4,6 +4,6 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-export const testDeps = process.env.RATHKIT_TEST_DEPS ?? join(root, 'bench');
+export const testDeps = process.env.RATHKIT_TEST_DEPS ?? join(root, 'test-deps');
 export const testModules = join(testDeps, 'node_modules');
-export const installHint = 'pnpm install --dir bench --frozen-lockfile --ignore-scripts';
+export const installHint = 'pnpm install --dir test-deps --frozen-lockfile --ignore-scripts';

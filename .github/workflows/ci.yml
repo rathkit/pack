@@ -34,17 +34,17 @@ jobs:
           - { name: "ubuntu-26.04-arm node 26", os: ubuntu-26.04-arm, node: 26 }
     env:
       # The TypeScript compiler the JSX and decorator programs are compared with.
-      TS_MODULE: ${{ github.workspace }}/bench/node_modules/ts5
+      TS_MODULE: ${{ github.workspace }}/test-deps/node_modules/ts5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # pnpm, this job's Node, and the install of bench (the libraries and compilers the comparisons bundle; nothing from
-      # there is built into the bundler) from its lockfile, in one step.
+      # pnpm, this job's Node, and the install of test-deps (the libraries and compilers the differential and interop tests load;
+      # nothing from there is built into the bundler) from its lockfile, in one step.
       - uses: pnpm/setup@a0881977cd8ea73b1ed212236c99ca10dcc80cf4
         with:
           runtime: node@${{ matrix.node }}
-          working-directory: bench
+          working-directory: test-deps
           cache: true
           require-lockfile: true
       - run: rustup toolchain install stable --profile minimal && rustup default stable
@@ -90,7 +90,7 @@ jobs:
             BROWSER=$browser node tools/run-hmr.mjs
           done
       - run: python3 tools/fuzz-bundle.py --count 300
-      - run: node tools/diff-real.mjs "$GITHUB_WORKSPACE/bench"
+      - run: node tools/diff-real.mjs "$GITHUB_WORKSPACE/test-deps"
 
   # macOS and Windows: the same checks as the glibc job, not yet required by the ruleset (it is made to require them after several green runs).
   # Steps that need Linux (the localhost note, Chrome) are left out; a step that fails here shows what still assumes Unix.
@@ -120,7 +120,7 @@ jobs:
       run:
         shell: bash
     env:
-      TS_MODULE: ${{ github.workspace }}/bench/node_modules/ts5
+      TS_MODULE: ${{ github.workspace }}/test-deps/node_modules/ts5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -128,7 +128,7 @@ jobs:
       - uses: pnpm/setup@a0881977cd8ea73b1ed212236c99ca10dcc80cf4
         with:
           runtime: node@${{ matrix.node }}
-          working-directory: bench
+          working-directory: test-deps
           cache: true
           require-lockfile: true
       - run: rustup toolchain install stable --profile minimal && rustup default stable
@@ -153,7 +153,7 @@ jobs:
       - run: node tools/run-jsx.mjs
       - run: node tools/test-federation-runtime.mjs
       - run: node tools/diff-semver.mjs
-      - run: node tools/diff-real.mjs "$GITHUB_WORKSPACE/bench"
+      - run: node tools/diff-real.mjs "$GITHUB_WORKSPACE/test-deps"
 
   # docs/ROADMAP.md and the issues agree: a ticked item has a closed issue and the reverse. In a pull request the issue is still open (the
   # merge closes it), so there a ticked item with an open issue is a warning. Not a required check.
@@ -188,7 +188,7 @@ jobs:
       - uses: pnpm/setup@a0881977cd8ea73b1ed212236c99ca10dcc80cf4
         with:
           runtime: node@24
-          working-directory: bench
+          working-directory: test-deps
           install: false
       - run: node --test tools/scan-secrets.test.mjs
       - run: node tools/scan-secrets.mjs

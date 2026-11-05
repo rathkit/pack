@@ -1,5 +1,5 @@
 // Tests for --dts: a small TypeScript project is bundled with declarations, and a consumer file is type-checked against them (tsc from the
-// bench folder: pnpm install --dir bench).
+// test-deps folder: pnpm install --dir test-deps).
 //   node tools/run-dts.mjs
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, realpathSync, cpSync, readdirSync, copyFileSync } from 'node:fs';

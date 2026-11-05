@@ -1,0 +1,7 @@
+# Nothing runs when packages are installed.
+ignoreScripts: true
+# undici is pulled in by @module-federation/dts-plugin at 7.29.1, which has known advisories; 7.30.1 is the first fixed release.
+overrides:
+  undici: ">=7.30.1 <8"
+# axios (through @module-federation) pulls in follow-redirects at 1.16.1, which forwards a custom credential header on a cross-origin redirect (GHSA); 1.16.2 is the first fixed release.
+  follow-redirects: ">=1.16.2 <2"

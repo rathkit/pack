@@ -2,7 +2,7 @@
 // agree on one copy of React, and two development servers do the same with a change in one reloading the other's page.
 //   node tools/run-federation.mjs [scenario...]
 // Runs in Chromium, or in Firefox or WebKit with BROWSER=firefox|webkit (tools/lib/browsers.mjs says where the browsers come from). The
-// scenarios that involve rspack need `pnpm install --dir bench`. Without the browser it says so and passes.
+// scenarios that involve rspack need `pnpm install --dir test-deps`. Without the browser it says so and passes.
 import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import { browserKind, findBrowser, openBrowser } from './lib/browsers.mjs';
@@ -48,7 +48,7 @@ const copy = (name, as = name, links = true) => {
   if (!copies.has(as)) {
     const dir = join(tmp, as);
     cpSync(join(tests, name), dir, { recursive: true });
-    // The packages the projects import are the ones in the bench folder (a project that has no use for them is left alone: the build writes to its node_modules).
+    // The packages the projects import are the ones in the test-deps folder (a project that has no use for them is left alone: the build writes to its node_modules).
     if (links) symlinkSync(testModules, join(dir, 'node_modules'), 'dir');
     copies.set(as, dir);
   }
@@ -86,7 +86,7 @@ const buildRspack = async (name) => {
   rspack ??= await import(join(testModules, '@rspack', 'core', 'dist', 'index.js')).catch(() => null);
   if (!rspack) throw new Error('rspack is not installed (' + installHint + ')');
   const config = (await import(join(dir, 'rspack.config.mjs'))).default;
-  // Resolve the packages from the bench folder.
+  // Resolve the packages from the test-deps folder.
   config.resolve = { modules: [testModules, 'node_modules'] };
   config.resolveLoader = { modules: [testModules] };
   await new Promise((resolve, reject) => rspack.rspack(config, (error, stats) => (error ? reject(error) : stats.hasErrors() ? reject(new Error(stats.toString({ errors: true }))) : resolve())));

@@ -1,5 +1,5 @@
 // The federation runtime's version ranges against npm's `semver`, over every combination of a few hundred versions and ranges.
-//   node tools/diff-semver.mjs        (needs `pnpm install --dir bench`)
+//   node tools/diff-semver.mjs        (needs `pnpm install --dir test-deps`)
 import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { join, dirname } from 'node:path';
