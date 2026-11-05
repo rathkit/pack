@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
+import { testModules } from './lib/test-deps.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const tmp = mkdtempSync(join(tmpdir(), 'npm-wrapper-'));
@@ -136,8 +137,8 @@ console.log('api ok');
 const api = run(process.execPath, ['api.mjs'], { cwd: project, env: { ...process.env, RATHKIT_PACK_BIN: '' } });
 if (api.status !== 0 || api.stdout.trim() !== 'api ok') fail(`the API: ${api.stdout}${api.stderr}`);
 
-// The types fit how it is used (when a TypeScript compiler is at hand: bench has one).
-const tsc = join(root, 'bench', 'node_modules', 'typescript', 'bin', 'tsc');
+// The types fit how it is used (when a TypeScript compiler is at hand: test-deps has one).
+const tsc = join(testModules, 'typescript', 'bin', 'tsc');
 if (existsSync(tsc)) {
   writeFileSync(join(project, 'use.mts'), `import { build, serve, type Options, BuildError } from '@rathkit/pack';
 const typed: Options = { target: 'es2019', jsxDev: true, tsconfigRaw: { compilerOptions: {} }, inject: ['shim.js'], legalComments: 'linked', entryNames: '[name]-[hash]', chunkNames: 'c-[hash]', outExtension: { '.js': '.mjs' }, pure: ['a.b'], metafile: 'meta.json', entries: 'a.js', banner: { css: 'x' }, footer: 'y', drop: ['console', 'debugger'], packages: 'external', resolveExtensions: ['.ts'], preserveSymlinks: true, envDir: '.', envPrefix: ['A_'], envFiles: false };

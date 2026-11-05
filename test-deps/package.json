@@ -1,36 +1,30 @@
 {
-  "name": "rathkit-pack-bench",
+  "name": "rathkit-pack-test-deps",
   "private": true,
   "type": "module",
-  "description": "Other bundlers and the libraries the benchmark bundles; see README.md",
+  "description": "The libraries and compilers the differential and interop tests load; nothing here is built into rkp. See README.md",
   "dependencies": {
     "@fontsource/roboto-mono": "5.3.0",
     "@module-federation/enhanced": "2.9.2",
     "@module-federation/runtime": "2.9.2",
     "@module-federation/vite": "1.23.5",
     "@rollup/plugin-url": "8.0.2",
-    "@rspack/cli": "2.2.9",
     "@rspack/core": "2.2.9",
     "@sveltejs/vite-plugin-svelte": "7.3.1",
     "@svgr/rollup": "8.1.0",
     "@svgr/webpack": "8.1.0",
     "@vitejs/plugin-vue": "6.0.8",
     "acorn": "8.19.0",
-    "esbuild": "0.28.2",
     "file-loader": "6.2.0",
     "lodash-es": "4.18.1",
-    "parcel2": "npm:parcel@2.16.4",
-    "parcel3": "npm:parcel@3.0.0-alpha.2",
     "react": "19.3.1",
     "react-dom": "19.3.1",
     "react-refresh": "0.18.0",
-    "rolldown": "1.2.15",
     "rollup-plugin-copy": "3.5.0",
     "rxjs": "7.8.2",
     "semver": "7.7.2",
     "sharp": "0.35.5",
     "svelte": "5.56.0",
-    "svgo": "4.1.0",
     "three": "0.186.1",
     "ts5": "npm:typescript@5.9.3",
     "typescript": "5.9.3",
@@ -43,12 +37,5 @@
     "vite-plugin-webfont-dl": "3.13.1",
     "vue": "3.5.43"
   },
-  "packageManager": "pnpm@12.14.0",
-  "targets": {
-    "bundle": {
-      "context": "node",
-      "outputFormat": "esmodule",
-      "includeNodeModules": true
-    }
-  }
+  "packageManager": "pnpm@12.14.0"
 }

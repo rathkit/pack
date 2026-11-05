@@ -24,7 +24,7 @@ curl -fsSL -o /tmp/pnpm.tar.gz "https://github.com/pnpm/pnpm/releases/download/$
 echo "$sha  /tmp/pnpm.tar.gz" | sha256sum -c - >/dev/null || { echo "pnpm checksum mismatch"; exit 1; }
 mkdir -p /opt/pnpm && tar -xzf /tmp/pnpm.tar.gz -C /opt/pnpm
 ln -sf "$(find /opt/pnpm -type f -name pnpm | head -1)" /usr/local/bin/pnpm
-export TS_MODULE=/w/bench/node_modules/ts5 RUNNER_TEMP=/tmp GITHUB_WORKSPACE=/w CI=true
+export TS_MODULE=/w/test-deps/node_modules/ts5 RUNNER_TEMP=/tmp GITHUB_WORKSPACE=/w CI=true
 node --version; pnpm --version; cargo --version
 
 failed=0
@@ -33,7 +33,7 @@ step() {
   echo "::group::$name"
   if "$@"; then echo "::endgroup::"; echo "ok   $name"; else echo "::endgroup::"; echo "::error::FAIL $name"; failed=1; fi
 }
-step "install bench" bash -c 'cd bench && pnpm install --frozen-lockfile --ignore-scripts'
+step "install test-deps" bash -c 'cd test-deps && pnpm install --frozen-lockfile --ignore-scripts'
 step zero-deps node tools/check-zero-deps.mjs
 step sbom bash -c 'node tools/make-sbom.mjs /tmp/sbom.cdx.json && node -e "process.exit(require(process.argv[1]).components.length)" /tmp/sbom.cdx.json'
 step build cargo build --release
@@ -43,5 +43,5 @@ for t in run-fixtures run-defines run-loaders run-plugins run-assets run-target 
   step "$t" node "tools/$t.mjs"
 done
 step fuzz-bundle python3 tools/fuzz-bundle.py --count 300
-step diff-real node tools/diff-real.mjs /w/bench
+step diff-real node tools/diff-real.mjs /w/test-deps
 exit $failed

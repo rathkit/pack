@@ -1,17 +1,18 @@
 // Tests for --dts: a small TypeScript project is bundled with declarations, and a consumer file is type-checked against them (tsc from the
-// bench folder: pnpm install --dir bench).
+// test-deps folder: pnpm install --dir test-deps).
 //   node tools/run-dts.mjs
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, realpathSync, cpSync, readdirSync, copyFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
+import { testModules, installHint } from './lib/test-deps.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const bin = process.env.RATHKIT_PACK_BIN ?? join(root, 'target', 'release', 'rkp');
-const typescript = join(root, 'bench', 'node_modules', 'typescript');
+const typescript = join(testModules, 'typescript');
 if (!existsSync(typescript)) {
-  console.log('dts: typescript is not installed (pnpm install --dir bench); skipped');
+  console.log('dts: typescript is not installed (' + installHint + '); skipped');
   process.exit(0);
 }
 const tmp = mkdtempSync(join(tmpdir(), 'dts-'));

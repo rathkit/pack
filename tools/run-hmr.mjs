@@ -9,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
 import { browserKind, findBrowser, openBrowser } from './lib/browsers.mjs';
 import { existsSync, cpSync, symlinkSync } from 'node:fs';
+import { testModules } from './lib/test-deps.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const bin = process.env.RATHKIT_PACK_BIN ?? join(root, 'target', 'release', 'rkp');
@@ -234,10 +235,10 @@ try {
 }
 
 // React: JSX, named imports from CommonJS packages, CSS modules.
-if (existsSync(join(root, 'bench', 'node_modules', 'react-dom'))) {
+if (existsSync(join(testModules, 'react-dom'))) {
   const app = join(dir, 'react-app');
   cpSync(join(root, 'tests', 'hmr', 'react'), app, { recursive: true });
-  symlinkSync(join(root, 'bench', 'node_modules'), join(app, 'node_modules'), 'dir');
+  symlinkSync(testModules, join(app, 'node_modules'), 'dir');
   const define = ['--define', 'process.env.NODE_ENV="development"'];
   const normal = join(dir, 'react-normal.mjs');
   const built = spawnSync(bin, ['bundle', 'main.jsx', '--outfile', normal, '--format', 'esm', ...define], { cwd: app, encoding: 'utf8' });
@@ -267,10 +268,10 @@ if (existsSync(join(root, 'bench', 'node_modules', 'react-dom'))) {
 
 // Large real packages: the table prints what a normal bundle prints (CommonJS interop, cycles, a thousand modules).
 for (const name of ['rxjs', 'lodash', 'three']) {
-  if (!existsSync(join(root, 'bench', 'node_modules', name === 'lodash' ? 'lodash-es' : name))) continue;
+  if (!existsSync(join(testModules, name === 'lodash' ? 'lodash-es' : name))) continue;
   const app = join(dir, `soak-${name}`);
   cpSync(join(root, 'tests', 'hmr', 'soak', name), app, { recursive: true });
-  symlinkSync(join(root, 'bench', 'node_modules'), join(app, 'node_modules'), 'dir');
+  symlinkSync(testModules, join(app, 'node_modules'), 'dir');
   writeFileSync(join(app, 'index.html'), '<!doctype html><script type="module" src="/main.js"></script>\n');
   const define = ['--define', 'process.env.NODE_ENV="development"'];
   const normal = join(dir, `soak-${name}-normal.mjs`);
@@ -342,10 +343,10 @@ for (const name of ['rxjs', 'lodash', 'three']) {
       check(await until(async () => (await evaluate("document.getElementById('out')?.textContent")) === 'two|b'), 'a change nothing accepts reloads the page');
       check((await evaluate('window.__page')) !== page, 'it is a new page');
       // React Fast Refresh: the state of a component survives its module being replaced.
-      if (existsSync(join(root, 'bench', 'node_modules', 'react-refresh'))) {
+      if (existsSync(join(testModules, 'react-refresh'))) {
         const app = join(dir, 'refresh-app');
         cpSync(join(root, 'tests', 'hmr', 'refresh'), app, { recursive: true });
-        symlinkSync(join(root, 'bench', 'node_modules'), join(app, 'node_modules'), 'dir');
+        symlinkSync(testModules, join(app, 'node_modules'), 'dir');
         const react = spawn(bin, ['serve', 'main.jsx', '--hmr', '--port', '0', '--define', 'process.env.NODE_ENV="development"'], { cwd: app, stdio: ['ignore', 'pipe', 'pipe'] });
         let reactLog = '';
         react.stdout.on('data', (d) => (reactLog += d));
@@ -375,10 +376,10 @@ for (const name of ['rxjs', 'lodash', 'three']) {
         }
       }
       // Vue: single-file components through @vitejs/plugin-vue, whose generated code uses import.meta.hot.accept and Vue's HMR runtime.
-      if (existsSync(join(root, 'bench', 'node_modules', '@vitejs', 'plugin-vue')) && existsSync(join(root, 'bench', 'node_modules', 'vue'))) {
+      if (existsSync(join(testModules, '@vitejs', 'plugin-vue')) && existsSync(join(testModules, 'vue'))) {
         const app = join(dir, 'vue-app');
         cpSync(join(root, 'tests', 'hmr', 'vue'), app, { recursive: true });
-        symlinkSync(join(root, 'bench', 'node_modules'), join(app, 'node_modules'), 'dir');
+        symlinkSync(testModules, join(app, 'node_modules'), 'dir');
         const defines = ['process.env.NODE_ENV="development"', '__VUE_OPTIONS_API__=true', '__VUE_PROD_DEVTOOLS__=false', '__VUE_PROD_HYDRATION_MISMATCH_DETAILS__=false'].flatMap((d) => ['--define', d]);
         const vue = spawn(bin, ['serve', 'main.js', '--hmr', '--port', '0', ...defines], { cwd: app, stdio: ['ignore', 'pipe', 'pipe'] });
         let vueLog = '';
@@ -411,10 +412,10 @@ for (const name of ['rxjs', 'lodash', 'three']) {
         }
       }
       // Svelte 5: components through @sveltejs/vite-plugin-svelte (compiled with its own HMR, which uses import.meta.hot).
-      if (existsSync(join(root, 'bench', 'node_modules', '@sveltejs', 'vite-plugin-svelte')) && existsSync(join(root, 'bench', 'node_modules', 'svelte'))) {
+      if (existsSync(join(testModules, '@sveltejs', 'vite-plugin-svelte')) && existsSync(join(testModules, 'svelte'))) {
         const app = join(dir, 'svelte-app');
         cpSync(join(root, 'tests', 'hmr', 'svelte'), app, { recursive: true });
-        symlinkSync(join(root, 'bench', 'node_modules'), join(app, 'node_modules'), 'dir');
+        symlinkSync(testModules, join(app, 'node_modules'), 'dir');
         const svelte = spawn(bin, ['serve', 'main.js', '--hmr', '--port', '0', '--define', 'process.env.NODE_ENV="development"'], { cwd: app, stdio: ['ignore', 'pipe', 'pipe'] });
         let svelteLog = '';
         svelte.stdout.on('data', (d) => (svelteLog += d));

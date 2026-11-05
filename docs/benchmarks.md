@@ -1,7 +1,7 @@
 # Benchmarks
 
 Measured, with the method below, on one machine. Other machines, other versions and other inputs give other numbers;
-run `bench/run.mjs` to get your own. Nothing here is a claim about inputs that were not measured.
+run the container recipe in [rathkit/pack-bench](https://github.com/rathkit/pack-bench) to get your own. Nothing here is a claim about inputs that were not measured.
 
 ## Method
 
@@ -14,21 +14,22 @@ run `bench/run.mjs` to get your own. Nothing here is a claim about inputs that w
   output can run the CommonJS TypeScript compiler and React. Where another bundler "fails" the same way (rolldown and Vite
   on the TypeScript compiler, Vite on React) or does not finish (Parcel 2 on the 1,500-module app: an internal assertion
   error in all three modes), it is not counted against the speed. Parcel 2's TypeScript compiler output also fails to run.
-- **Parcel:** Parcel 2 and Parcel 3 are built from the `targets` in `bench/package.json` (Node, ES module, node_modules
+- **Parcel:** Parcel 2 and Parcel 3 are built from the `targets` in pack-bench's `package.json` (Node, ES module, node_modules
   included). Parcel 2 is run without its disk cache. Parcel 3 is run as its native executable, so its time has no Node
   start-up in it. Without `--optimize` Parcel does not minify and does not scope-hoist, so its plain build is not the same
   kind of build as the others.
-- **Other tools** are used with the options listed in `bench/run.mjs` (for rspack, a config with `builtin:swc-loader` for
+- **Other tools** are used with the options listed in pack-bench's `run.mjs` (for rspack, a config with `builtin:swc-loader` for
   TypeScript; for Vite, library mode), not tuned beyond that. A better configuration of any of them may do better.
 - **Workloads:** the TypeScript 5.9 compiler (one 9 MB CommonJS file), three.js (a few classes), lodash-es (`export *`),
   React with react-dom/server, an rxjs pipeline, and two generated apps (1,500 JavaScript modules and 500 TypeScript
-  modules, `bench/generate.mjs`). three.js and lodash are timed but not run.
+  modules, pack-bench's `generate.mjs`). three.js and lodash are timed but not run.
+<!-- pack-bench:begin -->
 - **Machine:** Intel Core i7-11850H (16 threads), 31 GB, Linux 6.6 under WSL2. The machine was not idle: other programs
   were running and the load average was 2.2 before the run, so every figure is slower than on a quiet machine and the
   small gaps are noisy. Node 26.12.0; rustc 1.99.1; Rathkit Pack at commit `327a676` (release build); esbuild 0.28.2,
   rolldown 1.2.15, @rspack/core 2.2.9, Vite 8.3.5, Parcel 2.16.4, Parcel 3.0.0-alpha.2 (an alpha).
 
-Reproduce: `cargo build --release && cd bench && pnpm install && node generate.mjs && node run.mjs --tools rathkit,esbuild,rolldown,rspack,vite,parcel2,parcel3 --markdown`.
+Reproduce: in [rathkit/pack-bench](https://github.com/rathkit/pack-bench), build Pack at the commit named above with `container/build-pack.sh`, then run `container/run.sh --pack-bin <that binary> -- --tools rathkit,esbuild,rolldown,rspack,vite,parcel2,parcel3 --markdown`. These figures were made on the host, before the container recipe existed; they are replaced by a container run.
 
 ## Time (median ms, lower is better)
 
@@ -95,6 +96,7 @@ esbuild is small (412 ms against 436 ms).
 | rxjs | 25 / 7 | 157 / 34 | 151 / 27 | 140 / 28 | 35 / 8 | 22 / 7 | 175 / 39 |
 | 1,500-module app | 80 / 20 | 92 / 25 | 80 / 20 | 1 / 0 | 155 / 24 | failed | 406 / 67 |
 | 500-module TypeScript app | 172 / 20 | 187 / 23 | 198 / 20 | 512 / 41 | 263 / 22 | 173 / 30 | 271 / 29 |
+<!-- pack-bench:end -->
 
 (*) rspack folds the whole generated app to a constant, so its size says nothing about that case. Parcel 3's 3 KB for
 lodash-es is also not a comparable result: nothing the entry re-exports was kept. Different tools pick different package

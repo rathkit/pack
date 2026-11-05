@@ -44,7 +44,7 @@ jobs:
       - uses: pnpm/setup@a0881977cd8ea73b1ed212236c99ca10dcc80cf4
         with:
           runtime: node@24
-          working-directory: bench
+          working-directory: test-deps
           install: false
       - run: rustup toolchain install stable --profile minimal && rustup default stable
       - run: cargo build --release
