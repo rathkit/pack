@@ -19,17 +19,25 @@ one step that publishes there.
 
 1. Put the version in `Cargo.toml` (and `Cargo.lock`, which `cargo build` updates), and add the `## <version>` section to
    `CHANGELOG.md` with its date. Commit that as `chore(release): <version>` (signed, with the DCO sign-off).
-2. Make the tag signed, on that commit: `git tag -s v<version> -m v<version>`.
-3. Check it: `git tag -v v<version>` must say "Good signature", and `git cat-file -t v<version>` must say `tag`.
-4. Push the commit, then the tag: `git push origin main` and `git push origin v<version>`.
-5. The `release` workflow builds seven platforms, runs the tests and a smoke build on each, writes `SHA256SUMS` and the SBOM,
+2. Push the commit, then run the corpus on it: **Actions, corpus, Run workflow**, on `main`. All of the projects must build and
+   check out (the summary of the run starts with the count, for example "24 of 24 built and checked out"). A project that
+   fails is either fixed first or named in the `CHANGELOG.md` section with the reason. The corpus fetches other projects from
+   the network, so it never blocks a release by itself; it is a step here instead.
+3. Make the tag signed, on that commit: `git tag -s v<version> -m v<version>`.
+4. Check it: `git tag -v v<version>` must say "Good signature", and `git cat-file -t v<version>` must say `tag`.
+5. Push the tag: `git push origin v<version>`.
+6. The `release` workflow builds seven platforms, runs the tests and a smoke build on each, writes `SHA256SUMS` and the SBOM,
    signs every file with Sigstore, and creates the GitHub pre-release.
-6. The `npm` job (only when `NPM_PUBLISH` is `true`) waits for the owner to approve the `npm` environment, then stages the
+7. The `npm` job (only when `NPM_PUBLISH` is `true`) waits for the owner to approve the `npm` environment, then stages the
    eight packages with provenance through npm trusted publishing: no npm token is stored anywhere.
-7. The owner approves the staged versions (below).
-8. The `crates` job (only when `CRATES_PUBLISH` is `true`) waits for the owner to approve the `crates-io` environment, gets a
+8. The owner approves the staged versions (below).
+9. The `crates` job (only when `CRATES_PUBLISH` is `true`) waits for the owner to approve the `crates-io` environment, gets a
    30-minute token from crates.io through trusted publishing, runs `cargo publish --locked` and revokes the token. **That is
    permanent**: a version on crates.io can be yanked but never removed, and its number can never be reused.
+
+The `release` workflow also calls the corpus workflow for the tag, so every release has a run of its own beside it (it does not hold
+the release up). The corpus runs every Monday as well. Each run keeps `corpus.json` (the Rathkit Pack version and the result for each
+project) and `corpus.txt` (the log) as the workflow artifact `corpus-<run id>` for 90 days, and its summary begins with the count.
 
 By hand, `release` is a dry run: **Actions, release, Run workflow**, with a tag such as `v0.1.0-alpha.0`. Everything is
 built, tested and signed and kept as a workflow artifact; nothing is released or published.

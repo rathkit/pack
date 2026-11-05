@@ -1,13 +1,23 @@
 name: corpus
 
 # Builds the pinned open-source projects of corpus/projects.json with rkp and loads the apps in a browser (tools/run-corpus.mjs).
-# It runs other projects' configuration files and plugins, so it is never part of the checks a change needs: run it by hand, or on
-# the weekly schedule, to learn what a change or a new release of a dependency broke. It has no secrets and a read-only token.
+# It runs other projects' configuration files and plugins, so it is never part of the checks a change needs: run it by hand, on
+# the weekly schedule, or from the release workflow (a version tag), to learn what a change or a new release of a dependency
+# broke. It has no secrets and a read-only token. The results (corpus.json and corpus.txt) are kept as a workflow artifact for
+# 90 days, and the summary of the run starts with the count (for example "24 of 24 built and checked out").
 on:
   workflow_dispatch:
     inputs:
       projects:
         description: "Names of the projects to run, separated by spaces (all when empty)"
+        required: false
+        default: ""
+  # Called by the release workflow, so every release has a run beside it.
+  workflow_call:
+    inputs:
+      projects:
+        description: "Names of the projects to run, separated by spaces (all when empty)"
+        type: string
         required: false
         default: ""
   schedule:
@@ -43,14 +53,26 @@ jobs:
           PROJECTS: ${{ inputs.projects }}
         run: |
           set -o pipefail
+          mkdir -p "$RUNNER_TEMP/corpus-results"
           # PROJECTS is names only; the shell splits it into arguments, nothing in it is run.
-          node tools/run-corpus.mjs $PROJECTS --json "$RUNNER_TEMP/corpus.json" 2>&1 | tee "$RUNNER_TEMP/corpus.txt"
+          node tools/run-corpus.mjs $PROJECTS --json "$RUNNER_TEMP/corpus-results/corpus.json" 2>&1 | tee "$RUNNER_TEMP/corpus-results/corpus.txt"
       - name: Results
         if: always()
         run: |
+          text="$RUNNER_TEMP/corpus-results/corpus.txt"
+          count=$(grep -E '^[0-9]+ of [0-9]+ built and checked out' "$text" 2>/dev/null | head -n 1 | cut -d'(' -f1)
           {
-            echo '### Corpus'
+            echo "### Corpus: ${count:-no result}"
+            echo "Commit ${GITHUB_SHA} (${GITHUB_EVENT_NAME}). The results are kept for 90 days as the artifact \`corpus-${GITHUB_RUN_ID}\`."
             echo '```'
-            cat "$RUNNER_TEMP/corpus.txt" 2>/dev/null || echo 'no output'
+            cat "$text" 2>/dev/null || echo 'no output'
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Keep the results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: corpus-${{ github.run_id }}
+          path: ${{ runner.temp }}/corpus-results
+          retention-days: 90
+          if-no-files-found: warn
