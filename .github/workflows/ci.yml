@@ -80,8 +80,17 @@ jobs:
           CHROME: google-chrome
       # The same scenarios in Firefox and WebKit, the builds Playwright ships (tools/lib/browsers.mjs drives them with no dependency of
       # ours; the version is pinned so the builds, and the protocol WebKit speaks, do not change under us).
+      # The install normally takes about a minute. One run spent 24 minutes in it (a slow package mirror) and then ran out of the job's
+      # time, so each try is cut off at seven minutes and there are two.
       - if: matrix.other-browsers
-        run: pnpm dlx playwright@1.64.1 install --with-deps firefox webkit
+        name: Install Firefox and WebKit
+        timeout-minutes: 16
+        run: |
+          for attempt in 1 2; do
+            timeout --kill-after=20 420 pnpm dlx playwright@1.64.1 install --with-deps firefox webkit && exit 0
+            echo "attempt $attempt of the browser install did not finish"
+          done
+          exit 1
       - if: matrix.other-browsers
         run: |
           for browser in firefox webkit; do
