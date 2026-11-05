@@ -9,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
 import { browserKind, findBrowser, openBrowser } from './lib/browsers.mjs';
 import { existsSync, cpSync, symlinkSync } from 'node:fs';
+import { testModules } from './lib/test-deps.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const bin = process.env.RATHKIT_PACK_BIN ?? join(root, 'target', 'release', 'rkp');
@@ -22,7 +23,6 @@ write('main.js', `
 import { value } from './counter.js';
 import { label } from './label.js';
 import def, { helper } from './lib.cjs';
-import { testModules } from './lib/test-deps.mjs';
 globalThis.log = globalThis.log || [];
 import('./waits.js').then((m) => globalThis.log.push('dynamic wait ' + m.w));
 globalThis.log.push('main ran ' + value + ' ' + label() + ' ' + def.kind + ' ' + helper());

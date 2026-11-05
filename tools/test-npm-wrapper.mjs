@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
+import { testModules } from './lib/test-deps.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const tmp = mkdtempSync(join(tmpdir(), 'npm-wrapper-'));
@@ -79,7 +80,6 @@ writeFileSync(
   `import { build, serve, run, version, binaryPath, BuildError } from '@rathkit/pack';
 import { readFileSync, existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { testModules } from './lib/test-deps.mjs';
 const problems = [];
 const check = (ok, what) => ok || problems.push(what);
 check(typeof version() === 'string' && version().length > 0, 'version');
