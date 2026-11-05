@@ -1,0 +1,33 @@
+# Failures seen in CI that were not a bug in the bundler
+
+What failed, what caused it, and what was done. The list covers the CI runs of this repository since 2026-10-30 (the repository
+was recreated that day, so the logs of earlier runs are gone). A leg that fails for a reason on this list is re-run; a failure that
+is not on it is a bug until shown otherwise.
+
+| When | Leg | What failed | Cause | Status |
+| --- | --- | --- | --- | --- |
+| 2026-10-30, run 41093100446 | every Linux leg, arm64 included | the dev server HTTPS test and the HMR test: `ECONNREFUSED 127.0.0.1`, "the build was not served" | `localhost` resolved to `::1` first on the runners, and the server listened on only one of the two loopback addresses | Fixed in `d98cd9c`: `localhost` is served on both. Not seen since |
+| 2026-10-31, run 41169248134 | `ubuntu-latest node 24` | the HMR test: `Cannot read properties of undefined (reading 'find')` in the removal check | A lookup in the removal check found no update message. The cause was not isolated | Made robust in `e2bb0a1` (the browser gets a second try, and the failure says why) and `9a49973` (the update and the log are printed) |
+| 2026-10-31, run 41169248134 | `alpine (musl, arm64)` | the job did not start: JavaScript actions are not supported in Alpine containers on arm64 | A setting of the workflow, not a timing problem | Fixed in `efa0113`: the Alpine checks run from a script |
+| 2026-11-02, run 41528201431 | `ubuntu-latest node 24` and `26` | the page checker test: `ENOTEMPTY` removing the browser's profile folder | Most likely the browser had just been stopped and was still writing to the folder | The folder is removed with retries (`tools/lib/browsers.mjs`) |
+| 2026-11-05, run 42037557384 | `macos-15-intel node 24` | the HMR test, rxjs program: `mergeMap` printed `[1,3,2]` where `[3,2,1]` is expected | The program used three timers of 45, 30 and 15 ms. A slow runner that waits 15 ms between two subscriptions reorders them | Fixed: the inner sources are now opened by hand in the order 3, 2, 1, with no timer (`tests/hmr/soak/rxjs/main.js`). The HMR checks, rxjs program included, passed three times on an idle machine and once under a load of 9 on 16 threads |
+| 2026-11-04, run 41857001294 | `ubuntu-24.04 node 26` | the job ran out of its 30 minutes | Installing Firefox and WebKit through Playwright took 24 minutes (a slow package mirror) | Each try of the install is cut off at 7 minutes and there are two (`.github/workflows/ci.yml`) |
+| 2026-11-04, run 41757108691 | `macos-26-intel node 24` | the `pnpm/setup` step failed | A DNS lookup failed on the runner | Not ours. Re-run passed |
+| 2026-11-03 to 2026-11-05, for example runs 41857001294 and 42054104725 | macOS legs (`macos-15`, `macos-15-intel`, `macos-26`, `macos-26-intel`) | the job was cancelled before any step: "The job was not acquired by Runner of type hosted even after multiple attempts" | GitHub had no macOS runner free. Its annotation says macOS arm64 capacity is limited | Not ours. The failed jobs are re-run, and sometimes more than once |
+
+## The declaration-file timeout on musl
+
+The roadmap named a timeout of the declaration-file (`--dts`) test on musl. No such failure is in the logs that still exist. Today the
+whole fixture suite, which includes that test, finishes in 33 to 48 seconds on the four Linux legs checked (run 42095264960), and each
+script has a limit of 300 seconds (`SCRIPT_LIMIT` in `tests/fixtures.rs`). It was not reproduced, so nothing was changed. If it
+comes back, the log of the run goes into this file with its cause.
+
+## What to do when a leg fails
+
+1. Read the annotation of the job. "Not acquired by Runner", a DNS error or a download that timed out is the runner, not the code.
+2. For those, re-run the failed jobs. Do not push another commit to get a fresh run: a push to `main` cancels the run in progress.
+3. For anything else, treat it as a bug in the code or in the test, find the cause, and add a line here when it turns out to be a
+   timing or environment problem.
+
+A check that must be green before a change merges is a check that can be red for a reason that is not the change. Runner capacity
+failed macOS legs on 2026-11-03, 11-04 and 11-05, which is a reason to think twice before making those legs required.
