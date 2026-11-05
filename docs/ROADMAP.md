@@ -46,6 +46,7 @@ Stable base: required CI on Linux, macOS and Windows; corpus 24 of 24 on every r
 - [ ] [1.5](https://github.com/rathkit/pack/issues/4) Corpus run on every release and weekly, results kept `P1`
 - [ ] [1.6](https://github.com/rathkit/pack/issues/5) Explain the flaky tests seen in CI `P1`
 - [ ] [5.5](https://github.com/rathkit/pack/issues/6) Security alerts at zero and kept there `P1`
+- [ ] [5.6](https://github.com/rathkit/pack/issues/72) Benchmarks in their own repository, run in a container; benchmark-only tools leave this one `P1`
 
 ### 0.2.0-beta.0
 
