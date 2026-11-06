@@ -5,18 +5,20 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { testModules } from './lib/test-deps.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const exe = process.env.RATHKIT_PACK_BIN ?? path.join(here, '../target/release/rkp');
-// acorn is the reference: ACORN_DIR names an installed copy, otherwise it is looked for from the current directory.
+// acorn is the reference: ACORN_DIR names an installed copy, otherwise test-deps/ has one, otherwise it is looked for from the current directory.
 let found = process.env.ACORN_DIR;
+if (!found && existsSync(path.join(testModules, 'acorn/package.json'))) found = path.join(testModules, 'acorn');
 if (!found) {
   try {
     found = path.dirname(createRequire(path.join(process.cwd(), 'noop.js')).resolve('acorn/package.json'));
   } catch {}
 }
 if (!found) {
-  console.log('check-estree: acorn is not installed (set ACORN_DIR or run from a project that has it); skipped');
+  console.log('check-estree: acorn is not installed (set ACORN_DIR, run `pnpm install --dir test-deps --frozen-lockfile --ignore-scripts`, or run from a project that has it); skipped');
   process.exit(0);
 }
 const acorn = createRequire(path.join(found, 'noop.js'))(found);
