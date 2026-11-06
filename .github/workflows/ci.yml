@@ -89,6 +89,9 @@ jobs:
           for attempt in 1 2; do
             timeout --kill-after=20 420 pnpm dlx playwright@1.64.1 install --with-deps firefox webkit && exit 0
             echo "attempt $attempt of the browser install did not finish"
+            # the killed install leaves its apt-get running, which holds the dpkg lock
+            sudo killall apt-get dpkg 2>/dev/null || true
+            sudo dpkg --configure -a
           done
           exit 1
       - if: matrix.other-browsers
