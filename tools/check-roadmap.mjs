@@ -10,6 +10,9 @@ import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
+/** The only repositories asked about: a roadmap link to any other repository is an error, so file text never decides where a request goes. */
+const REPOSITORIES = ['rathkit/pack'];
+
 /** The items of the roadmap that have an issue: `- [x] [3.5](https://github.com/o/r/issues/7) Title`. */
 export function items(text) {
   const found = [];
@@ -42,7 +45,9 @@ async function states(list) {
   const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
   const headers = { accept: 'application/vnd.github+json', 'user-agent': 'rathkit-pack-check-roadmap', ...(token ? { authorization: `Bearer ${token}` } : {}) };
   const result = {};
-  for (const repo of new Set(list.map((i) => i.repo))) {
+  for (const wanted of new Set(list.map((i) => i.repo))) {
+    const repo = REPOSITORIES.find((r) => r === wanted);
+    if (!repo) throw new Error(`docs/ROADMAP.md links to ${wanted}, which this check does not ask about`);
     for (let page = 1; ; page++) {
       const r = await fetch(`https://api.github.com/repos/${repo}/issues?state=all&per_page=100&page=${page}`, { headers });
       if (!r.ok) throw new Error(`GitHub answered ${r.status} for ${repo} issues`);

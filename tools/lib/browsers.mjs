@@ -106,7 +106,7 @@ async function chromium(binary, emit) {
   // A first launch can be slow: two tries of 30 seconds.
   for (let attempt = 0; attempt < 2 && !targets; attempt++) {
     child?.kill();
-    if (profile) fs.rmSync(profile, { recursive: true, force: true });
+    if (profile) try { fs.rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); } catch {} // a browser that was just killed may still be writing
     profile = fs.mkdtempSync(path.join(os.tmpdir(), 'page-profile-'));
     child = spawn(binary, ['--no-sandbox', '--disable-gpu', '--headless=new', `--user-data-dir=${profile}`, '--remote-debugging-port=0', 'about:blank'], { stdio: 'ignore' });
     await until(async () => {
@@ -175,7 +175,7 @@ async function firefox(binary, emit) {
   let child, profile, port;
   for (let attempt = 0; attempt < 2 && !port; attempt++) {
     child?.kill();
-    if (profile) fs.rmSync(profile, { recursive: true, force: true });
+    if (profile) try { fs.rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); } catch {} // a browser that was just killed may still be writing
     profile = fs.mkdtempSync(path.join(os.tmpdir(), 'page-profile-'));
     // Quiet the first-run work, which would only add network calls and windows.
     fs.writeFileSync(path.join(profile, 'user.js'), [

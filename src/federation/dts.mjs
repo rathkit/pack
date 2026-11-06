@@ -189,12 +189,25 @@ function runCompiler(command, tsconfig) {
 // ---- writing a remote's types ----------------------------------------------------------------------
 
 // The project's own TypeScript, and the compiler options it would use (a tsconfig.json found, or the one asked for).
+let typescriptProblem = 'the typescript package is not installed (--dts writes declarations with it; install it in the project)';
+
 function loadTypeScript() {
+  let ts;
   try {
-    return createRequire(path.join(cwd, 'noop.js'))('typescript');
+    ts = createRequire(path.join(cwd, 'noop.js'))('typescript');
   } catch {
     return null;
   }
+  // TypeScript 7 is the native compiler: its package has no JavaScript API (no `ts.sys`, no `createProgram`) to write declarations with.
+  if (!ts || !ts.sys || typeof ts.createProgram !== 'function') {
+    let version = '';
+    try {
+      version = ` ${createRequire(path.join(cwd, 'noop.js'))('typescript/package.json').version}`;
+    } catch {}
+    typescriptProblem = `the typescript package${version} has no JavaScript API, which --dts needs (TypeScript 7 is the native compiler). Install typescript 5 or 6 in the project to use --dts`;
+    return null;
+  }
+  return ts;
 }
 
 function findConfig(ts, tsConfigPath) {
@@ -521,7 +534,7 @@ function bundleDeclarations(ts, entryFile) {
 // from the folder the sources have in common. Files in node_modules are not described.
 function emit({ entries, outDir, tsConfigPath, bundle = false }) {
   const ts = loadTypeScript();
-  if (!ts) return { error: 'the typescript package is not installed (--dts writes declarations with it; install it in the project)' };
+  if (!ts) return { error: typescriptProblem };
   const options = compilerOptions(ts, tsConfigPath);
   const out = path.resolve(cwd, outDir);
   // To bundle, the declarations of every file are written to a folder of ours first, and one file for each entry goes to `out`.
@@ -581,7 +594,7 @@ function emit({ entries, outDir, tsConfigPath, bundle = false }) {
 async function generate({ name, exposes, outDir, tsConfigPath, typesFolder = '@mf-types', compiledTypesFolder = 'compiled-types', additionalFiles = [], generateApi = true, compilerInstance = 'tsc', extractThirdParty = false, extractRemoteTypes = false, hostTypesFolder = '@mf-types', afterGenerate = '' }) {
   const ts = loadTypeScript();
   if (!ts) {
-    note('types were not written for the exposed modules: the typescript package is not installed');
+    note(`types were not written for the exposed modules: ${typescriptProblem}`);
     return { written: false };
   }
   const options = compilerOptions(ts, tsConfigPath);

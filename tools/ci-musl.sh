@@ -7,7 +7,13 @@ set -u
 if [ "${1:-}" != --inside ]; then
   node=${1:?usage: tools/ci-musl.sh NODE_MAJOR}
   root=$(cd "$(dirname "$0")/.." && pwd)
-  exec docker run --rm -v "$root":/w node:"$node"-alpine sh -c 'apk add --no-cache bash >/dev/null && bash /w/tools/ci-musl.sh --inside'
+  # Pinned by digest (the index, so the same line works on x64 and arm64); node:24-alpine is Node 24.22.2 and node:26-alpine is 26.13.0 at these digests.
+  case $node in
+    24) image=node:24-alpine@sha256:a34ab6d7f6f4813f4d0c5469d74685604b962fbdbf5793a7bc7b4998ecb867c8 ;;
+    26) image=node:26-alpine@sha256:8996bb5821d62a8fd9bb27c1cb07462f3fdce6e47d640c6a881ead0b064ce216 ;;
+    *) echo "ci-musl.sh: no pinned image for Node $node" >&2; exit 2 ;;
+  esac
+  exec docker run --rm -v "$root":/w "$image" sh -c 'apk add --no-cache bash >/dev/null && bash /w/tools/ci-musl.sh --inside'
 fi
 
 cd /w

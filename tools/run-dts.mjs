@@ -102,6 +102,17 @@ check(existsSync(join(bare, 'dist', 'bundle.js')), 'the bundle itself is still w
   check(compile.status === 0, 'a strict consumer type-checks against it', compile.stdout);
 }
 
+// TypeScript 7 is the native compiler and its package has no JavaScript API: --dts says so and names the version (issue #71).
+{
+  const native = join(tmp, 'native');
+  write(native, 'node_modules/typescript/package.json', JSON.stringify({ name: 'typescript', version: '7.0.2', main: 'index.js' }));
+  write(native, 'node_modules/typescript/index.js', 'module.exports = {};\n');
+  write(native, 'src/greet.ts', 'export const greet = (name: string): string => "hi " + name;\n');
+  const r = run(native, ['bundle', 'src/greet.ts', '--outdir', 'dist', '--dts']);
+  check(r.status !== 0 && /typescript package 7\.0\.2 has no JavaScript API/.test(r.stderr), 'TypeScript 7 gets a clear message, not a crash', r.stderr);
+  check(!/fileExists|TypeError/.test(r.stderr), 'and no TypeError');
+}
+
 try { rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch {} // Windows may still hold a file of a process that just ended
 if (failed) {
   console.log(`${failed} failure(s)`);
