@@ -85,11 +85,20 @@ jobs:
       # ours; the version is pinned so the builds, and the protocol WebKit speaks, do not change under us).
       # The install normally takes about a minute. One run spent 24 minutes in it (a slow package mirror) and then ran out of the job's
       # time, so each try is cut off at seven minutes and there are two. A stalled download is the cause (one package waited four and a
-      # half minutes before apt gave up on it), so apt is told to give up on a silent connection after 15 seconds and to retry.
+      # half minutes before apt gave up on it), so apt is told to give up on a silent connection after 15 seconds and to retry. That was
+      # not enough (apt hung with no output for seven minutes, twice in a row), so the downloaded packages are kept in the Actions cache:
+      # a run that finds them does not ask the mirror for them, and one that does not falls back to the mirror as before.
+      - if: matrix.other-browsers
+        id: debs
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-debs
+          key: apt-debs-playwright-1.64.1-v1
       - if: matrix.other-browsers
         name: Install Firefox and WebKit
         timeout-minutes: 16
         run: |
+          if ls ~/apt-debs/*.deb >/dev/null 2>&1; then sudo cp ~/apt-debs/*.deb /var/cache/apt/archives/; fi
           printf 'Acquire::Retries "5";\nAcquire::http::Timeout "15";\nAcquire::https::Timeout "15";\n' | sudo tee /etc/apt/apt.conf.d/99-rathkit-fetch >/dev/null
           for attempt in 1 2; do
             timeout --kill-after=20 420 pnpm dlx playwright@1.64.1 install --with-deps firefox webkit && exit 0
@@ -99,6 +108,17 @@ jobs:
             sudo dpkg --configure -a
           done
           exit 1
+      - if: matrix.other-browsers && steps.debs.outputs.cache-hit != 'true'
+        name: Keep the downloaded packages
+        run: |
+          mkdir -p ~/apt-debs
+          sudo cp /var/cache/apt/archives/*.deb ~/apt-debs/
+          sudo chown -R "$USER" ~/apt-debs
+      - if: matrix.other-browsers && steps.debs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-debs
+          key: apt-debs-playwright-1.64.1-v1
       - if: matrix.other-browsers
         run: |
           for browser in firefox webkit; do
