@@ -27,6 +27,7 @@
     "svelte": "5.56.0",
     "three": "0.186.1",
     "ts5": "npm:typescript@5.9.3",
+    "ts7": "npm:typescript@7.0.2",
     "typescript": "5.9.3",
     "unplugin-fonts": "2.1.0",
     "url-loader": "4.1.1",

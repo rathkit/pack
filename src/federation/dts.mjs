@@ -204,7 +204,7 @@ function loadTypeScript() {
     try {
       version = ` ${createRequire(path.join(cwd, 'noop.js'))('typescript/package.json').version}`;
     } catch {}
-    typescriptProblem = `the typescript package${version} has no JavaScript API, which --dts needs (TypeScript 7 is the native compiler). Install typescript 5 or 6 in the project to use --dts`;
+    typescriptProblem = `the typescript package${version} has no JavaScript API (TypeScript 7 is the native compiler), which this needs. Install typescript 5 or 6 in the project`;
     return null;
   }
   return ts;
@@ -528,13 +528,91 @@ function bundleDeclarations(ts, entryFile) {
   return parts.filter(Boolean).join('\n\n') + '\n';
 }
 
+// ---- TypeScript 7 -------------------------------------------------------------------------------------------------
+
+// TypeScript 7 has no JavaScript API to build a program with, but its command line writes the same declarations. Its `tsc` is found in
+// the project's `typescript` package.
+function nativeTypeScript() {
+  try {
+    const require = createRequire(path.join(cwd, 'noop.js'));
+    const manifest = require('typescript/package.json');
+    if (Number(String(manifest.version).split('.')[0]) < 7) return null;
+    const bin = path.join(path.dirname(require.resolve('typescript/package.json')), typeof manifest.bin === 'string' ? manifest.bin : manifest.bin?.tsc ?? 'bin/tsc');
+    return fs.existsSync(bin) ? { version: manifest.version, bin } : null;
+  } catch {
+    return null;
+  }
+}
+
+function findConfigFile(tsConfigPath) {
+  if (tsConfigPath) return path.resolve(cwd, tsConfigPath);
+  for (let dir = cwd; ; dir = path.dirname(dir)) {
+    const file = path.join(dir, 'tsconfig.json');
+    if (fs.existsSync(file)) return file;
+    if (dir === path.dirname(dir)) return null;
+  }
+}
+
+// Declarations for `entries` written by the TypeScript 7 command line, to the same layout the API route gives: from the folder the sources
+// share. A tsconfig of ours (the project's, with what --dts needs on top) is written for the run, because the command line takes either
+// files or a tsconfig, not both.
+function emitNative(native, { entries, outDir, tsConfigPath }) {
+  const out = path.resolve(cwd, outDir);
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'rathkit-dts-native-'));
+  try {
+    const defaults = path.join(work, 'defaults.json');
+    fs.writeFileSync(defaults, JSON.stringify({ compilerOptions: { target: 'es2020', module: 'esnext', moduleResolution: 'bundler', jsx: 'react-jsx', esModuleInterop: true, allowJs: true, skipLibCheck: true } }));
+    const project = findConfigFile(tsConfigPath);
+    const config = (rootDir) => ({
+      extends: project ? [defaults, project] : [defaults],
+      files: entries.map((e) => path.resolve(cwd, e)),
+      include: [],
+      compilerOptions: { declaration: true, emitDeclarationOnly: true, noEmit: false, outDir: out, declarationDir: out, ...(rootDir ? { rootDir } : {}), declarationMap: false, sourceMap: false, composite: false, incremental: false, noEmitOnError: false, skipLibCheck: true, allowJs: true },
+    });
+    const run = (extra, rootDir) => {
+      const file = path.join(work, 'tsconfig.json');
+      fs.writeFileSync(file, JSON.stringify(config(rootDir)));
+      const result = spawnSync(process.execPath, [native.bin, '--project', file, '--pretty', 'false', ...extra], { cwd, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+      if (result.error) throw new Error(`the TypeScript compiler could not be run: ${result.error.message}`);
+      return result;
+    };
+    // Version 7 does not guess the folder the sources share, so it is found first: the files the program reads, less libraries and declarations.
+    const listed = run(['--listFilesOnly']).stdout.split(/\r?\n/).filter((line) => path.isAbsolute(line));
+    const sources = listed.filter((f) => !/\.d\.[mc]?ts$/.test(f) && !f.split(path.sep).includes('node_modules')).map((f) => path.dirname(f));
+    const common = sources.reduce((a, b) => {
+      let dir = a;
+      while (!(b + path.sep).startsWith(dir + path.sep) && dir !== path.dirname(dir)) dir = path.dirname(dir);
+      return dir;
+    }, sources[0] ?? cwd);
+    const result = run(['--listEmittedFiles'], common);
+    let errors = 0;
+    for (const line of result.stdout.split(/\r?\n/)) {
+      const m = /^(.+?)\((\d+),\d+\): error TS\d+: (.*)$/.exec(line);
+      const bare = /^error TS\d+: (.*)$/.exec(line);
+      if (!m && !bare) continue;
+      errors++;
+      if (errors <= 20) note(m ? `${m[1]}:${m[2]}: ${m[3]}` : bare[1]);
+    }
+    const written = result.stdout.split(/\r?\n/).filter((l) => l.startsWith('TSFILE: ')).map((l) => l.slice(8)).filter((f) => /\.d\.[mc]?ts$/.test(f)).map((f) => path.relative(out, f).split(path.sep).join('/')).sort();
+    if (!written.length) return { error: 'no declarations were written' };
+    return { written, errors };
+  } finally {
+    fs.rmSync(work, { recursive: true, force: true });
+  }
+}
+
 // ---- writing declarations for entry points (--dts) --------------------------------------------------
 
 // One declaration file for each source file the entries reach, as `tsc --declaration --emitDeclarationOnly` writes them, laid out
 // from the folder the sources have in common. Files in node_modules are not described.
 function emit({ entries, outDir, tsConfigPath, bundle = false }) {
   const ts = loadTypeScript();
-  if (!ts) return { error: typescriptProblem };
+  if (!ts) {
+    const native = nativeTypeScript();
+    if (!native) return { error: typescriptProblem };
+    if (bundle) return { error: `--dts-bundle merges declarations with the JavaScript API of typescript, which version ${native.version} does not have; install typescript 5 or 6 for it (--dts and --dts-dir work with ${native.version})` };
+    return emitNative(native, { entries, outDir, tsConfigPath });
+  }
   const options = compilerOptions(ts, tsConfigPath);
   const out = path.resolve(cwd, outDir);
   // To bundle, the declarations of every file are written to a folder of ours first, and one file for each entry goes to `out`.

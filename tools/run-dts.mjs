@@ -102,7 +102,30 @@ check(existsSync(join(bare, 'dist', 'bundle.js')), 'the bundle itself is still w
   check(compile.status === 0, 'a strict consumer type-checks against it', compile.stdout);
 }
 
-// TypeScript 7 is the native compiler and its package has no JavaScript API: --dts says so and names the version (issue #71).
+// TypeScript 7 is the native compiler: --dts and --dts-dir write the same declarations through its command line, --dts-bundle says it needs 5 or 6.
+const ts7 = join(testModules, 'ts7');
+if (existsSync(ts7)) {
+  const native = join(tmp, 'native7');
+  mkdirSync(join(native, 'node_modules'), { recursive: true });
+  symlinkSync(realpathSync(ts7), join(native, 'node_modules', 'typescript'), 'dir');
+  cpSync(join(project, 'src'), join(native, 'src'), { recursive: true });
+  cpSync(join(project, 'tsconfig.json'), join(native, 'tsconfig.json'));
+  const r7 = run(native, ['bundle', 'src/index.ts', 'src/plain.js', '--outdir', 'dist', '--dts']);
+  check(r7.status === 0, 'TypeScript 7 writes declarations', r7.stderr);
+  const names = existsSync(join(native, 'dist')) ? readdirSync(join(native, 'dist')).filter((f) => f.endsWith('.d.ts')).sort() : [];
+  check(names.join() === 'index.d.ts,plain.d.ts,util.d.ts', 'with the layout TypeScript 5 gives (from the folder the sources share)', names.join());
+  const index7 = existsSync(join(native, 'dist', 'index.d.ts')) ? readFileSync(join(native, 'dist', 'index.d.ts'), 'utf8') : '';
+  check(/export declare function add\(a: number, b: number\): number;/.test(index7) && /class Greeter/.test(index7), 'and the declarations are the ones TypeScript 5 writes', index7.slice(0, 300));
+  write(native, 'src/util.ts', 'export interface Point { x: number; y: number }\nexport const origin: Point = { x: "no", y: 0 };\n');
+  const bad = run(native, ['bundle', 'src/index.ts', 'src/plain.js', '--outdir', 'dist2', '--dts']);
+  check(bad.status === 0 && /util\.ts:2: .*not assignable/.test(bad.stderr + bad.stdout), 'a type error is reported and the declarations are written all the same', bad.stderr);
+  const bundled = run(native, ['bundle', 'src/index.ts', '--outdir', 'dist3', '--dts-bundle']);
+  check(bundled.status !== 0 && /--dts-bundle .*typescript 5 or 6/.test(bundled.stderr), '--dts-bundle names TypeScript 5 or 6', bundled.stderr);
+} else {
+  console.log('dts: ts7 is not installed; the TypeScript 7 checks are skipped');
+}
+
+// A typescript package of version 7 without its command line has no way to write declarations: --dts says so and names the version (issue #71).
 {
   const native = join(tmp, 'native');
   write(native, 'node_modules/typescript/package.json', JSON.stringify({ name: 'typescript', version: '7.0.2', main: 'index.js' }));

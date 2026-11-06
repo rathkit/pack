@@ -87,7 +87,7 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   property after a spread. Regular expression syntax and library functions are not looked at. Checked by running programs as written and rewritten for every target in plain, minified,
   CommonJS and IIFE form, and by parsing each result as the language of its target (`tools/run-target.mjs`).
 - `--dts` (and `--dts-dir=DIR`, for a folder other than the output's): declaration files for the entries, written with the project's own
-  `typescript` package (run by Node; it is an error if it is not installed). They are what `tsc --declaration --emitDeclarationOnly`
+  `typescript` package (run by Node; it is an error if it is not installed). With TypeScript 7, the native compiler, its command line writes them (`--dts-bundle` still needs TypeScript 5 or 6, because the merge reads the declarations with the JavaScript API that version 7 does not have; the files differ from version 5's only in quote style and a `declare` on JavaScript entries). They are what `tsc --declaration --emitDeclarationOnly`
   writes: one `.d.ts` for each source file the entries reach, laid out from the folder the sources share (so `src/index.ts` becomes
   `dist/index.d.ts` beside `dist/index.js`). With `--dts-bundle` (`dtsBundle: true`) each entry gets one file instead, named after it, with
   everything it reaches by relative imports merged in: two files' declarations with the same name are told apart (`Item`, `Item$1`), the
