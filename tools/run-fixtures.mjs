@@ -19,6 +19,8 @@ const run = (file, cwd) => {
 const tmp = mkdtempSync(join(tmpdir(), 'fixtures-'));
 let failed = 0;
 for (const name of names) {
+  const began = Date.now();
+  // One line a fixture on stderr, so a run that is cut off by its caller shows how far it got.
   const dir = join(fixtures, name);
   const entry = ['main.ts', 'main.tsx', 'main.js'].find((f) => existsSync(join(dir, f)));
   // A fixture Node cannot run states its expected output instead.
@@ -38,11 +40,12 @@ for (const name of names) {
     const out = join(tmp, `${name}${label ? '-' + label : ''}.${flags.includes('cjs') || flags.includes('iife') ? 'cjs' : 'mjs'}`);
     const split = flags.includes('--splitting');
     const outDir = out.replace(/\.[a-z]+$/, '') + '-chunks';
-    const b = spawnSync(bin, ['bundle', entry, ...(split ? ['--outdir', outDir] : ['--outfile', out]), ...flags], { cwd: dir, encoding: 'utf8' });
+    const b = spawnSync(bin, ['bundle', entry, ...(split ? ['--outdir', outDir] : ['--outfile', out]), ...flags], { cwd: dir, encoding: 'utf8', timeout: 120000 });
     // Some programs cannot be written in these formats at all.
     if (b.status !== 0 && /Top-level await|needs a global/.test(b.stderr)) continue;
     let problem = null;
-    if (b.status !== 0) problem = `bundler failed: ${b.stderr.trim()}`;
+    if (b.error?.code === 'ETIMEDOUT') problem = `the bundler did not finish in 120 seconds (${flags.join(' ') || 'default flags'})`;
+    else if (b.status !== 0) problem = `bundler failed: ${b.stderr.trim()}`;
     else {
       const got = run(split ? join(outDir, entry.replace(/\.[a-z]+$/, '.js')) : out, dir);
       if (got.out !== expected.out || got.code !== expected.code) {
@@ -64,6 +67,7 @@ for (const name of names) {
       console.log(`     bundle kept at ${out}`);
     }
   }
+  process.stderr.write(`fixture ${name}: ${Date.now() - began} ms\n`);
 }
 console.log(failed ? `${failed} failure(s)` : `all ${names.length} fixtures agree`);
 if (!failed) try { rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch {} // Windows may still hold a file of a process that just ended

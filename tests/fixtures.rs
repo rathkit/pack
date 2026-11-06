@@ -6,9 +6,10 @@ use std::io::Read;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-/// How long one script of `tools/` may run in these tests. They take seconds to a minute; a hang (a race, a port that is never
-/// answered) must cost this, with what the script printed, and not the 30 minutes a CI job is allowed.
-const SCRIPT_LIMIT: Duration = Duration::from_secs(300);
+/// How long one script of `tools/` may run in these tests. They take seconds to a few minutes, longer on a slow runner (the
+/// fixture battery stopped at 300 seconds on an Intel Mac); a hang (a race, a port that is never answered) must cost this, with what the
+/// script printed, and not the 30 minutes a CI job is allowed.
+const SCRIPT_LIMIT: Duration = Duration::from_secs(600);
 
 trait OutputWithin {
     /// Like `output`, but a run that is not over in `SCRIPT_LIMIT` is killed (with what it started) and is an error that holds what it printed.
