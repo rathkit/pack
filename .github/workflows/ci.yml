@@ -81,11 +81,13 @@ jobs:
       # The same scenarios in Firefox and WebKit, the builds Playwright ships (tools/lib/browsers.mjs drives them with no dependency of
       # ours; the version is pinned so the builds, and the protocol WebKit speaks, do not change under us).
       # The install normally takes about a minute. One run spent 24 minutes in it (a slow package mirror) and then ran out of the job's
-      # time, so each try is cut off at seven minutes and there are two.
+      # time, so each try is cut off at seven minutes and there are two. A stalled download is the cause (one package waited four and a
+      # half minutes before apt gave up on it), so apt is told to give up on a silent connection after 15 seconds and to retry.
       - if: matrix.other-browsers
         name: Install Firefox and WebKit
         timeout-minutes: 16
         run: |
+          printf 'Acquire::Retries "5";\nAcquire::http::Timeout "15";\nAcquire::https::Timeout "15";\n' | sudo tee /etc/apt/apt.conf.d/99-rathkit-fetch >/dev/null
           for attempt in 1 2; do
             timeout --kill-after=20 420 pnpm dlx playwright@1.64.1 install --with-deps firefox webkit && exit 0
             echo "attempt $attempt of the browser install did not finish"
