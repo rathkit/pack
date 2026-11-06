@@ -40,7 +40,7 @@ Waiting on the maintainer, tracked outside the milestones: 0.5 make the reposito
 
 Stable base: required CI on Linux, macOS and Windows; corpus 24 of 24 on every release; zero open security alerts; Firefox and WebKit; options and plugin docs.
 
-- [ ] [1.2](https://github.com/rathkit/pack/issues/1) macOS and Windows legs required in the ruleset *(maintainer)* `P0`
+- [ ] [1.2](https://github.com/rathkit/pack/issues/1) Windows and macOS arm64 legs required in the ruleset, then ten clean runs in a row; the other macOS legs advisory *(maintainer)* `P0`
 - [x] [1.4](https://github.com/rathkit/pack/issues/2) Firefox and WebKit for the dev server, HMR and federation scenarios `P1`
 - [x] [4.5](https://github.com/rathkit/pack/issues/3) Options reference and plugin docs pages `P1`
 - [x] [1.5](https://github.com/rathkit/pack/issues/4) Corpus run on every release and weekly, results kept `P1`

@@ -31,5 +31,19 @@ comes back, the log of the run goes into this file with its cause.
 3. For anything else, treat it as a bug in the code or in the test, find the cause, and add a line here when it turns out to be a
    timing or environment problem.
 
+## Which legs block a merge, and what counts as a clean run
+
 A check that must be green before a change merges is a check that can be red for a reason that is not the change. Runner capacity
-failed macOS legs on 2026-11-03, 11-04 and 11-05, which is a reason to think twice before making those legs required.
+failed macOS legs on 2026-11-03, 11-04 and 11-05, on all four macOS images. So the legs are split:
+
+| Legs | In the main ruleset |
+| --- | --- |
+| `ubuntu-24.04`, `ubuntu-24.04-arm` and the four `alpine (musl…)` legs, Node 24 and 26 | Required (already) |
+| `windows-2025`, `windows-2022` and `windows-11-arm`, Node 24 and 26 (six legs) | Required |
+| `macos-15`, Node 24 and 26 (Apple silicon) | Required |
+| `macos-15-intel`, `macos-26` and `macos-26-intel`, Node 24 and 26 (six legs) | Advisory: they run on every push and show red, but do not block |
+| `ubuntu-26.04` and `ubuntu-26.04-arm`, Node 24 and 26 (four legs) | Advisory, as before |
+
+A run is **clean** when every job that got a runner passed on its first attempt. A job that never got a runner has no result: it is
+re-run, and the run goes on this page with the date. It does not count against the run. A job that started and failed does, whatever the
+cause. The required legs were added to the ruleset on 2026-11-06. Roadmap item 1.2 is done after ten clean runs in a row with them required.
