@@ -63,6 +63,7 @@ CSS and libraries: the CSS pipeline, library mode and legacy targets.
 
 - [ ] [2.1](https://github.com/rathkit/pack/issues/11) CSS pipeline: preprocessors without a config file, PostCSS configuration, CSS modules, @import and url() edge cases `P0`
 - [ ] [2.2](https://github.com/rathkit/pack/issues/12) Library mode: dual ESM and CJS, exports maps, preserved modules, --dts-bundle on 30 packages `P0`
+- [ ] [2.11](https://github.com/rathkit/pack/issues/76) --dts-bundle and module federation types with TypeScript 7 `P1`
 - [ ] [2.4](https://github.com/rathkit/pack/issues/13) --target es5 and a browserslist input `P2`
 
 ### 0.4.0-beta.0
