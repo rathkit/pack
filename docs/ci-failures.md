@@ -47,3 +47,7 @@ failed macOS legs on 2026-11-03, 11-04 and 11-05, on all four macOS images. So t
 A run is **clean** when every job that got a runner passed on its first attempt. A job that never got a runner has no result: it is
 re-run, and the run goes on this page with the date. It does not count against the run. A job that started and failed does, whatever the
 cause. The required legs were added to the ruleset on 2026-11-06. Roadmap item 1.2 is done after ten clean runs in a row with them required.
+
+A run started by hand on `main` (`gh workflow run ci -r main`) counts, and the same commit may be run again: the point of the ten is to see
+whether the tests are flaky. Start them one after another, not together: macOS runners are limited, and a run that is waiting for one
+is a run that did not get a runner.

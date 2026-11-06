@@ -4,12 +4,15 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Run by hand on a branch (`gh workflow run ci -r main`), for example to count clean runs in a row.
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # A run started by hand has a group of its own, so it is not cancelled by a push and does not cancel another.
+  group: ci-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
   cancel-in-progress: true
 
 jobs:
