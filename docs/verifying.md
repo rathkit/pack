@@ -5,6 +5,8 @@ Every GitHub Release of Rathkit Pack has, for each version:
 | File | What it is |
 | --- | --- |
 | `rathkit-pack-VERSION-PLATFORM.tar.gz` | the binary, `LICENSE` and `README.md` |
+| `rathkit-pack-VERSION.tgz`, `rathkit-pack-PLATFORM-VERSION.tgz` | the eight npm packages, exactly as they are staged on npm |
+| `rathkit-pack-VERSION.crate` | the crate, exactly as it is published on crates.io |
 | `SHA256SUMS` | the SHA-256 of every file above and of the SBOM |
 | `rathkit-pack-VERSION.sbom.cdx.json` | the software bill of materials (CycloneDX); it lists **zero** components |
 | `*.sigstore.json` | a Sigstore (keyless) signature of each file above, made by this repository's release workflow |
