@@ -29,7 +29,7 @@ one step that publishes there.
 6. The `release` workflow builds seven platforms, runs the tests and a smoke build on each, writes `SHA256SUMS` and the SBOM,
    signs every file with Sigstore, and creates the GitHub pre-release.
 7. The `npm` job (only when `NPM_PUBLISH` is `true`) waits for the owner to approve the `npm` environment, then stages the
-   eight packages with provenance through npm trusted publishing: no npm token is stored anywhere.
+   eight packages from the release (checked against `SHA256SUMS`) with provenance through npm trusted publishing: no npm token is stored anywhere.
 8. The owner approves the staged versions (below).
 9. The `crates` job (only when `CRATES_PUBLISH` is `true`) waits for the owner to approve the `crates-io` environment, gets a
    30-minute token from crates.io through trusted publishing, runs `cargo publish --locked` and revokes the token. **That is
@@ -44,15 +44,36 @@ built, tested and signed and kept as a workflow artifact; nothing is released or
 
 ## Approving a release
 
+The `release` job packs the eight npm packages and the crate once, and `SHA256SUMS` (signed) lists them with the binaries. The `npm`
+job stages those very files (it stops unless each matches `SHA256SUMS`), and the `crates` job packs the crate again and stops
+before it asks crates.io for a token unless the hash is the one in `SHA256SUMS`. Before approving anything, run the check:
+
 ```
-npm stage list
-npm stage download <stage-id>     # the exact tarball, to compare with the release
-npm stage approve <stage-id>      # asks for the two-factor code
-npm stage reject <stage-id>
+node tools/approve-release.mjs v<version>             # check only; nothing is approved
+node tools/approve-release.mjs v<version> --approve   # check, then approve what matches
 ```
 
-Approve all eight. A version that is still `validating` cannot be approved yet. Then check
-`npm view @rathkit/pack dist-tags` (`next` is the new version and `latest` has not moved) and install it in an empty project.
+It needs `npm login` and `gh auth login` as the owner. It downloads `SHA256SUMS` from the release, then:
+
+- **npm**: lists what is staged (`npm stage list --json`; only `staged` entries count), downloads each tarball
+  (`npm stage download`) and compares its hash. A package that is not staged is skipped when `npm view` shows that version is
+  already published (a run that stopped half way); it stops if a package is neither, or is staged twice.
+- **crates.io**: compares the release's `.crate` with `SHA256SUMS`, checks that the version is not on crates.io yet, and finds the
+  run waiting at the `crates-io` environment.
+
+Only if everything matches, and only with `--approve`, it asks for one typed `yes`, then once for the six-digit code from the
+authenticator app (leave it empty for the browser sign-in that a passkey or security key needs). It runs
+`npm stage approve <id> --otp <code>` for each package, and asks for a fresh code if one expires part way. Then it approves the
+`crates-io` environment, which lets the `crates` job publish. `--npm` or `--crates` limits it to one registry. Run it again after
+an interruption: what is already live is skipped.
+
+The registries differ. npm stages, so nothing is live until approval, and approval is per package. crates.io has no staging and a
+version can never be removed, so the check comes before the gate, and approving the environment is what publishes. Neither uses a
+stored token: npm uses trusted publishing for staging and your login for approval, and crates.io gives the job a 30-minute token.
+
+Then check `npm view @rathkit/pack dist-tags` (`next` is the new version and `latest` has not moved) and install it in an empty
+project. By hand, `npm stage list`, `npm stage download <stage-id>` and `npm stage reject <stage-id>` do the same one at a time.
+A version that is still `validating` cannot be approved yet.
 
 ## The first release of each package
 
