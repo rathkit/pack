@@ -13,6 +13,13 @@ if [ "${1:-}" != --inside ]; then
     26) image=node:26-alpine@sha256:8996bb5821d62a8fd9bb27c1cb07462f3fdce6e47d640c6a881ead0b064ce216 ;;
     *) echo "ci-musl.sh: no pinned image for Node $node" >&2; exit 2 ;;
   esac
+  # The registry sometimes answers 502 (run 42347747839, six seconds in), so the image is pulled up to three times before it is run.
+  for attempt in 1 2 3; do
+    docker pull --quiet "$image" >/dev/null && break
+    [ "$attempt" = 3 ] && { echo "ci-musl.sh: could not pull $image"; exit 1; }
+    echo "pull of $image failed (attempt $attempt of 3); trying again" >&2
+    sleep 15
+  done
   exec docker run --rm -v "$root":/w "$image" sh -c 'apk add --no-cache bash >/dev/null && bash /w/tools/ci-musl.sh --inside'
 fi
 
