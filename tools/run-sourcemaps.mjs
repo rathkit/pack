@@ -26,6 +26,8 @@ const rand = (n) => {
   state >>>= 0;
   return state % n;
 };
+// Nothing here takes more than a few seconds; a child that hangs (seen once on an Intel macOS runner, which held the job for 45 minutes) fails the run instead.
+const LIMIT = 120000;
 const pick = (list) => list[rand(list.length)];
 
 // ---- programs -----------------------------------------------------------------------------
@@ -147,12 +149,12 @@ for (let p = 0; p < programs; p++) {
       rmSync(join(dir, "dist"), { recursive: true, force: true });
       const args = ["bundle", "main.ts", ...(split ? ["--outdir", "dist"] : ["--outfile", outName]), ...mode, kind];
       const label = `program ${p} (${args.slice(2).join(" ")})`;
-      const b = spawnSync(bin, args, { cwd: dir, encoding: "utf8" });
+      const b = spawnSync(bin, args, { cwd: dir, encoding: "utf8", timeout: LIMIT });
       if (b.status !== 0) {
         // Top-level await only exists in the esm format.
         if (/Top-level await/.test(b.stderr)) continue;
         failures++;
-        console.log(`FAIL ${label}: bundler failed: ${b.stderr.trim()}`);
+        console.log(`FAIL ${label}: bundler failed: ${b.error?.message ?? ""} ${b.stderr.trim()}`);
         continue;
       }
       const r = spawnSync("node", ["--no-warnings", "--enable-source-maps", join(dir, outName)], { cwd: dir, encoding: "utf8", timeout: 30000 });
@@ -189,16 +191,17 @@ for (let p = 0; p < programs; p++) {
   const sitesHere = [...lib.text.matchAll(/new Error\("@(\d+)"\)/g)].map((m) => Number(m[1]));
   writeFileSync(join(dir, "lib.ts"), lib.text);
   for (const buildFlags of [[], ["--minify", "--keep-names"]]) {
-    const lb = spawnSync(bin, ["bundle", "lib.ts", "--outfile", "lib.mjs", "--sourcemap=inline", ...buildFlags], { cwd: dir, encoding: "utf8" });
+    const lb = spawnSync(bin, ["bundle", "lib.ts", "--outfile", "lib.mjs", "--sourcemap=inline", ...buildFlags], { cwd: dir, encoding: "utf8", timeout: LIMIT });
     if (lb.status !== 0) { failures++; console.log(`FAIL prebuilt: ${lb.stderr}`); continue; }
     let main = 'import * as L from "./lib.mjs";\nconst frame = (s) => String(s).split("\\n")[1] ?? "";\n';
     for (const n of lib.names) main += `console.log(frame(await Promise.resolve(L.${n}(1, []))));\n`;
     writeFileSync(join(dir, "main.mjs"), main);
     for (const mode of [[], ["--minify"]]) {
       const label = `prebuilt (${buildFlags.join(" ")} then ${mode.join(" ")})`;
-      const b = spawnSync(bin, ["bundle", "main.mjs", "--outfile", "dist/main.mjs", "--sourcemap", ...mode], { cwd: dir, encoding: "utf8" });
-      if (b.status !== 0) { failures++; console.log(`FAIL ${label}: ${b.stderr}`); continue; }
-      const r = spawnSync("node", ["--no-warnings", "--enable-source-maps", "dist/main.mjs"], { cwd: dir, encoding: "utf8" });
+      const b = spawnSync(bin, ["bundle", "main.mjs", "--outfile", "dist/main.mjs", "--sourcemap", ...mode], { cwd: dir, encoding: "utf8", timeout: LIMIT });
+      if (b.status !== 0) { failures++; console.log(`FAIL ${label}: ${b.error?.message ?? ""} ${b.stderr}`); continue; }
+      const r = spawnSync("node", ["--no-warnings", "--enable-source-maps", "dist/main.mjs"], { cwd: dir, encoding: "utf8", timeout: LIMIT });
+      if (r.status !== 0) { failures++; console.log(`FAIL ${label}: run failed: ${r.error?.message ?? ""} ${r.stderr}`); continue; }
       const frames = r.stdout.trimEnd().split("\n");
       const byOrder = [...lib.text.matchAll(/new Error\("@(\d+)"\)/g)].map((m) => Number(m[1]));
       // Sites are in declaration order, and main calls the functions in that order.
