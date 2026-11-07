@@ -67,7 +67,9 @@ jobs:
         run: getent hosts localhost || true; cat /etc/hosts || true
       - run: cargo build --release
       - run: ./target/release/rkp --version
+      # A step that runs out of time ends with its log kept (a job that runs out of time loses it), and cargo names a test that runs over 60 seconds.
       - run: cargo test --release
+        timeout-minutes: 20
       - run: node tools/run-fixtures.mjs
       - run: node tools/run-defines.mjs
       - run: node tools/run-loaders.mjs
@@ -188,7 +190,9 @@ jobs:
       - run: node tools/make-sbom.mjs "$RUNNER_TEMP/sbom.cdx.json" && node -e "process.exit(require(process.argv[1]).components.length)" "$RUNNER_TEMP/sbom.cdx.json"
       - run: cargo build --release
       - run: ./target/release/rkp --version
+      # A step that runs out of time ends with its log kept (a job that runs out of time loses it), and cargo names a test that runs over 60 seconds.
       - run: cargo test --release
+        timeout-minutes: 20
       - run: node tools/run-fixtures.mjs
       - run: node tools/run-defines.mjs
       - run: node tools/run-loaders.mjs

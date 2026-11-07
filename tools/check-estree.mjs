@@ -90,9 +90,10 @@ for (const file of files) {
     try { sourceType = 'script'; want = acorn.parse(text, { ...opts, sourceType, allowReturnOutsideFunction: true }); } catch { skipped++; continue; }
   }
   checked++;
-  const run = spawnSync(exe, ['--estree', ...(sourceType === 'script' ? ['--script'] : []), '-'], { input: text, maxBuffer: 1 << 30, encoding: 'utf8' });
+  const run = spawnSync(exe, ['--estree', ...(sourceType === 'script' ? ['--script'] : []), '-'], { input: text, maxBuffer: 1 << 30, encoding: 'utf8', timeout: 60000 });
   let got;
-  try { got = JSON.parse(run.stdout); } catch { got = { error: 'unparsable output' }; }
+  // A run that hangs (seen once on a macOS runner, where it held the job for 45 minutes) is a failure that names the file.
+  try { got = run.error ? { error: `${run.error.code ?? run.error.message} (no answer in 60 seconds)` } : JSON.parse(run.stdout); } catch { got = { error: 'unparsable output' }; }
   if (got.error) {
     const key = `error: ${got.error}`;
     reasons.set(key, (reasons.get(key) ?? []).concat(file));

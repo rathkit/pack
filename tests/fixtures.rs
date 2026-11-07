@@ -218,7 +218,7 @@ fn estree_matches_acorn() {
         .args(["tools/check-estree.mjs", "tests", "tools"])
         .env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rkp"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
+        .output_within()
         .expect("run the ESTree script");
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "ESTree output differs from acorn's:\n{text}\n{}", String::from_utf8_lossy(&output.stderr));
