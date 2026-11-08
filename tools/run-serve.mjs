@@ -150,6 +150,10 @@ try {
   // The page that connects now is told about the error at once.
   write('main.js', 'import "./style.css";\nimport note from "./note.txt";\nconsole.log("fixed", note);\n');
   await next('full-reload');
+  // Let the rebuild settle before the next write: on a slow runner a second rebuild of the file above can still be running, and a write that
+  // lands in it is part of one batch with that file, which is reloaded as a whole (a failure seen on alpine, 2026-11-08).
+  await new Promise((r) => setTimeout(r, 1000));
+  events.length = 0;
 
   // A plugin takes over a file: its event arrives, and the page is not reloaded.
   write('note.txt', 'second\n');
