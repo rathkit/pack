@@ -11,10 +11,11 @@ Site: <https://rathkit.com>
 ## Speed
 
 Measured on seven workloads in three modes (21 cases: the TypeScript compiler, three.js, lodash-es, React, rxjs, two
-generated apps; plain, minified, minified with a source map), the whole command took the least memory in every case
-and less time than rolldown, rspack and Vite in every case. Against esbuild it took less time in 15 of the 21 cases;
-esbuild was faster in the other six, by 1 to 6 ms (the TypeScript compiler minified: 369 ms against 368 ms). Output sizes
-are about equal, and others are smaller in some cases. The method,
+generated apps; plain, minified, minified with a source map), the whole command took the least memory in every case and less time than rolldown, rspack, Vite, webpack, Rollup and
+Parcel 2 in every case. Against esbuild it took less time in 15 of the 21 cases; esbuild was faster in the other six, by
+0.2 to 7 ms (the TypeScript compiler minified: 364 ms against 357 ms). Parcel 3 took less time in 18 cases and was faster
+in the three lodash-es cases, where it kept none of the exports, so those are not the same work. Output sizes are about
+equal, and others are smaller in some cases. The method,
 the machine, the versions and every table: [docs/benchmarks.md](docs/benchmarks.md). One machine, one day: run
 the container recipe in [rathkit/pack-bench](https://github.com/rathkit/pack-bench) for yours.
 
