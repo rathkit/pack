@@ -1196,18 +1196,23 @@ impl<'a> Bundler<'a> {
         }
         // Without minifying the text stays as it is, and copies of source are exact, so word
         // and punctuation starts inside them stand in for tokens: no second parse.
-        let (mut code, anchors) = if settings.any() {
-            {
+        // The texts of the sources go into the map escaped. Which modules the chunk holds is known now, so a spare
+        // core escapes them while the minifier works: the biggest one (ts5 is one 9 MB module) is not worth waiting for.
+        let (mut code, anchors, mut escaped) = std::thread::scope(|scope| {
+            let escaping = options.sources_content.then(|| scope.spawn(|| self.escape_sources(marks)));
+            let (code, anchors) = if settings.any() {
                 let mut anchors = Vec::new();
                 let code = crate::minify::minify_chunk(&text, &layout, settings, Some(&mut anchors)).map_err(fail)?;
                 (code, anchors)
-            }
-        } else {
-            let anchors = synthetic_anchors(&text, &spans);
-            (text, anchors)
-        };
+            } else {
+                let anchors = synthetic_anchors(&text, &spans);
+                (text, anchors)
+            };
+            let escaped = escaping.map(|h| h.join().expect("escape")).unwrap_or_default();
+            Ok::<_, Vec<Diagnostic>>((code, anchors, escaped))
+        })?;
         let mapping = std::time::Instant::now();
-        let mut map = self.build_map(&file, &code, &anchors, &spans, marks, options);
+        let mut map = self.build_map(&file, &code, &anchors, &spans, marks, options, &mut escaped);
         if timing {
             eprintln!("  build map: {:.1} ms", mapping.elapsed().as_secs_f64() * 1000.0);
         }
@@ -1317,7 +1322,7 @@ impl<'a> Bundler<'a> {
     /// The map for one output file, from where its tokens went and which pieces of its text
     /// came from which source. Ranges of anchors are traced side by side; numbering sources and
     /// names and writing the segments (which depend on what came before) is one pass after.
-    fn build_map(&self, file: &str, code: &str, anchors: &[crate::minify::Anchor], spans: &[Span], marks: &[Mark], options: &Options) -> String {
+    fn build_map(&self, file: &str, code: &str, anchors: &[crate::minify::Anchor], spans: &[Span], marks: &[Mark], options: &Options, escaped: &mut crate::fxhash::FastMap<u32, String>) -> String {
         let timing = std::env::var_os("RATHKIT_TIMING").is_some();
         let tracing = std::time::Instant::now();
         let generated = crate::sourcemap::Positions::new(code);
@@ -1369,7 +1374,10 @@ impl<'a> Bundler<'a> {
                         source_at[slot] = *source_index.entry(*key).or_insert_with(|| {
                             let content = match content {
                                 SourceText::None => None,
-                                SourceText::Module(id) => Some(std::borrow::Cow::Borrowed(self.graph.module(*id).source.as_str())),
+                                SourceText::Module(id) => match escaped.remove(&(id.index() as u32)) {
+                                    Some(ready) => return builder.add_source_escaped(shown.clone(), ready),
+                                    None => Some(std::borrow::Cow::Borrowed(self.graph.module(*id).source.as_str())),
+                                },
                                 SourceText::Given(text) => text.clone().map(std::borrow::Cow::Owned),
                             };
                             builder.add_source(shown.clone(), content)
@@ -1419,6 +1427,15 @@ impl<'a> Bundler<'a> {
             eprintln!("  map json: {:.1} ms", loop_done.elapsed().as_secs_f64() * 1000.0);
         }
         json
+    }
+
+    /// The texts of the modules a chunk holds, escaped for a map's `sourcesContent`, by module number.
+    fn escape_sources(&self, marks: &[Mark]) -> crate::fxhash::FastMap<u32, String> {
+        let mut ids: Vec<u32> = marks.iter().map(|m| m.module.index() as u32).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        let texts: Vec<&str> = ids.iter().map(|&i| self.graph.modules[i as usize].source.as_str()).collect();
+        ids.into_iter().zip(crate::sourcemap::escape_texts(&texts)).collect()
     }
 
     /// Where each anchor of one range came from, without numbering anything yet.

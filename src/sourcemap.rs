@@ -83,6 +83,8 @@ impl Encoder {
 pub struct Builder<'a> {
     pub sources: Vec<String>,
     pub contents: Vec<Option<std::borrow::Cow<'a, str>>>,
+    /// Texts of sources that were already escaped for JSON (with their quotes), in place of `contents`.
+    ready: Vec<Option<String>>,
     pub names: Vec<String>,
     name_index: std::collections::HashMap<String, u32>,
     mappings: String,
@@ -93,6 +95,15 @@ impl<'a> Builder<'a> {
     pub fn add_source(&mut self, path: String, content: Option<std::borrow::Cow<'a, str>>) -> u32 {
         self.sources.push(path);
         self.contents.push(content);
+        self.ready.push(None);
+        (self.sources.len() - 1) as u32
+    }
+
+    /// A source whose text was escaped ahead of time with [`escape_texts`]: it is written as it is.
+    pub fn add_source_escaped(&mut self, path: String, escaped: String) -> u32 {
+        self.sources.push(path);
+        self.contents.push(None);
+        self.ready.push(Some(escaped));
         (self.sources.len() - 1) as u32
     }
 
@@ -125,7 +136,7 @@ impl<'a> Builder<'a> {
 
     /// The finished map as JSON. `file` is the generated file's name.
     pub fn finish(&self, file: &str) -> String {
-        let size = self.contents.iter().flatten().map(|c| c.len() + 16).sum::<usize>() + self.mappings.len() + 4096;
+        let size = self.contents.iter().flatten().map(|c| c.len() + 16).sum::<usize>() + self.ready.iter().flatten().map(|c| c.len() + 1).sum::<usize>() + self.mappings.len() + 4096;
         let mut out = String::with_capacity(size);
         out.push_str("{\"version\":3,\"file\":");
         out.push_str(&json_string(file));
@@ -136,17 +147,18 @@ impl<'a> Builder<'a> {
             }
             out.push_str(&json_string(s));
         }
-        if self.contents.iter().any(|c| c.is_some()) {
+        if self.contents.iter().any(|c| c.is_some()) || self.ready.iter().any(|r| r.is_some()) {
             out.push_str("],\"sourcesContent\":[");
-            // Escaping the texts is most of the work for a big bundle: share it out.
-            let escaped = escape_all(&self.contents);
+            // Escaping the texts is most of the work for a big bundle: share it out (those escaped ahead of time are done).
+            let texts: Vec<Option<&str>> = self.contents.iter().zip(&self.ready).map(|(c, r)| if r.is_some() { None } else { c.as_deref() }).collect();
+            let escaped = escape_all(&texts);
             for (i, c) in escaped.iter().enumerate() {
                 if i > 0 {
                     out.push(',');
                 }
-                match c {
-                    Some(text) => out.push_str(text),
-                    None => out.push_str("null"),
+                match (&self.ready[i], c) {
+                    (Some(text), _) | (None, Some(text)) => out.push_str(text),
+                    (None, None) => out.push_str("null"),
                 }
             }
         }
@@ -212,12 +224,18 @@ pub fn read_vlq(text: &[u8], at: &mut usize) -> Option<i64> {
     Some(if result & 1 == 1 { -magnitude } else { magnitude })
 }
 
-/// `json_string` of every text, on all cores when there is much to do.
-fn escape_all(texts: &[Option<std::borrow::Cow<'_, str>>]) -> Vec<Option<String>> {
+/// `json_string` of every text, on all cores when there is much to do; for starting early, beside other work.
+pub fn escape_texts(texts: &[&str]) -> Vec<String> {
+    let some: Vec<Option<&str>> = texts.iter().map(|t| Some(*t)).collect();
+    escape_all(&some).into_iter().map(|t| t.expect("escaped")).collect()
+}
+
+/// `json_string` of every text that is there, on all cores when there is much to do.
+fn escape_all(texts: &[Option<&str>]) -> Vec<Option<String>> {
     let total: usize = texts.iter().flatten().map(|t| t.len()).sum();
     let workers = std::thread::available_parallelism().map_or(1, |n| n.get());
     if total < (1 << 20) || workers < 2 || texts.len() < 2 {
-        return texts.iter().map(|t| t.as_deref().map(json_string)).collect();
+        return texts.iter().map(|t| t.map(json_string)).collect();
     }
     let next = std::sync::atomic::AtomicUsize::new(0);
     let done: std::sync::Mutex<Vec<Option<String>>> = std::sync::Mutex::new(vec![None; texts.len()]);
@@ -589,5 +607,24 @@ mod tests {
         let json = b.finish("out.js");
         assert!(json.contains("\"mappings\":\"EAAA,G;"), "{json}");
         assert!(json.contains("\"names\":[]"));
+    }
+
+    #[test]
+    fn sources_escaped_ahead_of_time_read_the_same_as_those_escaped_at_the_end() {
+        let texts = ["a \"quoted\"\nline\t\\", "plain", "\u{2028}"];
+        let escaped = escape_texts(&texts);
+        let mut late = Builder::default();
+        let mut early = Builder::default();
+        for (i, text) in texts.iter().enumerate() {
+            late.add_source(format!("s{i}.js"), Some(std::borrow::Cow::Borrowed(*text)));
+            // The middle one is mixed in the other way: escaped late.
+            if i == 1 {
+                early.add_source(format!("s{i}.js"), Some(std::borrow::Cow::Borrowed(*text)));
+            } else {
+                early.add_source_escaped(format!("s{i}.js"), escaped[i].clone());
+            }
+        }
+        assert_eq!(late.finish("o.js"), early.finish("o.js"));
+        assert!(late.finish("o.js").contains("\\u2028"));
     }
 }
