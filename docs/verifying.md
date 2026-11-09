@@ -61,7 +61,7 @@ field with the workflow run id and the commit.
 curl -s -H "User-Agent: verify" https://crates.io/api/v1/crates/rathkit-pack/<version> | node -e "console.log(JSON.parse(require('fs').readFileSync(0)).version.trustpub_data)"
 ```
 
-For `0.1.0-alpha.1` that is run 41267948577 and commit 7484b538a2dcf4fbae2bf35f7c0de1e2888139a4. `0.1.0-alpha.0` was published by hand and has none. The signed
+For `0.1.0-alpha.2` that is run 42617736304 and commit 2697bc172f50190000c1983feeaceb471f6dce04, and for `0.1.0-alpha.1` run 41267948577 and commit 7484b538a2dcf4fbae2bf35f7c0de1e2888139a4. `0.1.0-alpha.0` was published by hand and has none. The signed
 `v<version>` tag, and the checksums and signatures of the release files above, are the record of what a version is, and the
 crate's source is the `src` folder of that tag. To compare:
 
