@@ -353,7 +353,10 @@ fn in_pieces(source: &str, layout: &Layout, ranges: &[std::ops::Range<usize>], o
     // The syntax trees and tokens of every piece are done with.
     drop(shared);
     drop(units);
-    release_free_memory();
+    // Only a big bundle has enough to give back for it to be worth the time.
+    if source.len() >= 2 << 20 {
+        release_free_memory();
+    }
     Ok(out)
 }
 
