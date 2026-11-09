@@ -58,6 +58,7 @@ Measure and gate: a benchmark suite of 15 workloads with real apps, warm rebuild
 - [ ] [1.8](https://github.com/rathkit/pack/issues/10) Corpus grown to 60 projects `P0`
 - [x] [3.14](https://github.com/rathkit/pack/issues/77) Add webpack and Rollup to the benchmark `P1`
 - [ ] [3.13](https://github.com/rathkit/pack/issues/79) Benchmark build plus type check, each tool set up the way it is most commonly used `P1`
+- [ ] [3.15](https://github.com/rathkit/pack/issues/82) Time: minify and source maps without a second parse, so esbuild is no longer faster in any case `P1`
 
 ### 0.3.0-beta.0
 
@@ -148,7 +149,6 @@ Other bundlers' configurations: tsup, tsdown, unbuild, Rolldown, Parcel, Farm an
 - [ ] [6.9](https://github.com/rathkit/pack/issues/57) Farm configuration `P2`
 - [ ] [6.10](https://github.com/rathkit/pack/issues/58) Bun.build API shape `P2`
 - [ ] [2.12](https://github.com/rathkit/pack/issues/78) An optional type checker package, the fastest, leanest and smallest to date, with nothing added to the rkp binary `P2`
-- [ ] [3.15](https://github.com/rathkit/pack/issues/82) Time: minify and source maps without a second parse, so esbuild is no longer faster in any case `P1`
 
 ### 1.0.0-rc.1
 
