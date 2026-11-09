@@ -1753,6 +1753,12 @@ fn run_build(job: &Job) -> Outcome {
         }
     }
     outcome.ok = status == ExitCode::SUCCESS;
+    // A build that is the whole run, with nothing to stop or clean up (no watching, no plugin process), leaves its graph, syntax trees and
+    // text to the system rather than freeing them one allocation at a time, which takes a few percent of a small build. What was written
+    // is written; the standard output is flushed on the way out.
+    if job.options.cache.is_none() && job.host.is_none() {
+        std::process::exit(if outcome.ok { 0 } else { 1 });
+    }
     if let Some(cache) = &job.options.cache {
         cache.store(graph);
     }
