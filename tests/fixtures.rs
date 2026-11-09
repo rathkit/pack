@@ -854,3 +854,40 @@ fn a_dynamic_import_with_a_variable_may_start_with_an_alias() {
     }
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// A big CommonJS module is minified in pieces cut inside its function, side by side; here the size limits are lowered so small modules
+/// are cut too. What the program prints must not change, and neither must it when the cutting is turned off.
+#[test]
+fn the_body_of_a_commonjs_module_can_be_minified_in_pieces() {
+    if Command::new("node").arg("--version").output().is_err() {
+        return;
+    }
+    let dir = scratch("nested");
+    let write = |name: &str, text: &str| std::fs::write(dir.join(name), text).unwrap();
+    // Flat statements, `this`, a `require` used as a value (so the module has a table of what it may require) and a leading comment.
+    write("util.cjs", "module.exports = { twice: (x) => x * 2, id: 'util' };\n");
+    write(
+        "flat.cjs",
+        "/* a leading comment */\n'use strict';\nvar count = 0;\nfunction bump(n) { count += n; return count; }\nvar util = require('./util.cjs');\nexports.bump = bump;\nexports.double = function (x) { return util.twice(x) + count; };\nvar pick = require;\nexports.viaTable = function (name) { return pick(name).id; };\nexports.fromThis = typeof this;\n",
+    );
+    // One function called at once, with its own `module`, around everything.
+    write(
+        "iife.cjs",
+        "var lib = {};\n((module) => {\n\"use strict\";\nvar secret = 41;\nfunction get() { return secret + 1; }\nfunction set(v) { secret = v; }\nvar Klass = class { constructor() { this.v = get(); } };\nmodule.exports = { get, set, make: () => new Klass() };\n})({ get exports() { return lib; }, set exports(v) { lib = v; } });\nmodule.exports = lib;\n",
+    );
+    write(
+        "main.js",
+        "import flat from './flat.cjs';\nimport iife from './iife.cjs';\nconsole.log(flat.bump(2), flat.double(4), flat.viaTable('./util.cjs'), flat.fromThis, iife.get(), (iife.set(5), iife.get()), iife.make().v);\n",
+    );
+    let expected = "2 10 util object 42 6 6";
+    for flags in [&["--minify"][..], &["--minify", "--keep-names"][..], &["--minify", "--sourcemap"][..]] {
+        let off = build_and_run(&dir, flags, &[("RATHKIT_NEST", "off"), ("RATHKIT_FRAGMENT_BYTES", "1")]);
+        let plain = std::fs::read_to_string(dir.join("out.mjs")).unwrap();
+        // `strict`: a piece that does not parse alone is an error, not a quiet fall back to one pass.
+        let cut = build_and_run(&dir, flags, &[("RATHKIT_NEST_BYTES", "1"), ("RATHKIT_FRAGMENT_BYTES", "1"), ("RATHKIT_FRAGMENTS", "strict")]);
+        let nested = std::fs::read_to_string(dir.join("out.mjs")).unwrap();
+        assert_eq!(off, expected, "{flags:?}: cutting off: {plain}");
+        assert_eq!(cut, expected, "{flags:?}: cut in pieces: {nested}");
+        assert_ne!(plain, nested, "{flags:?}: the bodies were not cut");
+    }
+}

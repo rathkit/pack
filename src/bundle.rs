@@ -413,6 +413,8 @@ struct Bundler<'a> {
     marks: std::sync::Mutex<Vec<Mark>>,
     /// Modules whose text can be tagged: it holds none of the tag characters.
     markable: Vec<bool>,
+    /// The output is minified, so the bodies of big CommonJS modules may be cut for the minifier (see `nest_plan`).
+    nesting: bool,
 }
 
 /// A stretch of a chunk's text, `start..end`, that `mark` accounts for.
@@ -452,6 +454,14 @@ enum SourceText {
     None,
     Module(ModuleId),
     Given(Option<String>),
+}
+
+/// Where the body of a CommonJS module is cut: the source offsets of the text kept before it, the boundaries between its pieces (the
+/// first is where the body starts and the last where it ends), and the text kept after it.
+struct Nest {
+    prefix: (u32, u32),
+    cuts: Vec<u32>,
+    suffix: (u32, u32),
 }
 
 /// What is made about the sources of a chunk while its text is minified: their JSON-escaped texts for the
@@ -530,6 +540,7 @@ impl<'a> Bundler<'a> {
             mapping: false,
             marks: std::sync::Mutex::new(Vec::new()),
             markable: Vec::new(),
+            nesting: false,
                 }
     }
 
@@ -664,6 +675,7 @@ impl<'a> Bundler<'a> {
         let chunk_infos = self.chunk_infos(&roots, &root_exports, &links);
         let timing = std::env::var_os("RATHKIT_TIMING").is_some();
         let mut raws = Vec::new();
+        self.nesting = options.minify.any();
         for c in 0..self.plan.chunks.len() {
             let mut exports: Vec<(String, Vec<Piece>)> = Vec::new();
             for (root, list) in &root_exports {
@@ -1252,10 +1264,23 @@ impl<'a> Bundler<'a> {
     fn split_tags(&self, raw: &str, layout: &mut crate::minify::Layout) -> (String, Vec<Span>) {
         let bytes = raw.as_bytes();
         // The offsets the layout holds move with the text they stand in.
-        let mut points: Vec<usize> = Vec::with_capacity(layout.cuts.len() + 2);
+        let mut points: Vec<usize> = Vec::with_capacity(layout.cuts.len() + 2 + 2 * layout.names.len());
         points.push(layout.head);
         points.extend_from_slice(&layout.cuts);
         points.push(layout.tail);
+        // The names marked in kept text are not cuts, but move the same way.
+        let cut_count = points.len();
+        for (range, _, _) in &layout.names {
+            points.push(range.start);
+            points.push(range.end);
+        }
+        let order: Vec<usize> = {
+            let mut order: Vec<usize> = (0..points.len()).collect();
+            order.sort_by_key(|&i| points[i]);
+            order
+        };
+        let sorted_points: Vec<usize> = order.iter().map(|&i| points[i]).collect();
+        let original_points = std::mem::replace(&mut points, sorted_points);
         let mut moved = vec![0usize; points.len()];
         let mut next_point = 0;
         let mut out = String::with_capacity(raw.len());
@@ -1323,9 +1348,24 @@ impl<'a> Bundler<'a> {
             next_point += 1;
         }
         out.push_str(&raw[run..]);
+        // `moved` follows the sorted points; put it back in the order they were listed in.
+        let mut listed = vec![0usize; moved.len()];
+        for (sorted, &original) in order.iter().enumerate() {
+            listed[original] = moved[sorted];
+        }
+        let moved = listed;
+        let _ = original_points;
+        // The ends of fixed text and of bodies are cuts, so they move with them.
+        let find = |at: usize| moved[1 + layout.cuts.binary_search(&at).expect("an end is a cut")];
+        let fixed: Vec<_> = layout.fixed.iter().map(|r| find(r.start)..find(r.end)).collect();
+        let bodies: Vec<_> = layout.bodies.iter().map(|r| find(r.start)..find(r.end)).collect();
+        let names: Vec<_> = layout.names.iter().enumerate().map(|(i, (_, scope, declares))| (moved[cut_count + 2 * i]..moved[cut_count + 2 * i + 1], *scope, *declares)).collect();
         layout.head = moved[0];
-        layout.tail = moved[moved.len() - 1];
-        layout.cuts = moved[1..moved.len() - 1].to_vec();
+        layout.tail = moved[cut_count - 1];
+        layout.cuts = moved[1..cut_count - 1].to_vec();
+        layout.fixed = fixed;
+        layout.bodies = bodies;
+        layout.names = names;
         (out, spans)
     }
 
@@ -1438,6 +1478,81 @@ impl<'a> Bundler<'a> {
             eprintln!("  map json: {:.1} ms", loop_done.elapsed().as_secs_f64() * 1000.0);
         }
         json
+    }
+
+    /// How the body of a big CommonJS module can be cut for the minifier: the statements it holds are boundaries it can take
+    /// pieces between. A module that is one function called at once (`var ts = {}; ((module) => { ... })(...)`) is cut inside that
+    /// function. `None` when the module is small, is not made of statements that stand alone, or has edits where a cut would fall.
+    fn nest_plan(&self, module: &Module, edits: &[Edit]) -> Option<Nest> {
+        // The least size worth it: a smaller module costs more in names shared out than it gains. (`RATHKIT_NEST_BYTES` sets it,
+        // for checking small programs; `RATHKIT_NEST=off` turns the cutting off.)
+        let forced = std::env::var("RATHKIT_NEST_BYTES").ok().and_then(|v| v.parse::<usize>().ok());
+        if !self.nesting || module.source.len() < forced.unwrap_or(128 * 1024) || std::env::var("RATHKIT_NEST").is_ok_and(|v| v == "off") {
+            return None;
+        }
+        let parsed = module.parsed.as_ref()?;
+        let ast = &parsed.ast;
+        let NodeKind::Program(list) = ast[ast.root].kind else { return None };
+        let statements = ast.list(list);
+        let start = if module.source.starts_with("#!") { module.source.find('\n').unwrap_or(module.source.len()) as u32 } else { 0 };
+        let len = module.source.len() as u32;
+        // The statement that is most of the module, if there is one.
+        let biggest = statements.iter().max_by_key(|&&n| ast[n].span.end - ast[n].span.start).copied()?;
+        let mut inner: Vec<NodeId> = statements.to_vec();
+        let (mut from, mut to) = (start, len);
+        if (ast[biggest].span.end - ast[biggest].span.start) as usize * 10 >= module.source.len() * 6 {
+            // `(function () { ... })()` or `(() => { ... })()`: the statements of its block.
+            let NodeKind::ExprStmt(call) = ast[biggest].kind else { return None };
+            let NodeKind::Call { callee, .. } = ast[call].kind else { return None };
+            let NodeKind::Function { body, .. } = ast[callee].kind else { return None };
+            if ast[callee].has(flags::EXPR_BODY) {
+                return None;
+            }
+            let NodeKind::Block(block) = ast[body].kind else { return None };
+            inner = ast.list(block).to_vec();
+            from = ast[body].span.start + 1;
+            to = ast[body].span.end - 1;
+        }
+        if inner.len() < if forced.is_some() { 2 } else { 4 } {
+            return None;
+        }
+        // What stays as text must be plain: no regular expression or template that its white space could change.
+        let before = &module.source[start as usize..from as usize];
+        let after = &module.source[to as usize..];
+        if !crate::minify::plain_text(before) || !crate::minify::plain_text(after) {
+            return None;
+        }
+        // An edit inside the text kept as it is, or one a cut would fall in or on the edge of, would be written twice or not at all.
+        let touches = |a: u32, b: u32| edits.iter().any(|e| e.start < b && e.end > a);
+        if (from > start && touches(start, from)) || (to < len && touches(to, len)) {
+            return None;
+        }
+        let mut sorted: Vec<(u32, u32)> = edits.iter().map(|e| (e.start, e.end)).collect();
+        sorted.sort_unstable();
+        let mut reach: Vec<u32> = Vec::with_capacity(sorted.len());
+        let mut top = 0;
+        for &(_, end) in &sorted {
+            top = top.max(end);
+            reach.push(top);
+        }
+        let safe = |at: u32| {
+            let before_at = sorted.partition_point(|e| e.0 < at);
+            let straddles = before_at > 0 && reach[before_at - 1] > at;
+            let on_edge = sorted[before_at..].iter().take_while(|e| e.0 == at).any(|e| e.1 == at);
+            !straddles && !on_edge
+        };
+        // Boundaries after statements, about 32 KB apart (the minifier groups them further).
+        let mut cuts = vec![from];
+        let mut last = from;
+        for &n in &inner {
+            let end = ast[n].span.end;
+            if end > last && end - last >= if forced.is_some() { 1 } else { 32 * 1024 } && end < to && safe(end) {
+                cuts.push(end);
+                last = end;
+            }
+        }
+        cuts.push(to);
+        Some(Nest { prefix: (start, from), cuts, suffix: (to, len) })
     }
 
     /// Where the lines of the modules a chunk holds begin, by module number: found once, beside the minifier, not by every range of the trace.
@@ -3113,6 +3228,16 @@ fn shift_map_lines(map: &str, lines: usize) -> String {
     Json::Object(fields).to_string()
 }
 
+/// Records the words of generated text that the minifier may rename (`classify` says for which scope, and whether the word declares
+/// a name of it; `None` leaves a word alone). `at` is where the text will stand.
+fn mark_names(text: &str, at: usize, names: &mut Vec<(std::ops::Range<usize>, usize, bool)>, classify: impl Fn(&str) -> Option<(usize, bool)>) {
+    for span in crate::minify::word_spans(text) {
+        if let Some((scope, declares)) = classify(&text[span.clone()]) {
+            names.push((at + span.start..at + span.end, scope, declares));
+        }
+    }
+}
+
 fn json_string(text: &str) -> String {
     let mut out = String::from("\"");
     for c in text.chars() {
@@ -3384,6 +3509,10 @@ impl Bundler<'_> {
         };
         // Where a top-level statement has ended, so the minifier can work on the parts side by side.
         let mut cuts: Vec<usize> = Vec::new();
+        // Text kept as it is around the bodies of big CommonJS modules that are cut into pieces, and those bodies.
+        let mut fixed: Vec<std::ops::Range<usize>> = Vec::new();
+        let mut bodies: Vec<std::ops::Range<usize>> = Vec::new();
+        let mut shared_names: Vec<(std::ops::Range<usize>, usize, bool)> = Vec::new();
         let mut head = 0;
         // Externals reach CommonJS and IIFE output through `require` or a global, with the
         // same interop the `import` forms have.
@@ -3573,7 +3702,10 @@ impl Bundler<'_> {
             }
             let Some(Code::Wrapped { edits, json, require_cases }) = self.code.get(&module.id) else { continue };
             let name = &names[&Key::Require(module.id)];
-            let body = if *json {
+            let nest = if *json { None } else { self.nest_plan(module, edits) };
+            let body = if nest.is_some() {
+                String::new()
+            } else if *json {
                 let trimmed = module.source.trim();
                 let from = (trimmed.as_ptr() as usize - module.source.as_ptr() as usize) as u32;
                 let mut body = String::from("module.exports = ");
@@ -3585,6 +3717,52 @@ impl Bundler<'_> {
                 let start = if module.source.starts_with("#!") { module.source.find('\n').unwrap_or(module.source.len()) as u32 } else { 0 };
                 self.render(module.id, start, module.source.len() as u32, edits, names)
             };
+            if let Some(nest) = &nest {
+                // The module's body is cut into pieces the minifier takes side by side: what comes before and after it stays as text,
+                // with its names marked so the minifier writes them as it names them elsewhere.
+                let scope = bodies.len() + 1;
+                let open = match require_cases {
+                    None => format!("var {name} = __cjs(function (exports, module) {{\n"),
+                    Some(_) => format!("var {name} = __cjs(function (exports, module, require) {{\n"),
+                };
+                let close = match require_cases {
+                    None => "\n});\n".to_string(),
+                    Some(cases) => {
+                        // The arrow's two parameters are names of the module's scope, so they are shortened with the rest.
+                        let mut table = String::from("__req((__i, __r) => { switch (__i) { ");
+                        let list: Vec<String> = cases.iter().map(|(spec, pieces)| format!("case {}: return {}", json_string(spec), self.text_of(pieces, names))).collect();
+                        table.push_str(&list.join("; "));
+                        let url = if format != Format::Esm { "0".to_string() } else if self.original_paths { file_url(&module.path) } else { "import.meta.url".to_string() };
+                        let _ = write!(table, " }} return __r(__i) }}, {url})");
+                        format!("\n}}, {table});\n")
+                    }
+                };
+                let at = out.len();
+                mark_names(&open, at, &mut shared_names, |word| match word {
+                    "var" | "function" => None,
+                    w if w == name.as_str() => Some((0, true)),
+                    "exports" | "module" | "require" => Some((scope, true)),
+                    _ => Some((0, false)),
+                });
+                out.push_str(&open);
+                out.push_str(&self.render(module.id, nest.prefix.0, nest.prefix.1, edits, names));
+                fixed.push(at..out.len());
+                cuts.push(out.len());
+                let body_from = out.len();
+                for pair in nest.cuts.windows(2) {
+                    out.push_str(&self.render(module.id, pair[0], pair[1], edits, names));
+                    cuts.push(out.len());
+                }
+                bodies.push(body_from..out.len());
+                let at = out.len();
+                out.push_str(&self.render(module.id, nest.suffix.0, nest.suffix.1, edits, names));
+                let close_at = out.len();
+                mark_names(&close, close_at, &mut shared_names, |word| if matches!(word, "__i" | "__r") { Some((0, true)) } else { Some((0, false)) });
+                out.push_str(&close);
+                fixed.push(at..out.len());
+                cuts.push(out.len());
+                continue;
+            }
             match require_cases {
                 None => {
                     let _ = write!(out, "var {name} = __cjs(function (exports, module) {{\n{body}\n}});\n");
@@ -3752,6 +3930,9 @@ impl Bundler<'_> {
             out.push_str(if self.lowers_async_functions() { "});\n" } else { "})();\n" });
             // The pieces the minifier would take side by side cannot be cut inside the wrapper.
             cuts.clear();
+            fixed.clear();
+            bodies.clear();
+            shared_names.clear();
         }
         let mut tail = None;
         if format == Format::Iife {
@@ -3779,7 +3960,7 @@ impl Bundler<'_> {
             }
             let _ = writeln!(out, "export {{ {} }};", list.join(", "));
         }
-        let layout = crate::minify::Layout { head, tail: tail.unwrap_or(out.len()), cuts, reserved: if format == Format::Iife { self.global_name.iter().cloned().collect() } else { Vec::new() } };
+        let layout = crate::minify::Layout { head, tail: tail.unwrap_or(out.len()), cuts, reserved: if format == Format::Iife { self.global_name.iter().cloned().collect() } else { Vec::new() }, fixed, names: shared_names, bodies };
         (out, layout)
     }
 }

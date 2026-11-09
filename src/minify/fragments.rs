@@ -10,6 +10,14 @@
 //! statements on either side of a cut are never merged into one declaration. If any piece
 //! fails to parse on its own (the bundler's cuts were wrong, or a source file held text that
 //! looks like one) the whole bundle is minified in one pass instead.
+//!
+//! The statements of a big CommonJS module can be pieces too: the module is one statement of the
+//! bundle, but its body is a list of statements, and the opening and closing of its function are
+//! text kept as written (the layout's `fixed` ranges). The names the pieces of such a body declare
+//! belong to the function, not to the bundle, so each body is a group of its own (`bodies`): it
+//! reuses the short names of the bundle except those its pieces read. What the kept text and the
+//! pieces both name (`names`) is chosen with them. The text written is not what one pass writes
+//! (names are chosen by group, not by frequency in one scope), so these are checked by running programs.
 
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -26,6 +34,18 @@ pub struct Layout {
     pub cuts: Vec<usize>,
     /// Names the wrapper declares outside the text: no new name may be one of them.
     pub reserved: Vec<String>,
+    /// Text between `head` and `tail` that is not minified, only stripped of white space and comments: the opening and closing of a
+    /// function whose body is cut into pieces (a CommonJS module's wrapper). It holds no statement a piece could take and nothing
+    /// it declares may be renamed; every name it writes is kept as written wherever a piece declares it. Both ends of each range are in `cuts`.
+    pub fixed: Vec<std::ops::Range<usize>>,
+    /// Names written in `fixed` text that belong to the pieces: `(where, scope, declares)`. The scope is 0 for the bundle's own top level
+    /// or `k + 1` for the body `k`. A name that `declares` is a binding of that scope that no piece declares (the module's own name,
+    /// the parameters of its function); the others are read from a piece's scope when a piece declares them. All are renamed with the rest.
+    /// In order of position, each inside one of the fixed ranges; the words of fixed text that are not here stay as written.
+    pub names: Vec<(std::ops::Range<usize>, usize, bool)>,
+    /// Ranges of pieces that are the body of one function: what such a body declares is not visible outside it, nor to another body.
+    /// Both ends are in `cuts`, and no range holds another.
+    pub bodies: Vec<std::ops::Range<usize>>,
 }
 
 /// Bundles smaller than this are not worth cutting.
@@ -62,12 +82,24 @@ fn workers() -> usize {
     std::thread::available_parallelism().map_or(1, |n| n.get())
 }
 
-/// The byte ranges of the pieces: the text between `head` and `tail`, cut at the layout's cuts
+/// The byte ranges of the pieces: the text between `head` and `tail` that is not fixed, cut at the layout's cuts
 /// into parts of about the same size.
 fn pieces(len: usize, layout: &Layout) -> Vec<std::ops::Range<usize>> {
     let (head, tail) = (layout.head, layout.tail.min(len));
-    let size = tail.saturating_sub(head);
     let threads = workers();
+    // The runs of text between the fixed ranges.
+    let mut regions: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut from = head;
+    for f in &layout.fixed {
+        if f.start > from {
+            regions.push(from..f.start);
+        }
+        from = f.end;
+    }
+    if tail > from {
+        regions.push(from..tail);
+    }
+    let size: usize = regions.iter().map(|r| r.len()).sum();
     // `RATHKIT_FRAGMENT_BYTES` sets both the least size worth cutting and the size of a piece
     // (the tests use a small one to cut small programs into many pieces).
     let forced = std::env::var("RATHKIT_FRAGMENT_BYTES").ok().and_then(|v| v.parse::<usize>().ok());
@@ -76,17 +108,21 @@ fn pieces(len: usize, layout: &Layout) -> Vec<std::ops::Range<usize>> {
     }
     let target = forced.unwrap_or_else(|| (size / (threads * 4)).clamp(24 * 1024, 2 * 1024 * 1024));
     let mut out = Vec::new();
-    let mut start = head;
-    for &cut in &layout.cuts {
-        if cut > start && cut < tail && cut - start >= target {
-            out.push(start..cut);
-            start = cut;
+    for region in regions {
+        let first = out.len();
+        let mut start = region.start;
+        for &cut in &layout.cuts {
+            if cut > start && cut < region.end && cut - start >= target {
+                out.push(start..cut);
+                start = cut;
+            }
         }
-    }
-    // A small remainder joins the piece before it.
-    match out.last_mut() {
-        Some(last) if tail - start < target / 2 => last.end = tail,
-        _ => out.push(start..tail),
+        // A small remainder joins the piece before it (in the same run of text).
+        let joins = out.len() > first && region.end - start < target / 2;
+        match out.last_mut() {
+            Some(last) if joins => last.end = region.end,
+            _ => out.push(start..region.end),
+        }
     }
     // One piece that is most of the text (a huge module is a single statement) leaves nothing to
     // gain, and one pass overlaps its own steps better.
@@ -123,6 +159,8 @@ struct Unit<'s> {
     source: &'s str,
     /// Where the piece starts in the whole text.
     start: usize,
+    /// 0 for the bundle's own top level; `k` for the body of function `k - 1` of the layout's `bodies`.
+    group: usize,
     parsed: parser::Parsed,
     facts: Facts,
     prep: Option<Prep>,
@@ -174,14 +212,24 @@ fn in_pieces(source: &str, layout: &Layout, ranges: &[std::ops::Range<usize>], o
             }
         }
         let unresolved = counts.into_iter().collect();
-        Ok(Unit { source: text, start: range.start, parsed, facts, prep, plan, asi, unresolved })
+        let group = layout.bodies.iter().position(|b| b.start <= range.start && range.end <= b.end).map_or(0, |k| k + 1);
+        Ok(Unit { source: text, start: range.start, group, parsed, facts, prep, plan, asi, unresolved })
     });
     let units: Vec<Unit> = analyzed.into_iter().collect::<Result<_, _>>()?;
     lap("parse and analyze (pieces)");
 
     // 2. Name the top level of the bundle.
-    let shared = if options.identifiers { Some(top_level(&units, layout)?) } else { None };
+    let shared = if options.identifiers { Some(top_level(&units, layout, source)?) } else { None };
     lap("top level names");
+
+    // What comes right after a piece: another piece, or text that is kept (which needs the statement ended, unless it closes a block).
+    let follows: Vec<bool> = (0..ranges.len())
+        .map(|i| match ranges.get(i + 1) {
+            Some(next) if next.start == ranges[i].end => true,
+            Some(next) => !source[ranges[i].end..next.start].trim_start().starts_with('}'),
+            None => false,
+        })
+        .collect();
 
     // 3. Name everything inside the pieces and write them.
     let written: Vec<(String, Vec<Anchor>)> = par_map(units.len(), |i| {
@@ -189,10 +237,10 @@ fn in_pieces(source: &str, layout: &Layout, ranges: &[std::ops::Range<usize>], o
         let tokens = &unit.parsed.tokens;
         let mut renames = Renames::new(tokens.len());
         if let (Some(prep), Some(top)) = (&unit.prep, &shared) {
-            unit.facts.plan_renames(&unit.parsed.ast, &unit.parsed.semantic, tokens, unit.source, prep, &top.avoid, Some(&top.names), &mut renames);
+            unit.facts.plan_renames(&unit.parsed.ast, &unit.parsed.semantic, tokens, unit.source, prep, &top.avoid, Some(&top.names[unit.group]), &mut renames);
         }
         let mut found = anchors.is_some().then(Vec::new);
-        let out = emit(unit.source, tokens, &renames, &unit.asi, &unit.facts, &options, unit.plan.as_ref(), found.as_mut(), i + 1 < units.len());
+        let out = emit(unit.source, tokens, &renames, &unit.asi, &unit.facts, &options, unit.plan.as_ref(), found.as_mut(), follows[i]);
         (out, found.unwrap_or_default())
     });
     lap("name and write (pieces)");
@@ -210,7 +258,38 @@ fn in_pieces(source: &str, layout: &Layout, ranges: &[std::ops::Range<usize>], o
     };
     let mut out = String::with_capacity(source.len() / 2);
     out.push_str(&wrapper(&source[..layout.head], false));
+    let mut at = layout.head;
+    // The text kept as written, with the names it shares with the pieces written as they were named.
+    let spliced = |from: usize, to: usize| -> String {
+        let (Some(top), true) = (&shared, options.identifiers) else { return source[from..to].to_string() };
+        let mut text = String::with_capacity(to - from);
+        let mut at = from;
+        let first = layout.names.partition_point(|n| n.0.start < from);
+        for (range, scope, _) in layout.names[first..].iter().take_while(|n| n.0.end <= to) {
+            let old = &source[range.clone()];
+            text.push_str(&source[at..range.start]);
+            text.push_str(top.names[*scope].get(old).map_or(old, String::as_str));
+            at = range.end;
+        }
+        text.push_str(&source[at..to]);
+        text
+    };
+    let keep_text = |out: &mut String, from: usize, to: usize| {
+        let text = wrapper(&spliced(from, to), false);
+        if compact {
+            if let (Some(&last), Some(&first)) = (out.as_bytes().last(), text.as_bytes().first()) {
+                if separator_needed(last, first, out, false) {
+                    out.push(' ');
+                }
+            }
+        }
+        out.push_str(&text);
+    };
     for (unit, (text, found)) in units.iter().zip(written) {
+        if unit.start > at {
+            keep_text(&mut out, at, unit.start);
+        }
+        at = unit.start + unit.source.len();
         if compact {
             if let (Some(&last), Some(&first)) = (out.as_bytes().last(), text.as_bytes().first()) {
                 if separator_needed(last, first, &out, false) {
@@ -224,7 +303,11 @@ fn in_pieces(source: &str, layout: &Layout, ranges: &[std::ops::Range<usize>], o
         }
         out.push_str(&text);
     }
-    let tail = wrapper(&source[layout.tail.min(source.len())..], true);
+    let end = layout.tail.min(source.len());
+    if at < end {
+        keep_text(&mut out, at, end);
+    }
+    let tail = wrapper(&source[end..], true);
     if compact {
         if let (Some(&last), Some(&first)) = (out.as_bytes().last(), tail.as_bytes().first()) {
             if separator_needed(last, first, &out, false) {
@@ -238,20 +321,26 @@ fn in_pieces(source: &str, layout: &Layout, ranges: &[std::ops::Range<usize>], o
 
 /// What the pieces share.
 struct TopLevel<'a> {
-    /// The new name of every name declared at the top level of some piece.
-    names: HashMap<&'a str, String>,
+    /// The new name of every name declared at the top level of some piece, for the pieces of each group: what a piece of the
+    /// bundle's own top level (group 0) sees is its group's names, and a piece in a function body sees its body's and then the bundle's.
+    names: Vec<HashMap<&'a str, String>>,
     avoid: Avoid<'a>,
 }
 
 /// Chooses the names of the bundle's top level, most used first, as one pass over one scope would.
-fn top_level<'a>(units: &'a [Unit], layout: &'a Layout) -> Result<TopLevel<'a>, String> {
+/// The names of a function body (a group of pieces) and of the bundle are chosen together, so that none is given twice.
+fn top_level<'a>(units: &'a [Unit], layout: &'a Layout, source: &'a str) -> Result<TopLevel<'a>, String> {
     struct Group<'a> {
         name: &'a str,
+        scope: usize,
         uses: u32,
         fixed: bool,
     }
+    let scopes = layout.bodies.len() + 1;
     let mut groups: Vec<Group> = Vec::new();
-    let mut index: HashMap<&str, usize> = HashMap::default();
+    let mut index: HashMap<(usize, &str), usize> = HashMap::default();
+    // The group a name means from a piece in `scope`: the body's own, else the bundle's.
+    let lookup = |index: &HashMap<(usize, &str), usize>, scope: usize, name: &str| -> Option<usize> { index.get(&(scope, name)).or_else(|| if scope != 0 { index.get(&(0, name)) } else { None }).copied() };
     let mut eval = false;
     for unit in units {
         let (ast, sem) = (&unit.parsed.ast, &unit.parsed.semantic);
@@ -264,8 +353,8 @@ fn top_level<'a>(units: &'a [Unit], layout: &'a Layout) -> Result<TopLevel<'a>, 
                 continue;
             }
             let name = ast.atom(sem.symbol(sym).name);
-            let g = *index.entry(name).or_insert_with(|| {
-                groups.push(Group { name, uses: 0, fixed: false });
+            let g = *index.entry((unit.group, name)).or_insert_with(|| {
+                groups.push(Group { name, scope: unit.group, uses: 0, fixed: false });
                 groups.len() - 1
             });
             groups[g].uses += prep.uses[c];
@@ -274,14 +363,14 @@ fn top_level<'a>(units: &'a [Unit], layout: &'a Layout) -> Result<TopLevel<'a>, 
     }
     // `undefined` read in one piece is the global unless another declares it; the plan was made
     // without knowing, so leave it to one pass.
-    if index.contains_key("undefined") {
+    if groups.iter().any(|g| g.name == "undefined") {
         return Err("a piece declares `undefined`".to_string());
     }
     // A name given to an anonymous function by an assignment in a piece other than the declaring one.
     for unit in units {
         if let Some(prep) = &unit.prep {
             for &a in &prep.inferred_outer {
-                if let Some(&g) = index.get(unit.parsed.ast.atom(a)) {
+                if let Some(g) = lookup(&index, unit.group, unit.parsed.ast.atom(a)) {
                     groups[g].fixed = true;
                 }
             }
@@ -294,13 +383,47 @@ fn top_level<'a>(units: &'a [Unit], layout: &'a Layout) -> Result<TopLevel<'a>, 
         }
     }
     let mut kept: HashSet<&str> = layout.reserved.iter().map(String::as_str).collect();
+    // Names the kept text shares with the pieces take part like any other: a binding no piece declares is one more name of its scope.
+    for (range, scope, declares) in &layout.names {
+        let name = &source[range.clone()];
+        match index.get(&(*scope, name)).copied() {
+            Some(g) => groups[g].uses += 1,
+            None if *declares => {
+                groups.push(Group { name, scope: *scope, uses: 1, fixed: false });
+                index.insert((*scope, name), groups.len() - 1);
+            }
+            // Not a name of any piece (a keyword, a global): it stays, and no new name is that.
+            None => {
+                kept.insert(name);
+            }
+        }
+    }
+    // The rest of the text that is kept as written names things as they are: whatever a piece declares under such a name stays, and no new name is that.
+    for range in &layout.fixed {
+        let mut at = range.start;
+        let first = layout.names.partition_point(|n| n.0.start < range.start);
+        for (named, _, _) in layout.names[first..].iter().take_while(|n| n.0.end <= range.end) {
+            for word in words(&source[at..named.start]) {
+                kept.insert(word);
+            }
+            at = named.end;
+        }
+        for word in words(&source[at..range.end]) {
+            kept.insert(word);
+        }
+    }
+    for g in &mut groups {
+        if kept.contains(g.name) {
+            g.fixed = true;
+        }
+    }
     let mut globals: HashSet<&str> = HashSet::default();
     for unit in units {
         let ast = &unit.parsed.ast;
         for &(atom, count) in &unit.unresolved {
             let name = ast.atom(atom);
-            match index.get(name) {
-                Some(&g) => groups[g].uses += count,
+            match lookup(&index, unit.group, name) {
+                Some(g) => groups[g].uses += count,
                 None => {
                     globals.insert(name);
                 }
@@ -310,42 +433,218 @@ fn top_level<'a>(units: &'a [Unit], layout: &'a Layout) -> Result<TopLevel<'a>, 
             kept.extend(prep.kept.iter().map(|&a| ast.atom(a)));
         }
     }
-    let mut names: HashMap<&str, String> = HashMap::default();
+    let mut names: Vec<HashMap<&str, String>> = (0..scopes).map(|_| HashMap::default()).collect();
     let mut taken: HashSet<&str> = HashSet::default();
-    let mut todo: Vec<usize> = Vec::new();
+    let mut todo: Vec<Vec<usize>> = vec![Vec::new(); scopes];
     for (i, g) in groups.iter().enumerate() {
         if g.fixed {
-            names.insert(g.name, g.name.to_string());
+            names[g.scope].insert(g.name, g.name.to_string());
             kept.insert(g.name);
             taken.insert(g.name);
         } else {
-            todo.push(i);
+            todo[g.scope].push(i);
         }
     }
-    todo.sort_by_key(|&i| std::cmp::Reverse(groups[i].uses));
-    let mut next = 0usize;
-    let mut chosen: HashSet<String> = HashSet::default();
-    for i in todo {
-        let name = loop {
-            let candidate = name_at(next);
-            next += 1;
-            if is_reserved(&candidate) || kept.contains(candidate.as_str()) || globals.contains(candidate.as_str()) || taken.contains(candidate.as_str()) || chosen.contains(&candidate) {
-                continue;
+    // The bundle's own top level first, then each body: a body may reuse a name of the bundle unless one of its pieces reads that one.
+    for scope in 0..scopes {
+        let mut list = std::mem::take(&mut todo[scope]);
+        list.sort_by_key(|&i| std::cmp::Reverse(groups[i].uses));
+        let mut avoid: HashSet<String> = HashSet::default();
+        if scope > 0 {
+            for unit in units.iter().filter(|u| u.group == scope) {
+                for &(atom, _) in &unit.unresolved {
+                    let name = unit.parsed.ast.atom(atom);
+                    if !index.contains_key(&(scope, name)) {
+                        if let Some(outer) = names[0].get(name) {
+                            avoid.insert(outer.clone());
+                        }
+                    }
+                }
             }
-            break candidate;
-        };
-        chosen.insert(name.clone());
-        names.insert(groups[i].name, name);
+        }
+        let mut next = 0usize;
+        let mut chosen: HashSet<String> = HashSet::default();
+        for i in list {
+            let name = loop {
+                let candidate = name_at(next);
+                next += 1;
+                if is_reserved(&candidate) || kept.contains(candidate.as_str()) || globals.contains(candidate.as_str()) || taken.contains(candidate.as_str()) || chosen.contains(&candidate) || avoid.contains(&candidate) {
+                    continue;
+                }
+                break candidate;
+            };
+            chosen.insert(name.clone());
+            names[scope].insert(groups[i].name, name);
+        }
+    }
+    // A piece in a body sees the bundle's names too, except those the body declares itself.
+    if scopes > 1 {
+        let outer = names[0].clone();
+        for body in names.iter_mut().skip(1) {
+            for (k, v) in &outer {
+                body.entry(k).or_insert_with(|| v.clone());
+            }
+        }
     }
     Ok(TopLevel { names, avoid: Avoid { kept, globals } })
 }
 
-/// The text with the white space that carries no meaning taken out.
+/// Whether a text that is kept as written is safe to take white space and comments out of: no template literal, and no `/` that is not
+/// a comment (which could be a regular expression).
+pub fn plain_text(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'`' => return false,
+            quote @ (b'"' | b'\'') => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != quote {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i += 2;
+            }
+            b'/' => return false,
+            _ => i += 1,
+        }
+    }
+    true
+}
+
+/// Where the words of a text are: names, keywords and numbers' letters outside strings and comments and not after a `.`.
+pub fn word_spans(text: &str) -> Vec<std::ops::Range<usize>> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$' || b >= 0x80;
+    let mut after_dot = false;
+    while i < bytes.len() {
+        match bytes[i] {
+            quote @ (b'"' | b'\'' | b'`') => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != quote {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+                after_dot = false;
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i += 2;
+            }
+            b'.' => {
+                after_dot = true;
+                i += 1;
+            }
+            b if b.is_ascii_whitespace() => i += 1,
+            b if is_word(b) => {
+                let from = i;
+                while i < bytes.len() && is_word(bytes[i]) {
+                    i += 1;
+                }
+                if !after_dot && !bytes[from].is_ascii_digit() {
+                    out.push(from..i);
+                }
+                after_dot = false;
+            }
+            _ => {
+                after_dot = false;
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// The words of a text kept as written: what could be a name, outside strings and comments.
+fn words(text: &str) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$' || b >= 0x80;
+    while i < bytes.len() {
+        match bytes[i] {
+            quote @ (b'"' | b'\'' | b'`') => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != quote {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i += 2;
+            }
+            b if is_word(b) => {
+                let from = i;
+                while i < bytes.len() && is_word(bytes[i]) {
+                    i += 1;
+                }
+                if !bytes[from].is_ascii_digit() {
+                    out.push(&text[from..i.min(bytes.len())]);
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    out
+}
+
+/// The text with the white space that carries no meaning, and the comments, taken out. Strings are left as they are.
 fn squeeze(text: &str) -> String {
+    let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
     let mut gap = false;
-    for ch in text.chars() {
+    let mut i = 0;
+    while i < bytes.len() {
+        let ch = text[i..].chars().next().expect("a character");
         if ch.is_whitespace() {
+            gap = true;
+            i += ch.len_utf8();
+            continue;
+        }
+        // A comment is a gap.
+        if ch == '/' && bytes.get(i + 1) == Some(&b'/') {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            gap = true;
+            continue;
+        }
+        if ch == '/' && bytes.get(i + 1) == Some(&b'*') {
+            i += 2;
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i = (i + 2).min(bytes.len());
             gap = true;
             continue;
         }
@@ -359,7 +658,19 @@ fn squeeze(text: &str) -> String {
             }
             gap = false;
         }
+        if matches!(ch, '"' | '\'' | '`') {
+            let quote = bytes[i];
+            let from = i;
+            i += 1;
+            while i < bytes.len() && bytes[i] != quote {
+                i += if bytes[i] == b'\\' { 2 } else { 1 };
+            }
+            i = (i + 1).min(bytes.len());
+            out.push_str(&text[from..i]);
+            continue;
+        }
         out.push(ch);
+        i += ch.len_utf8();
     }
     out
 }
@@ -388,7 +699,7 @@ export { counter as total, bump };
 
     fn compare(options: Options) {
         let source = BUNDLE;
-        let layout = Layout { head: 0, tail: source.len(), cuts: cuts(source), reserved: Vec::new() };
+        let layout = Layout { head: 0, tail: source.len(), cuts: cuts(source), reserved: Vec::new(), ..Layout::default() };
         // Cut after every second statement.
         let ranges: Vec<_> = layout.cuts.iter().step_by(2).copied().scan(0, |start, end| {
             let r = *start..end;
@@ -427,7 +738,7 @@ export { counter as total, bump };
     fn a_name_read_in_another_piece_is_renamed_the_same_everywhere() {
         let options = Options { whitespace: true, identifiers: true, syntax: false, keep_top_level: false, keep_names: None };
         let source = "function helper(x) { return x + 1; }\nvar r = helper(2);\nconsole.log(r, helper(3));\n";
-        let layout = Layout { head: 0, tail: source.len(), cuts: cuts(source), reserved: Vec::new() };
+        let layout = Layout { head: 0, tail: source.len(), cuts: cuts(source), reserved: Vec::new(), ..Layout::default() };
         let c = cuts(source);
         let ranges = vec![0..c[0], c[0]..c[1], c[1]..source.len()];
         let out = in_pieces(source, &layout, &ranges, &options, None).unwrap();
@@ -439,7 +750,7 @@ export { counter as total, bump };
         let options = Options { whitespace: true, identifiers: true, syntax: false, keep_top_level: false, keep_names: Some(true) };
         let source = "var loose, other;\nloose = function () { return 1; };\nother = () => loose();\nconsole.log(loose.name, other.name);\n";
         let c = cuts(source);
-        let layout = Layout { head: 0, tail: source.len(), cuts: c.clone(), reserved: Vec::new() };
+        let layout = Layout { head: 0, tail: source.len(), cuts: c.clone(), reserved: Vec::new(), ..Layout::default() };
         let ranges = vec![0..c[0], c[0]..c[1], c[1]..c[2], c[2]..source.len()];
         let out = in_pieces(source, &layout, &ranges, &options, None).unwrap();
         assert_eq!(out, run(source, &options, None, &[]).unwrap());
@@ -451,7 +762,7 @@ export { counter as total, bump };
         let options = Options { whitespace: true, identifiers: true, syntax: true, keep_top_level: false, keep_names: None };
         let source = "var undefined = 5;\nconsole.log(undefined);\n";
         let c = cuts(source);
-        let layout = Layout { head: 0, tail: source.len(), cuts: c.clone(), reserved: Vec::new() };
+        let layout = Layout { head: 0, tail: source.len(), cuts: c.clone(), reserved: Vec::new(), ..Layout::default() };
         assert!(in_pieces(source, &layout, &[0..c[0], c[0]..source.len()], &options, None).is_err());
     }
 
@@ -461,7 +772,7 @@ export { counter as total, bump };
         let source = "var Lib = (() => {\n\"use strict\";\nvar one = 1;\nvar two = one + 1;\nreturn { two };\n})();\n";
         let head = source.find("\"use").unwrap();
         let tail = source.find("})();").unwrap();
-        let layout = Layout { head, tail, cuts: vec![head + 14, head + 27], reserved: vec!["Lib".to_string()] };
+        let layout = Layout { head, tail, cuts: vec![head + 14, head + 27], reserved: vec!["Lib".to_string()], ..Layout::default() };
         let ranges = vec![head..head + 14, head + 14..head + 27, head + 27..tail];
         let out = in_pieces(source, &layout, &ranges, &options, None).unwrap();
         assert_eq!(out, "var Lib=(()=>{\"use strict\";var e=1;var t=e+1;return{two:t}})()");
@@ -471,7 +782,122 @@ export { counter as total, bump };
     fn a_piece_that_does_not_parse_alone_fails() {
         let options = Options { whitespace: true, identifiers: true, ..Options::default() };
         let source = "function f() {\n  return 1;\n}\n";
-        let layout = Layout { head: 0, tail: source.len(), cuts: vec![15], reserved: Vec::new() };
+        let layout = Layout { head: 0, tail: source.len(), cuts: vec![15], reserved: Vec::new(), ..Layout::default() };
         assert!(in_pieces(source, &layout, &[0..15, 15..source.len()], &options, None).is_err());
+    }
+
+    /// The text of a CommonJS wrapper, laid out as the bundler does: the opening and closing are kept, the statements between are
+    /// pieces of one body, and the names the kept text shares are marked.
+    fn wrapped(source: &str) -> Layout {
+        let open_at = source.find("var mod").unwrap();
+        let body_at = source.find("var a").unwrap();
+        let close_at = source.find("});").unwrap();
+        let end = close_at + "});\n".len();
+        let mut cuts = vec![0, open_at];
+        let mut at = body_at;
+        cuts.push(body_at);
+        for line in source[body_at..close_at].split_inclusive('\n') {
+            at += line.len();
+            cuts.push(at);
+        }
+        cuts.push(end);
+        cuts.extend(source[end..].match_indices('\n').map(|(i, _)| end + i + 1));
+        let word = |text: &str, from: usize| from + source[from..].find(text).unwrap();
+        let mut names = Vec::new();
+        for (text, from, scope, declares) in [("mod", open_at, 0, true), ("__cjs", open_at, 0, false), ("exports", open_at, 1, true), ("module", open_at, 1, true)] {
+            let start = word(text, from);
+            names.push((start..start + text.len(), scope, declares));
+        }
+        names.sort_by_key(|n| n.0.start);
+        cuts.dedup();
+        Layout { head: 0, tail: source.len(), cuts, fixed: vec![open_at..body_at, close_at..end], bodies: vec![body_at..close_at], names, ..Layout::default() }
+    }
+
+    const WRAPPED: &str = "var go = 1;\nvar mod = __cjs(function (exports, module) {\nvar a = 1;\nfunction f(x) { return x + a + go; }\nexports.f = f;\n});\nconsole.log(go, mod, exports, f);\n";
+
+    fn in_bundle_pieces(source: &str, layout: &Layout, options: &Options) -> String {
+        // Pieces: the statement before the wrapper, each statement of the body, and the statements after it.
+        let mut ranges = Vec::new();
+        let mut start = layout.head;
+        let mut points: Vec<usize> = layout.cuts.iter().copied().filter(|&c| c > 0 && c < source.len()).collect();
+        points.push(source.len());
+        for &cut in &points {
+            if layout.fixed.iter().any(|f| f.start <= start && start < f.end) {
+                start = cut.max(start);
+                if layout.fixed.iter().any(|f| f.end == cut) {
+                    continue;
+                }
+            }
+            if cut > start {
+                ranges.push(start..cut);
+                start = cut;
+            }
+        }
+        // A range that is inside kept text is no piece.
+        ranges.retain(|r| !layout.fixed.iter().any(|f| f.start <= r.start && r.end <= f.end));
+        in_pieces(source, layout, &ranges, options, None).unwrap()
+    }
+
+    #[test]
+    fn a_body_is_written_between_text_that_is_kept() {
+        let options = Options { whitespace: true, identifiers: true, syntax: false, keep_top_level: false, keep_names: None };
+        let layout = wrapped(WRAPPED);
+        let out = in_bundle_pieces(WRAPPED, &layout, &options);
+        // The wrapper's own name and parameters are named with the rest (`exports` is `r` inside, where `module` is `i`); the body reuses
+        // a name of the bundle it does not read (`mod` is `t` outside and `a` is `t` inside) but not one it reads (`go` is `e`).
+        // Outside the function `exports` and `f` mean globals, and stay.
+        assert_eq!(out, "var e=1;var t=__cjs(function(r,i){var t=1;function n(r){return r+t+e}r.f=n});console.log(e,t,exports,f)");
+    }
+
+    #[test]
+    fn names_in_text_that_is_kept_stay_as_written() {
+        // `a` is written in the kept text (a property name there, but nothing tells that from a binding), so what a piece declares as `a` keeps it,
+        // while the wrapper's own name and parameters are still named with the rest.
+        let options = Options { whitespace: true, identifiers: true, syntax: false, keep_top_level: false, keep_names: None };
+        let source = "var mod = __cjs(function (exports, module) {\nvar a = 1;\nexports.a = a;\n}, { a: 1 });\n";
+        let open_at = 0;
+        let body_at = source.find("var a").unwrap();
+        let close_at = source.find("}, {").unwrap();
+        let end = source.len();
+        let word = |text: &str| source.find(text).unwrap();
+        let mut names = vec![(word("mod")..word("mod") + 3, 0, true), (word("exports")..word("exports") + 7, 1, true), (word("module")..word("module") + 6, 1, true)];
+        names.sort_by_key(|n| n.0.start);
+        let layout = Layout {
+            head: 0,
+            tail: end,
+            cuts: vec![0, body_at, body_at + "var a = 1;\n".len(), close_at, end],
+            fixed: vec![open_at..body_at, close_at..end],
+            bodies: vec![body_at..close_at],
+            names,
+            ..Layout::default()
+        };
+        let ranges = vec![body_at..body_at + "var a = 1;\n".len(), body_at + "var a = 1;\n".len()..close_at];
+        let out = in_pieces(source, &layout, &ranges, &options, None).unwrap();
+        assert_eq!(out, "var e=__cjs(function(e,t){var a=1;e.a=a},{a:1});");
+    }
+
+    #[test]
+    fn white_space_and_comments_go_but_strings_stay() {
+        assert_eq!(squeeze("a  =  \"x  y\" ; /* c */ b // end\n+ 'p  q'"), "a=\"x  y\";b+'p  q'");
+        assert_eq!(squeeze("var   a\n=\t1"), "var a=1");
+        assert_eq!(squeeze("a /* c */ b"), "a b");
+        assert_eq!(squeeze("x // c\ny"), "x y");
+    }
+
+    #[test]
+    fn the_words_of_kept_text_are_the_names_outside_strings_and_comments() {
+        let text = "var a = b.c + \"d e\"; /* f */ g(1, h2); // i\nj";
+        assert_eq!(words(text), ["var", "a", "b", "c", "g", "h2", "j"]);
+        let spans: Vec<&str> = word_spans(text).into_iter().map(|r| &text[r]).collect();
+        // Not after a dot: `c` is a property.
+        assert_eq!(spans, ["var", "a", "b", "g", "h2", "j"]);
+    }
+
+    #[test]
+    fn kept_text_must_have_nothing_that_white_space_could_change() {
+        assert!(plain_text("var ts = {}; ((module) => {\n\"use strict\"; // note\n/* c */"));
+        assert!(!plain_text("x = `a ${b}`"));
+        assert!(!plain_text("x = /ab+c/.test(y)"));
+        assert!(!plain_text("x = a / b"));
     }
 }

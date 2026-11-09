@@ -63,7 +63,8 @@ const build = (entry, format, mode, size, how) => {
   const b = spawnSync(bin, ["bundle", entry.file, "--outfile", out, ...entry.extra, ...format, ...mode], {
     cwd: entry.cwd,
     encoding: "utf8",
-    env: { ...process.env, RATHKIT_FRAGMENTS: how, RATHKIT_FRAGMENT_BYTES: size },
+    // The bodies of CommonJS modules are cut by their own rule and choose names by scope, not as one pass does: tools/run-fixtures.mjs checks those by what the programs print.
+    env: { ...process.env, RATHKIT_FRAGMENTS: how, RATHKIT_FRAGMENT_BYTES: size, RATHKIT_NEST: "off" },
     timeout: 120000,
     maxBuffer: 1 << 28,
   });

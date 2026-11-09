@@ -18,7 +18,7 @@
 use std::borrow::Cow;
 
 mod fragments;
-pub use fragments::{Layout, minify_chunk};
+pub use fragments::{Layout, minify_chunk, plain_text, word_spans};
 
 type HashMap<K, V> = crate::fxhash::FastMap<K, V>;
 type HashSet<K> = crate::fxhash::FastSet<K>;
