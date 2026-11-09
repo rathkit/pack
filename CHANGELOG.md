@@ -16,10 +16,16 @@ What an alpha does promise, and checks on every change (`tools/check-promises.mj
 scripts in any package, a build that needs no network, provenance and checksums on every release. It promises nothing
 about stability.
 
-## Unreleased
+## 0.1.0-alpha.2 - 2026-11-09
+
+Every npm package and the crate are now listed, with the binaries, in the signed `SHA256SUMS` of the release, and the `npm` and
+`crates` jobs of the workflow stop unless what they publish matches it; `tools/approve-release.mjs` makes the same check before the
+owner approves ([docs/RELEASING.md](docs/RELEASING.md), [docs/verifying.md](docs/verifying.md)).
 
 ### Added
 
+- `--dts` and `--dts-dir` work with TypeScript 7, which has no JavaScript API: its command line writes the declarations. `--dts-bundle`
+  still needs TypeScript 5 or 6 and says so.
 - The browser checks of the repository (the development server and `--hmr` with React, Vue and Svelte, and module federation) run in Firefox and
   WebKit as well as Chromium (`BROWSER=firefox` or `webkit`); the three are driven with no dependency of ours and are run in CI on Ubuntu 24.04.
 - Less, Sass (`sass-embedded` or `sass`) and Stylus files are compiled when the compiler is installed in the project, as Vite does,
@@ -28,6 +34,10 @@ about stability.
 
 ### Fixed
 
+- Watch mode finds a file that changed while the build that first saw it was running.
+- The self-signed certificate of the HTTPS dev server has a serial number that is a valid DER integer.
+- On Windows, a path is written as a file URL with `--original-paths`, a name that starts with a slash stays rooted, and the
+  in-memory modules of a build, the metafile and module federation compare paths without the platform's separators.
 - In a page build, the dev server and `--platform-browser`, `process.env.NODE_ENV` is a constant (`production` for a build, `development`
   for the server, or the environment's `NODE_ENV`; `--define` wins), as in Vite. Those outputs also no longer start with
   `import ... from "node:module"` or `"node:url"` (the `require` and `__dirname` shims), which a browser cannot load and which
