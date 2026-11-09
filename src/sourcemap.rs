@@ -459,12 +459,17 @@ pub fn relative(base: &std::path::Path, path: &std::path::Path) -> String {
 #[derive(Clone)]
 pub struct Positions<'a> {
     text: &'a str,
-    ascii: bool,
-    line_starts: Vec<u32>,
+    lines: std::sync::Arc<Lines>,
     /// The last answer, so the next question can continue from it.
     cache: (u32, usize, u32),
     /// The line the last offset was on.
     hint: usize,
+}
+
+/// Where the lines of one text begin: what many [`Positions`] over the same text can share.
+pub struct Lines {
+    ascii: bool,
+    starts: Vec<u32>,
 }
 
 /// Where the lines that begin inside `from..to` of `bytes` begin.
@@ -492,8 +497,8 @@ fn breaks(bytes: &[u8], from: usize, to: usize) -> Vec<u32> {
     starts
 }
 
-impl<'a> Positions<'a> {
-    pub fn new(text: &'a str) -> Self {
+impl Lines {
+    pub fn new(text: &str) -> Lines {
         let bytes = text.as_bytes();
         let mut line_starts = vec![0u32];
         let workers = std::thread::available_parallelism().map_or(1, |n| n.get());
@@ -521,12 +526,23 @@ impl<'a> Positions<'a> {
                 line_starts.extend(part);
             }
         }
-        Positions { text, ascii: text.is_ascii(), line_starts, cache: (0, 0, 0), hint: 0 }
+        Lines { ascii: text.is_ascii(), starts: line_starts }
+    }
+}
+
+impl<'a> Positions<'a> {
+    pub fn new(text: &'a str) -> Self {
+        Self::with_lines(text, std::sync::Arc::new(Lines::new(text)))
+    }
+
+    /// Positions in `text` given where its lines begin (from [`Lines::new`] of the same text).
+    pub fn with_lines(text: &'a str, lines: std::sync::Arc<Lines>) -> Self {
+        Positions { text, lines, cache: (0, 0, 0), hint: 0 }
     }
 
     /// (line, column) of `offset`, which must sit on a character boundary.
     pub fn at(&mut self, offset: u32) -> (u32, u32) {
-        let starts = &self.line_starts;
+        let starts = &self.lines.starts;
         let at = |line: usize| starts[line];
         let ends_after = |line: usize, offset: u32| line + 1 >= starts.len() || offset < starts[line + 1];
         // Offsets mostly come in increasing order: try the last line and the next one first.
@@ -541,8 +557,8 @@ impl<'a> Positions<'a> {
             }
         };
         self.hint = line;
-        let start = self.line_starts[line];
-        if self.ascii {
+        let start = self.lines.starts[line];
+        if self.lines.ascii {
             return (line as u32, offset - start);
         }
         let (cached_offset, cached_line, cached_column) = self.cache;

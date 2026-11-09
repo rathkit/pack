@@ -454,6 +454,14 @@ enum SourceText {
     Given(Option<String>),
 }
 
+/// What is made about the sources of a chunk while its text is minified: their JSON-escaped texts for the
+/// map, and where their lines begin. Both are by module number.
+#[derive(Default)]
+struct SourcePrep {
+    escaped: crate::fxhash::FastMap<u32, String>,
+    lines: crate::fxhash::FastMap<u32, std::sync::Arc<crate::sourcemap::Lines>>,
+}
+
 /// The segments of one range of anchors with the sources and names they used.
 #[derive(Default)]
 struct Traced {
@@ -1198,8 +1206,9 @@ impl<'a> Bundler<'a> {
         // and punctuation starts inside them stand in for tokens: no second parse.
         // The texts of the sources go into the map escaped. Which modules the chunk holds is known now, so a spare
         // core escapes them while the minifier works: the biggest one (ts5 is one 9 MB module) is not worth waiting for.
-        let (mut code, anchors, mut escaped) = std::thread::scope(|scope| {
+        let (mut code, anchors, mut prep) = std::thread::scope(|scope| {
             let escaping = options.sources_content.then(|| scope.spawn(|| self.escape_sources(marks)));
+            let indexing = scope.spawn(|| self.index_sources(marks));
             let (code, anchors) = if settings.any() {
                 let mut anchors = Vec::new();
                 let code = crate::minify::minify_chunk(&text, &layout, settings, Some(&mut anchors)).map_err(fail)?;
@@ -1209,10 +1218,11 @@ impl<'a> Bundler<'a> {
                 (text, anchors)
             };
             let escaped = escaping.map(|h| h.join().expect("escape")).unwrap_or_default();
-            Ok::<_, Vec<Diagnostic>>((code, anchors, escaped))
+            let lines = indexing.join().expect("index");
+            Ok::<_, Vec<Diagnostic>>((code, anchors, SourcePrep { escaped, lines }))
         })?;
         let mapping = std::time::Instant::now();
-        let mut map = self.build_map(&file, &code, &anchors, &spans, marks, options, &mut escaped);
+        let mut map = self.build_map(&file, &code, &anchors, &spans, marks, options, &mut prep);
         if timing {
             eprintln!("  build map: {:.1} ms", mapping.elapsed().as_secs_f64() * 1000.0);
         }
@@ -1322,7 +1332,7 @@ impl<'a> Bundler<'a> {
     /// The map for one output file, from where its tokens went and which pieces of its text
     /// came from which source. Ranges of anchors are traced side by side; numbering sources and
     /// names and writing the segments (which depend on what came before) is one pass after.
-    fn build_map(&self, file: &str, code: &str, anchors: &[crate::minify::Anchor], spans: &[Span], marks: &[Mark], options: &Options, escaped: &mut crate::fxhash::FastMap<u32, String>) -> String {
+    fn build_map(&self, file: &str, code: &str, anchors: &[crate::minify::Anchor], spans: &[Span], marks: &[Mark], options: &Options, prep: &mut SourcePrep) -> String {
         let timing = std::env::var_os("RATHKIT_TIMING").is_some();
         let tracing = std::time::Instant::now();
         let generated = crate::sourcemap::Positions::new(code);
@@ -1332,11 +1342,12 @@ impl<'a> Bundler<'a> {
         let parts = if anchors.len() < 4 * least { 1 } else { workers.min(anchors.len() / least).max(1) };
         let size = anchors.len().div_ceil(parts).max(1);
         let ranges: Vec<&[crate::minify::Anchor]> = anchors.chunks(size).collect();
+        let lines = &prep.lines;
         let mut traced: Vec<Traced> = if ranges.len() <= 1 {
-            ranges.iter().map(|r| self.trace(r, code, spans, marks, options, generated.clone())).collect()
+            ranges.iter().map(|r| self.trace(r, code, spans, marks, options, generated.clone(), lines)).collect()
         } else {
             std::thread::scope(|scope| {
-                let handles: Vec<_> = ranges.iter().map(|r| scope.spawn(|| self.trace(r, code, spans, marks, options, generated.clone()))).collect();
+                let handles: Vec<_> = ranges.iter().map(|r| scope.spawn(|| self.trace(r, code, spans, marks, options, generated.clone(), &prep.lines))).collect();
                 handles.into_iter().map(|h| h.join().expect("trace")).collect()
             })
         };
@@ -1374,7 +1385,7 @@ impl<'a> Bundler<'a> {
                         source_at[slot] = *source_index.entry(*key).or_insert_with(|| {
                             let content = match content {
                                 SourceText::None => None,
-                                SourceText::Module(id) => match escaped.remove(&(id.index() as u32)) {
+                                SourceText::Module(id) => match prep.escaped.remove(&(id.index() as u32)) {
                                     Some(ready) => return builder.add_source_escaped(shown.clone(), ready),
                                     None => Some(std::borrow::Cow::Borrowed(self.graph.module(*id).source.as_str())),
                                 },
@@ -1429,6 +1440,14 @@ impl<'a> Bundler<'a> {
         json
     }
 
+    /// Where the lines of the modules a chunk holds begin, by module number: found once, beside the minifier, not by every range of the trace.
+    fn index_sources(&self, marks: &[Mark]) -> crate::fxhash::FastMap<u32, std::sync::Arc<crate::sourcemap::Lines>> {
+        let mut ids: Vec<u32> = marks.iter().map(|m| m.module.index() as u32).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids.into_iter().map(|i| (i, std::sync::Arc::new(crate::sourcemap::Lines::new(&self.graph.modules[i as usize].source)))).collect()
+    }
+
     /// The texts of the modules a chunk holds, escaped for a map's `sourcesContent`, by module number.
     fn escape_sources(&self, marks: &[Mark]) -> crate::fxhash::FastMap<u32, String> {
         let mut ids: Vec<u32> = marks.iter().map(|m| m.module.index() as u32).collect();
@@ -1439,7 +1458,7 @@ impl<'a> Bundler<'a> {
     }
 
     /// Where each anchor of one range came from, without numbering anything yet.
-    fn trace(&self, anchors: &[crate::minify::Anchor], code: &str, spans: &[Span], marks: &[Mark], options: &Options, mut generated: crate::sourcemap::Positions) -> Traced {
+    fn trace(&self, anchors: &[crate::minify::Anchor], code: &str, spans: &[Span], marks: &[Mark], options: &Options, mut generated: crate::sourcemap::Positions, lines: &crate::fxhash::FastMap<u32, std::sync::Arc<crate::sourcemap::Lines>>) -> Traced {
         // What is known about each module once it has been met.
         struct Known<'m> {
             positions: crate::sourcemap::Positions<'m>,
@@ -1475,7 +1494,10 @@ impl<'a> Bundler<'a> {
             };
             let replacement = if span.replacement { at as u32 } else { NONE };
             let state = known[mark.module.index()].get_or_insert_with(|| Known {
-                positions: crate::sourcemap::Positions::new(&module.source),
+                positions: match lines.get(&(mark.module.index() as u32)) {
+                    Some(shared) => crate::sourcemap::Positions::with_lines(&module.source, shared.clone()),
+                    None => crate::sourcemap::Positions::new(&module.source),
+                },
                 // A file that was itself built from other files says so in its own map.
                 input: crate::sourcemap::Input::find(&module.path, &module.source),
             });
