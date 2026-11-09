@@ -293,3 +293,26 @@ fn the_verbatim_prefix_of_a_windows_path_is_dropped() {
     assert_eq!(without_verbatim_prefix(Path::new(r"\\?\UNC\server\share\a.js")), Path::new(r"\\?\UNC\server\share\a.js"));
     assert_eq!(without_verbatim_prefix(Path::new("/p/a.js")), Path::new("/p/a.js"));
 }
+
+#[cfg(unix)]
+#[test]
+fn real_paths_through_linked_folders_and_linked_files() {
+    // `link` is a folder that points at `real`; `real/b.js` is a file that points at `real/a.js`.
+    let root = std::env::temp_dir().join(format!("rk-real-path-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("real")).unwrap();
+    std::fs::write(root.join("real/a.js"), "").unwrap();
+    std::fs::write(root.join("real/c.js"), "").unwrap();
+    std::os::unix::fs::symlink(root.join("real"), root.join("link")).unwrap();
+    std::os::unix::fs::symlink(root.join("real/a.js"), root.join("real/b.js")).unwrap();
+    let real = std::fs::canonicalize(&root).unwrap().join("real");
+    let r = Resolver::new(ResolveOptions::default());
+    let found = |from: &Path, spec: &str| r.resolve(from, spec, ResolveKind::Import).unwrap().path;
+    // A file in a linked folder (twice: the second answer comes from what was learned about the folder).
+    assert_eq!(found(&root, "./link/a.js"), real.join("a.js"));
+    assert_eq!(found(&root, "./link/c.js"), real.join("c.js"));
+    // A linked file is the file it points at, wherever the link is met.
+    assert_eq!(found(&root, "./real/b.js"), real.join("a.js"));
+    assert_eq!(found(&root, "./link/b.js"), real.join("a.js"));
+    let _ = std::fs::remove_dir_all(&root);
+}

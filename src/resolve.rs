@@ -28,6 +28,11 @@ pub trait FileSystem: Send + Sync {
     }
     /// Follows symlinks to the real path, so two links to one file are one module.
     fn canonicalize(&self, path: &Path) -> io::Result<PathBuf>;
+    /// Whether `path` is not known to be anything but a link (or does not exist): the answer `true` is always safe. When it is
+    /// `false`, the real path of `path` is the real path of its directory with its own name added.
+    fn may_be_link(&self, _path: &Path) -> bool {
+        true
+    }
     /// The names in a directory, each with whether it is a directory (for `import.meta.glob`).
     fn read_dir(&self, _path: &Path) -> io::Result<Vec<(String, bool)>> {
         Err(io::Error::new(io::ErrorKind::Unsupported, "no directory listing"))
@@ -83,6 +88,12 @@ impl FileSystem for RealFs {
 
     fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
         std::fs::canonicalize(path).map(|p| without_verbatim_prefix(&p))
+    }
+
+    // Only where names are matched exactly: elsewhere the real path can spell a name in another case than the one asked for.
+    #[cfg(target_os = "linux")]
+    fn may_be_link(&self, path: &Path) -> bool {
+        std::fs::symlink_metadata(path).map_or(true, |m| m.file_type().is_symlink())
     }
 }
 
@@ -303,6 +314,8 @@ pub struct Resolver {
     /// `package.json` by directory; `Ok(None)` records a directory without one, and a file
     /// that does not parse is remembered too so it is read and reported once.
     packages: Mutex<HashMap<PathBuf, Result<Option<Arc<Package>>, ResolveError>>>,
+    /// The real path of each directory a file was found in: a build asks for hundreds of files in a few directories.
+    real_dirs: Mutex<HashMap<PathBuf, Option<PathBuf>>>,
 }
 
 /// What an `exports` target turned out to be. `null` blocks a path, while an unmatched
@@ -319,7 +332,7 @@ impl Resolver {
     }
 
     pub fn with_fs(fs: Box<dyn FileSystem>, options: ResolveOptions) -> Resolver {
-        Resolver { fs, options, packages: Mutex::new(HashMap::new()) }
+        Resolver { fs, options, packages: Mutex::new(HashMap::new()), real_dirs: Mutex::new(HashMap::new()) }
     }
 
     /// Resolves `specifier` as written in a file that lives in directory `from_dir`.
@@ -347,7 +360,7 @@ impl Resolver {
             self.resolve_bare(from_dir, specifier, kind)?
         };
         let path = path.ok_or_else(not_found)?;
-        let path = if self.options.preserve_symlinks { path } else { self.fs.canonicalize(&path).unwrap_or(path) };
+        let path = if self.options.preserve_symlinks { path } else { self.real_path(path) };
         // A `package.json` that does not parse only costs the file its package metadata: Node
         // too reads it only when it needs something from it. `package_for` reports the error.
         let package = self.package_for(&path).unwrap_or(None);
@@ -427,6 +440,28 @@ impl Resolver {
     /// Reads a file through the same file system resolution uses.
     pub fn read_to_string(&self, path: &Path) -> io::Result<String> {
         self.fs.read_to_string(path)
+    }
+
+    /// `path` with its symlinks followed. A file that is not a link has the real path of its directory, which is asked once
+    /// for all the files in it, in place of walking every folder of its path for each one.
+    fn real_path(&self, path: PathBuf) -> PathBuf {
+        if let (Some(dir), Some(name)) = (path.parent(), path.file_name()) {
+            if !self.fs.may_be_link(&path) {
+                let cached = self.real_dirs.lock().unwrap().get(dir).cloned();
+                let real = match cached {
+                    Some(real) => real,
+                    None => {
+                        let real = self.fs.canonicalize(dir).ok();
+                        self.real_dirs.lock().unwrap().insert(dir.to_path_buf(), real.clone());
+                        real
+                    }
+                };
+                if let Some(real) = real {
+                    return real.join(name);
+                }
+            }
+        }
+        self.fs.canonicalize(&path).unwrap_or(path)
     }
 
     /// The nearest `package.json` at or above `path`'s directory.
