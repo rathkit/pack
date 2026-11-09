@@ -300,6 +300,8 @@ struct Shared {
     queue: Vec<usize>,
     /// Files queued or being processed. Discovery is done when this reaches zero.
     pending: usize,
+    /// Workers waiting for something to be queued.
+    sleeping: usize,
     /// Files met as `new URL("./x", import.meta.url)`: copied files whatever their extension.
     as_assets: std::collections::HashSet<PathBuf>,
     /// The entry points, for plugins that are told of a module as it is read.
@@ -359,7 +361,9 @@ impl Context<'_> {
                     if shared.pending == 0 {
                         return;
                     }
+                    shared.sleeping += 1;
                     shared = wake.wait(shared).unwrap();
+                    shared.sleeping -= 1;
                 }
             };
             let processed = self.process(slot, &path);
@@ -406,8 +410,19 @@ impl Context<'_> {
                 Err(diagnostic) => shared.diagnostics.push(diagnostic),
             }
             shared.pending -= 1;
-            // New work, or the last job done: either way sleepers need to look again.
-            wake.notify_all();
+            // A sleeper for each file waiting that this worker will not take; everyone when the last job is done. (Waking all of
+            // them for every file sends dozens of threads to fight over the lock, and a chain of imports has little for them to do.)
+            // This worker takes one of the queued files itself on its way round, so only the rest need helpers.
+            let added = shared.queue.len().saturating_sub(1).min(shared.sleeping);
+            let done = shared.pending == 0;
+            drop(shared);
+            if done {
+                wake.notify_all();
+            } else {
+                for _ in 0..added {
+                    wake.notify_one();
+                }
+            }
         }
     }
 
