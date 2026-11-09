@@ -274,22 +274,53 @@ fn in_pieces(source: &str, layout: &Layout, ranges: &[std::ops::Range<usize>], o
         text.push_str(&source[at..to]);
         text
     };
-    let keep_text = |out: &mut String, from: usize, to: usize| {
-        let text = wrapper(&spliced(from, to), false);
+    // Whether the first or the last statement of a piece is a `var` declaration: next to kept text that starts or ends with one, the two
+    // are one declaration, as they would be if they were one pass.
+    let var_at = |unit: &Unit, first: bool| -> bool {
+        let ast = &unit.parsed.ast;
+        let NodeKind::Program(list) = ast[ast.root].kind else { return false };
+        let statements = ast.list(list);
+        let statement = if first { statements.first() } else { statements.last() };
+        statement.is_some_and(|&n| matches!(ast[n].kind, NodeKind::VarDecl { kind: crate::ast::VarKind::Var, .. }))
+    };
+    // True after a `var` declaration (a piece's last statement, or the closing of the bundler's own `var x = __cjs(...)`) that was
+    // written with its `;`: when a `var` follows it, the two are one declaration and the `;` is a `,`.
+    let mut open_var = false;
+    let keep_text = |out: &mut String, from: usize, to: usize, open_var: &mut bool| {
+        let mut text = wrapper(&spliced(from, to), false);
         if compact {
+            if *open_var && text.starts_with("var ") && out.ends_with(';') {
+                out.pop();
+                out.push(',');
+                text.drain(..4);
+            }
             if let (Some(&last), Some(&first)) = (out.as_bytes().last(), text.as_bytes().first()) {
                 if separator_needed(last, first, out, false) {
                     out.push(' ');
                 }
             }
         }
+        // Kept text that closes a function call and ends in `;` ends the statement `var x = __cjs(function () { ... });`.
+        *open_var = compact && text.starts_with('}') && text.ends_with(");");
         out.push_str(&text);
     };
+    // The anchors of a big bundle are tens of megabytes: make room once, so growing the list never holds two copies of it.
+    if let Some(list) = anchors.as_deref_mut() {
+        list.reserve_exact(written.iter().map(|(_, found)| found.len()).sum());
+    }
     for (unit, (text, found)) in units.iter().zip(written) {
+        let (mut text, mut found) = (text, found);
         if unit.start > at {
-            keep_text(&mut out, at, unit.start);
+            keep_text(&mut out, at, unit.start, &mut open_var);
         }
         at = unit.start + unit.source.len();
+        let mut dropped = 0u32;
+        if compact && open_var && text.starts_with("var ") && out.ends_with(';') && var_at(unit, true) {
+            out.pop();
+            out.push(',');
+            text.drain(..4);
+            dropped = 4;
+        }
         if compact {
             if let (Some(&last), Some(&first)) = (out.as_bytes().last(), text.as_bytes().first()) {
                 if separator_needed(last, first, &out, false) {
@@ -299,13 +330,16 @@ fn in_pieces(source: &str, layout: &Layout, ranges: &[std::ops::Range<usize>], o
         }
         if let Some(list) = anchors.as_deref_mut() {
             let (shift_out, shift_in) = (out.len() as u32, unit.start as u32);
-            list.extend(found.into_iter().map(|a| Anchor { out: a.out + shift_out, inp: a.inp + shift_in, ..a }));
+            // The `var ` that went is no token of the output.
+            found.retain(|a| a.out >= dropped);
+            list.extend(found.into_iter().map(|a| Anchor { out: a.out + shift_out - dropped, inp: a.inp + shift_in, ..a }));
         }
         out.push_str(&text);
+        open_var = compact && text.ends_with(';') && var_at(unit, false);
     }
     let end = layout.tail.min(source.len());
     if at < end {
-        keep_text(&mut out, at, end);
+        keep_text(&mut out, at, end, &mut false);
     }
     let tail = wrapper(&source[end..], true);
     if compact {
@@ -316,7 +350,26 @@ fn in_pieces(source: &str, layout: &Layout, ranges: &[std::ops::Range<usize>], o
         }
     }
     out.push_str(&tail);
+    // The syntax trees and tokens of every piece are done with.
+    drop(shared);
+    drop(units);
+    release_free_memory();
     Ok(out)
+}
+
+/// The pieces were parsed and written on threads of their own, and what those threads freed stays with them: the next stages (a source
+/// map, the output) would grow the process by as much again. Gives it back, where the allocator keeps a heap for each thread.
+fn release_free_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        unsafe extern "C" {
+            fn malloc_trim(pad: usize) -> i32;
+        }
+        // SAFETY: `malloc_trim` takes a number and only returns free memory to the system.
+        unsafe {
+            malloc_trim(0);
+        }
+    }
 }
 
 /// What the pieces share.
@@ -775,7 +828,8 @@ export { counter as total, bump };
         let layout = Layout { head, tail, cuts: vec![head + 14, head + 27], reserved: vec!["Lib".to_string()], ..Layout::default() };
         let ranges = vec![head..head + 14, head + 14..head + 27, head + 27..tail];
         let out = in_pieces(source, &layout, &ranges, &options, None).unwrap();
-        assert_eq!(out, "var Lib=(()=>{\"use strict\";var e=1;var t=e+1;return{two:t}})()");
+        // The two `var` statements are cut apart and written as one declaration, as one pass would.
+        assert_eq!(out, "var Lib=(()=>{\"use strict\";var e=1,t=e+1;return{two:t}})()");
     }
 
     #[test]
@@ -845,8 +899,36 @@ export { counter as total, bump };
         let out = in_bundle_pieces(WRAPPED, &layout, &options);
         // The wrapper's own name and parameters are named with the rest (`exports` is `r` inside, where `module` is `i`); the body reuses
         // a name of the bundle it does not read (`mod` is `t` outside and `a` is `t` inside) but not one it reads (`go` is `e`).
-        // Outside the function `exports` and `f` mean globals, and stay.
-        assert_eq!(out, "var e=1;var t=__cjs(function(r,i){var t=1;function n(r){return r+t+e}r.f=n});console.log(e,t,exports,f)");
+        // Outside the function `exports` and `f` mean globals, and stay. The wrapper's `var` joins the declaration before it.
+        assert_eq!(out, "var e=1,t=__cjs(function(r,i){var t=1;function n(r){return r+t+e}r.f=n});console.log(e,t,exports,f)");
+    }
+
+    #[test]
+    fn the_var_chain_runs_through_the_wrapper_and_the_anchors_follow() {
+        let options = Options { whitespace: true, identifiers: true, syntax: false, keep_top_level: false, keep_names: None };
+        let source = "var go = 1;\nvar mod = __cjs(function (exports, module) {\nvar a = 1;\nfunction f(x) { return x + a + go; }\nexports.f = f;\n});\nvar after = mod;\nvar more = after + go;\nconsole.log(more, after);\n";
+        let layout = wrapped(source);
+        let mut found = Vec::new();
+        let mut ranges = Vec::new();
+        let mut start = 0;
+        for &cut in layout.cuts.iter().chain(std::iter::once(&source.len())) {
+            if cut > start && !layout.fixed.iter().any(|f| f.start <= start && start < f.end) {
+                ranges.push(start..cut);
+            }
+            start = start.max(cut);
+        }
+        ranges.retain(|r| !layout.fixed.iter().any(|f| f.start <= r.start && r.end <= f.end));
+        let out = in_pieces(source, &layout, &ranges, &options, Some(&mut found)).unwrap();
+        // One declaration from `go` to `more`, though the wrapper and several cuts are in it.
+        assert_eq!(out, "var e=1,r=__cjs(function(r,i){var t=1;function n(r){return r+t+e}r.f=n}),t=r,n=t+e;console.log(n,t)");
+        assert_eq!(out.matches("var ").count(), 2, "{out}");
+        // Every anchor names text that is there, in order.
+        assert!(found.windows(2).all(|w| w[0].out <= w[1].out && w[0].inp <= w[1].inp), "anchors in order");
+        for a in &found {
+            assert!((a.out + a.out_len) as usize <= out.len() && (a.inp + a.in_len) as usize <= source.len());
+        }
+        let r = found.iter().find(|a| &source[a.inp as usize..(a.inp + a.in_len) as usize] == "more" && a.out_len > 0).unwrap();
+        assert_eq!(&out[r.out as usize..(r.out + r.out_len) as usize], "n", "{out}");
     }
 
     #[test]
