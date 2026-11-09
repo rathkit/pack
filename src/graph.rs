@@ -275,11 +275,12 @@ pub fn build_with_fs(fs: Box<dyn FileSystem>, cwd: &Path, entries: &[String], op
     }
     let threads = if options.threads == 0 { std::thread::available_parallelism().map_or(4, |n| n.get()) } else { options.threads };
     let state = (Mutex::new(shared), Condvar::new());
-    let context = Context { cwd, resolver: &resolver, options, state: &state };
+    let context = Context { cwd, resolver: &resolver, options, state: &state, limit: threads.max(1) };
+    // One worker to begin with: the others are started as files queue up that no one is waiting for. A small project is done before
+    // sixteen threads have been started, and a chain of imports never has work for more than a few.
+    state.0.lock().unwrap().spawned = 1;
     std::thread::scope(|scope| {
-        for _ in 0..threads {
-            scope.spawn(|| context.work());
-        }
+        scope.spawn(|| context.work(scope));
     });
     let shared = state.0.into_inner().unwrap();
     let mut graph = finish(shared, &entry_slots);
@@ -302,6 +303,8 @@ struct Shared {
     pending: usize,
     /// Workers waiting for something to be queued.
     sleeping: usize,
+    /// Workers started so far.
+    spawned: usize,
     /// Files met as `new URL("./x", import.meta.url)`: copied files whatever their extension.
     as_assets: std::collections::HashSet<PathBuf>,
     /// The entry points, for plugins that are told of a module as it is read.
@@ -331,6 +334,8 @@ struct Context<'a> {
     resolver: &'a Resolver,
     options: &'a GraphOptions,
     state: &'a (Mutex<Shared>, Condvar),
+    /// The most workers there are.
+    limit: usize,
 }
 
 /// A processed file whose edges still name paths rather than slots.
@@ -348,8 +353,8 @@ enum Target {
     Unresolved,
 }
 
-impl Context<'_> {
-    fn work(&self) {
+impl<'a> Context<'a> {
+    fn work<'scope>(&'scope self, scope: &'scope std::thread::Scope<'scope, 'a>) {
         let (lock, wake) = self.state;
         loop {
             let (slot, path) = {
@@ -415,6 +420,10 @@ impl Context<'_> {
             // This worker takes one of the queued files itself on its way round, so only the rest need helpers.
             let added = shared.queue.len().saturating_sub(1).min(shared.sleeping);
             let done = shared.pending == 0;
+            // Files waiting that no sleeper will take (and this worker takes one itself) get workers of their own, up to the limit.
+            let backlog = shared.queue.len().saturating_sub(1).saturating_sub(shared.sleeping);
+            let more = if done { 0 } else { backlog.min(self.limit - shared.spawned) };
+            shared.spawned += more;
             drop(shared);
             if done {
                 wake.notify_all();
@@ -422,6 +431,9 @@ impl Context<'_> {
                 for _ in 0..added {
                     wake.notify_one();
                 }
+            }
+            for _ in 0..more {
+                scope.spawn(move || self.work(scope));
             }
         }
     }
