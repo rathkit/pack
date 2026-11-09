@@ -148,6 +148,7 @@ Other bundlers' configurations: tsup, tsdown, unbuild, Rolldown, Parcel, Farm an
 - [ ] [6.9](https://github.com/rathkit/pack/issues/57) Farm configuration `P2`
 - [ ] [6.10](https://github.com/rathkit/pack/issues/58) Bun.build API shape `P2`
 - [ ] [2.12](https://github.com/rathkit/pack/issues/78) An optional type checker package, the fastest, leanest and smallest to date, with nothing added to the rkp binary `P2`
+- [ ] [3.15](https://github.com/rathkit/pack/issues/82) Time: minify and source maps without a second parse, so esbuild is no longer faster in any case `P1`
 
 ### 1.0.0-rc.1
 
