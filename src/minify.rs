@@ -831,7 +831,9 @@ fn emit(source: &str, tokens: &[Token], renames: &Renames, asi: &[bool], facts: 
         }
         pending_asi = false;
         whole_number = tok.kind == Kind::Number && text.bytes().all(|b| b.is_ascii_digit());
-        if let Some(list) = anchors.as_deref_mut() {
+        // Punctuation is found from the word before it; mapping every one of them makes a map
+        // about 1.7 times as long as it needs to be.
+        if let (Some(list), false) = (anchors.as_deref_mut(), matches!(tok.kind, Kind::Punct(_))) {
             list.push(Anchor { out: out.len() as u32, out_len: text.len() as u32, inp: tok.start, in_len: tok.end - tok.start });
         }
         out.push_str(&text);
@@ -1270,6 +1272,15 @@ mod tests {
         let (same, plain) = minify_with_anchors(source, &Options::default()).unwrap();
         assert_eq!(same, source);
         assert!(plain.iter().all(|a| a.out == a.inp && a.out_len == a.in_len));
+    }
+
+    #[test]
+    fn punctuation_is_found_from_the_word_before_it() {
+        let source = "function add(first, second) { return first + second; }\nadd(1, 2);\n";
+        let (out, anchors) = minify_with_anchors(source, &ALL).unwrap();
+        // Words and numbers are anchored; `(`, `,`, `;` and the like are not.
+        assert!(anchors.iter().all(|a| out[a.out as usize..(a.out + a.out_len) as usize].chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$')), "{out}");
+        assert!(anchors.len() >= 10);
     }
 
     fn syntax(source: &str) -> String {
