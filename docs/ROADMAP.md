@@ -52,7 +52,7 @@ Stable base: required CI on Linux, macOS and Windows; corpus 24 of 24 on every r
 
 Measure and gate: a benchmark suite of 15 workloads with real apps, warm rebuild and HMR measurements, CI gates for size and memory, and a corpus of 60 projects.
 
-- [ ] [3.5](https://github.com/rathkit/pack/issues/7) Benchmark suite of 15 workloads with real apps; warm rebuild, HMR and server start `P0`
+- [x] [3.5](https://github.com/rathkit/pack/issues/7) Benchmark suite of 15 workloads with real apps; warm rebuild, HMR and server start `P0`
 - [x] [3.6](https://github.com/rathkit/pack/issues/8) CI gates: output size and peak memory against a stored baseline `P0`
 - [ ] [3.1](https://github.com/rathkit/pack/issues/9) Rebuild and watch-mode benchmarks `P0`
 - [x] [1.8](https://github.com/rathkit/pack/issues/10) Corpus grown to 60 projects `P0`

@@ -10,12 +10,15 @@ Site: <https://rathkit.com>
 
 ## Speed
 
-Measured on seven workloads in three modes (21 cases: the TypeScript compiler, three.js, lodash-es, React, rxjs, two
-generated apps; plain, minified, minified with a source map), the whole command took the least memory in every case and less time than rolldown, rspack, Vite, webpack, Rollup and
-Parcel 2 in every case. Against esbuild it took less time (by 1.8 ms or more), less memory and produced a smaller output
-in all 21 cases. Parcel 3 took less time in 18 cases and was faster in the three lodash-es cases, where it kept none of
-the exports, so those are not the same work. Others produce smaller output in some cases. The method,
-the machine, the versions and every table: [docs/benchmarks.md](docs/benchmarks.md). One machine, one day: run
+Measured on 15 workloads in three modes (45 cases: the TypeScript compiler, three.js, lodash-es, React, rxjs, date-fns, Zod, D3,
+Preact, Vue, Solid and Svelte apps, a monorepo-style TypeScript app, two generated apps; plain, minified, minified with a source map),
+the whole command took the least memory in every case and less time than rolldown, rspack, Vite, webpack, Rollup and Parcel 2 (where it built) in
+every case. Against esbuild it took less time in 42 of the 45 cases; esbuild was faster in the other three, by 1.2 ms or less. Parcel 3
+took less time in 42 cases and was faster in the three lodash-es cases, where it kept none of the exports, so those are not the same
+work. Output sizes are about equal, and others are smaller in some cases. In watch mode a rebuild of Pack is not the fastest (Parcel 3 and
+esbuild are quicker on most workloads), and its development server starts fastest on most workloads but is slower to announce an
+HMR update on most workloads; there is no type-check figure for Pack, because it has no checker yet. The method, the machine, the versions and every
+table: [docs/benchmarks.md](docs/benchmarks.md). One machine, one day: run
 the container recipe in [rathkit/pack-bench](https://github.com/rathkit/pack-bench) for yours.
 
 ## Install
