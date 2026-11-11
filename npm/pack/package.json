@@ -1,7 +1,7 @@
 {
   "name": "@rathkit/pack",
   "version": "0.0.0-source",
-  "description": "A fast, zero-dependency JavaScript and TypeScript bundler (alpha)",
+  "description": "A fast, zero-dependency JavaScript and TypeScript bundler (beta)",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -16,7 +16,7 @@
     "typescript",
     "rust",
     "zero-dependency",
-    "alpha"
+    "beta"
   ],
   "bin": {
     "rkp": "bin/rkp.js"

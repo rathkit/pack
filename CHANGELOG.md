@@ -9,10 +9,10 @@ Rathkit Pack follows [Semantic Versioning](https://semver.org) with the usual 0.
 **while the major version is 0, any release may change options, output and plugin support**.
 A change that breaks a documented option or flag is listed under "Changed" or "Removed" with the
 version in which it happened, and the minor number is raised for it (0.1 to 0.2); patch releases
-fix bugs only. Versions with a suffix (`-alpha.N`) are published as pre-releases, never as the
+fix bugs only. Versions with a suffix (`-alpha.N`, `-beta.N`) are published as pre-releases, never as the
 latest release, and promise nothing but what the README says is tested.
 
-What an alpha does promise, and checks on every change (`tools/check-promises.mjs`): no dependencies and no install
+What an alpha or beta does promise, and checks on every change (`tools/check-promises.mjs`): no dependencies and no install
 scripts in any package, a build that needs no network, provenance and checksums on every release. It promises nothing
 about stability.
 

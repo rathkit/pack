@@ -62,11 +62,11 @@ for (const p of platforms) {
   if (p.os !== 'win32') chmodSync(join(dir, 'bin', exe), 0o755);
   cpSync(join(root, 'LICENSE'), join(dir, 'LICENSE'));
   cpSync(join(root, 'NOTICE'), join(dir, 'NOTICE'));
-  writeFileSync(join(dir, 'README.md'), `# ${name}\n\nThe rathkit-pack program for ${p.os} on ${p.cpu}${p.libc ? ` (${p.libc})` : ''}. Install \`@rathkit/pack\` instead of this package. Alpha: https://github.com/rathkit/pack#readme\n`);
+  writeFileSync(join(dir, 'README.md'), `# ${name}\n\nThe rathkit-pack program for ${p.os} on ${p.cpu}${p.libc ? ` (${p.libc})` : ''}. Install \`@rathkit/pack\` instead of this package. Beta: https://github.com/rathkit/pack#readme\n`);
   const manifest = {
     name,
     version,
-    description: `The rathkit-pack program for ${p.os} ${p.cpu}${p.libc ? ` (${p.libc})` : ''} (alpha)`,
+    description: `The rathkit-pack program for ${p.os} ${p.cpu}${p.libc ? ` (${p.libc})` : ''} (beta)`,
     license: base.license,
     repository: { ...base.repository, directory: undefined },
     homepage: base.homepage,

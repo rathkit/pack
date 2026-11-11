@@ -4,7 +4,7 @@ A JavaScript and TypeScript bundler written in Rust, with zero dependencies (not
 
 > Fast, clean and safe, and easy to move to: plugins written for other bundlers run (what is covered by tests is listed below).
 
-**Status: alpha.** It is early: options, output and plugin support can change between 0.x releases (see [CHANGELOG.md](CHANGELOG.md), which also says what the version numbers promise). This describes what exists today and how it is checked. How to check a release: [docs/verifying.md](docs/verifying.md).
+**Status: beta.** It is early: options, output and plugin support can change between 0.x releases (see [CHANGELOG.md](CHANGELOG.md), which also says what the version numbers promise). This describes what exists today and how it is checked. How to check a release: [docs/verifying.md](docs/verifying.md).
 
 Site: <https://rathkit.com>
 
@@ -24,7 +24,7 @@ the container recipe in [rathkit/pack-bench](https://github.com/rathkit/pack-ben
 ## Install
 
 ```
-pnpm add -D @rathkit/pack@next        # the alpha is on the next tag
+pnpm add -D @rathkit/pack@next        # pre-releases are on the next tag
 ```
 
 The package gives the `rkp` command and a JavaScript API (`import { build } from '@rathkit/pack'`, with the command's flags as options: [npm/pack/README.md](npm/pack/README.md)). Or take a tarball from [the releases](https://github.com/rathkit/pack/releases) (checksums and signatures: [docs/verifying.md](docs/verifying.md)), or `cargo build --release` from source.

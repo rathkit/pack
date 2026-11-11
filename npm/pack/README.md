@@ -1,6 +1,6 @@
 # @rathkit/pack
 
-**Alpha.** Rathkit Pack is a JavaScript and TypeScript bundler written in Rust with no dependencies. This package
+**Beta.** Rathkit Pack is a JavaScript and TypeScript bundler written in Rust with no dependencies. This package
 starts the program for your platform, from the command line (`rkp`) or from JavaScript. It has no dependencies, runs
 nothing when installed, and lists only the platform packages as optional dependencies, so a package manager installs
 the one that fits.
@@ -9,7 +9,7 @@ the one that fits.
 pnpm add -D @rathkit/pack@next
 ```
 
-Versions with a suffix such as `0.1.0-alpha.0` are published under the `next` tag, never `latest`.
+Versions with a suffix such as `0.2.0-beta.0` are published under the `next` tag, never `latest`.
 
 ## Command line
 

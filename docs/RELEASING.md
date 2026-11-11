@@ -9,7 +9,7 @@ one step that publishes there.
 ## Versions and tags
 
 - A release is a git tag `v<version>`, and `<version>` is the one in `Cargo.toml`. The workflow refuses a tag that is not.
-- While the project is in alpha, every version has a suffix (`-alpha.N`). The GitHub release is a pre-release, and the npm
+- While the project is before 1.0, every version has a suffix (`-alpha.N`, `-beta.N`, `-rc.N`). The GitHub release is a pre-release, and the npm
   packages go to the `next` dist-tag, never `latest`.
 - The notes of a release are its section of `CHANGELOG.md` (`tools/release-notes.mjs`), so write the section first.
 - **The release is immutable the moment it is created.** Its tag can never be moved, replaced or reused, and its files can
