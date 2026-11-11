@@ -993,9 +993,24 @@ const preprocessorPlugin = (projectRoot) => {
       const out = await (available.less.default ?? available.less).render(code, { filename: file, paths: [path.dirname(file)] });
       return { css: out.css, deps: out.imports };
     },
-    async sass(code, file) {
+    async sass(code, file, named = file) {
       const sass = available.sass;
-      const out = await sass.compileStringAsync(code, { url: pathToFileURL(file), syntax: file.endsWith('.sass') ? 'indented' : 'scss', loadPaths: [path.dirname(file)] });
+      // A name that is not a relative path is looked for in the `node_modules` folders above the file (a leading `~` is the old way to say so),
+      // as Vite does: `@use 'element-plus/theme-chalk/src/index.scss'`. Sass adds the extension and the partial's underscore itself.
+      const packages = {
+        findFileUrl(url) {
+          if (/^(\.|\/|[a-z][a-z0-9+.-]*:)/i.test(url) && !url.startsWith('~')) return null;
+          const name = url.replace(/^~/, '');
+          const parts = name.split('/');
+          const first = name.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0];
+          for (let dir = path.dirname(file); ; dir = path.dirname(dir)) {
+            const base = path.join(dir, 'node_modules');
+            if (fs.existsSync(path.join(base, first))) return pathToFileURL(path.join(base, name));
+            if (path.dirname(dir) === dir) return null;
+          }
+        },
+      };
+      const out = await sass.compileStringAsync(code, { url: pathToFileURL(file), syntax: named.endsWith('.sass') ? 'indented' : 'scss', loadPaths: [path.dirname(file)], importers: [packages] });
       return { css: out.css, deps: (out.loadedUrls ?? []).filter((u) => u.protocol === 'file:').map(fileURLToPath) };
     },
     async stylus(code, file) {
@@ -1009,9 +1024,12 @@ const preprocessorPlugin = (projectRoot) => {
     name: 'rathkit:css-preprocessors',
     async transform(code, id) {
       const file = id.split('?')[0];
+      // The style block of a component (`App.vue?vue&type=style&index=0&lang.scss`) names its language at the end of the query.
+      const lang = /[?&]lang\.(\w+)$/.exec(id);
+      const named = lang ? `${file}.${lang[1]}` : file;
       for (const [kind, { test }] of Object.entries(compilers)) {
-        if (!available[kind] || !test.test(file)) continue;
-        const { css, deps } = await compile[kind](code, file);
+        if (!available[kind] || !test.test(named)) continue;
+        const { css, deps } = await compile[kind](code, file, named);
         for (const dep of deps) if (dep !== file) this.addWatchFile(dep);
         return { code: css, moduleType: 'css' };
       }
@@ -1146,7 +1164,10 @@ async function init(params) {
     } catch (error) {
       // Node cannot follow imports without an extension or of a folder, which a TypeScript config often has; Vite bundles the config
       // to get around that, and so does this.
-      const bundled = ['ERR_MODULE_NOT_FOUND', 'ERR_UNSUPPORTED_DIR_IMPORT'].includes(error?.code) ? await importBundled(path.resolve(root, params.config)) : null;
+      // A configuration written for CommonJS (`__dirname`, `require`) fails the same way in an ES module, and bundling gives it the values.
+      const needsBundling = ['ERR_MODULE_NOT_FOUND', 'ERR_UNSUPPORTED_DIR_IMPORT'].includes(error?.code)
+        || (error instanceof ReferenceError && /\b(__dirname|__filename|require) is not defined/.test(error.message));
+      const bundled = needsBundling ? await importBundled(path.resolve(root, params.config)) : null;
       if (!bundled) throw new Error(`Cannot load ${params.config}: ${error.message}`);
       mod = bundled.module;
     }
