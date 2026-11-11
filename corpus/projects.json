@@ -585,6 +585,792 @@
           "empty": true
         }
       }
+    },
+    {
+      "name": "defu",
+      "kind": "library",
+      "repo": "https://github.com/unjs/defu",
+      "sha": "82632b66f5914e9946edce300e10633a3d5c0cb7",
+      "build": [
+        "bundle",
+        "src/defu.ts",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/defu.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/defu.mjs"
+        ],
+        "exports": [
+          "defu",
+          "createDefu"
+        ]
+      }
+    },
+    {
+      "name": "ufo",
+      "kind": "library",
+      "repo": "https://github.com/unjs/ufo",
+      "sha": "f06c800d0c59f2a4a1b9ba65eb6cb61a84419be6",
+      "build": [
+        "bundle",
+        "src/index.ts",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/ufo.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/ufo.mjs"
+        ],
+        "exports": [
+          "joinURL",
+          "parseURL"
+        ]
+      }
+    },
+    {
+      "name": "pathe",
+      "kind": "library",
+      "repo": "https://github.com/unjs/pathe",
+      "sha": "bc7477a01f0bd60ada017add8142c9f9d69ccdc5",
+      "build": [
+        "bundle",
+        "src/index.ts",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/pathe.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/pathe.mjs"
+        ],
+        "exports": [
+          "join",
+          "resolve"
+        ]
+      }
+    },
+    {
+      "name": "destr",
+      "kind": "library",
+      "repo": "https://github.com/unjs/destr",
+      "sha": "541b6f9aeada9fc30de9c5a7e086dbfc1c6fcdc7",
+      "build": [
+        "bundle",
+        "src/index.ts",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/destr.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/destr.mjs"
+        ],
+        "exports": [
+          "destr"
+        ]
+      }
+    },
+    {
+      "name": "scule",
+      "kind": "library",
+      "repo": "https://github.com/unjs/scule",
+      "sha": "5bc68048caad7c0e7de35842c83a510e8e1a7c4f",
+      "build": [
+        "bundle",
+        "src/index.ts",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/scule.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/scule.mjs"
+        ],
+        "exports": [
+          "camelCase",
+          "kebabCase"
+        ]
+      }
+    },
+    {
+      "name": "citty",
+      "kind": "library",
+      "repo": "https://github.com/unjs/citty",
+      "sha": "3e342fe7b3f67575faf51df8361d502be6fe32e8",
+      "build": [
+        "bundle",
+        "src/index.ts",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/citty.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/citty.mjs"
+        ],
+        "exports": [
+          "defineCommand",
+          "runMain"
+        ]
+      }
+    },
+    {
+      "name": "consola",
+      "kind": "library",
+      "repo": "https://github.com/unjs/consola",
+      "sha": "c47faac1738b7383971c6c20b5a34ffa15e7cc3b",
+      "build": [
+        "bundle",
+        "src/index.ts",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/consola.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/consola.mjs"
+        ],
+        "exports": [
+          "consola",
+          "createConsola"
+        ]
+      }
+    },
+    {
+      "name": "jotai",
+      "kind": "library",
+      "repo": "https://github.com/pmndrs/jotai",
+      "sha": "9de9377d10a5ac01388764b89458e2d7091d29d4",
+      "build": [
+        "bundle",
+        "src/index.ts",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/jotai.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/jotai.mjs"
+        ],
+        "exports": [
+          "atom",
+          "createStore"
+        ]
+      }
+    },
+    {
+      "name": "valtio",
+      "kind": "library",
+      "repo": "https://github.com/pmndrs/valtio",
+      "sha": "26d8ca8cb6e5bb3b9516d429e50bc5aab1f42e0d",
+      "build": [
+        "bundle",
+        "src/index.ts",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/valtio.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/valtio.mjs"
+        ],
+        "exports": [
+          "proxy",
+          "snapshot"
+        ]
+      }
+    },
+    {
+      "name": "nanostores",
+      "kind": "library",
+      "repo": "https://github.com/nanostores/nanostores",
+      "sha": "7b86b32bcff00bf5d08895854765a9076740478a",
+      "build": [
+        "bundle",
+        "index.js",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/nanostores.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/nanostores.mjs"
+        ],
+        "exports": [
+          "atom",
+          "computed"
+        ]
+      }
+    },
+    {
+      "name": "ms",
+      "kind": "library",
+      "repo": "https://github.com/vercel/ms",
+      "sha": "4ff48cec099f0514c3e9bbca18706c9c21122bfb",
+      "build": [
+        "bundle",
+        "src/index.ts",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/ms.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/ms.mjs"
+        ],
+        "exports": [
+          "parse",
+          "format"
+        ]
+      }
+    },
+    {
+      "name": "dequal",
+      "kind": "library",
+      "repo": "https://github.com/lukeed/dequal",
+      "sha": "37c21f675c1f538f2d4b63ebf19a161411e7a5fd",
+      "build": [
+        "bundle",
+        "src/index.js",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/dequal.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/dequal.mjs"
+        ],
+        "exports": [
+          "dequal"
+        ]
+      }
+    },
+    {
+      "name": "p-limit",
+      "kind": "library",
+      "repo": "https://github.com/sindresorhus/p-limit",
+      "sha": "a8a6fbec4e0e866d6d779b10889bb4f5567e70eb",
+      "build": [
+        "bundle",
+        "index.js",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/p-limit.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/p-limit.mjs"
+        ],
+        "exports": [
+          "default"
+        ]
+      }
+    },
+    {
+      "name": "p-map",
+      "kind": "library",
+      "repo": "https://github.com/sindresorhus/p-map",
+      "sha": "d61b6a33cc1d5533ad5711b435959f3f78c3d2fe",
+      "build": [
+        "bundle",
+        "index.js",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/p-map.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/p-map.mjs"
+        ],
+        "exports": [
+          "default"
+        ]
+      }
+    },
+    {
+      "name": "chalk",
+      "kind": "library",
+      "repo": "https://github.com/chalk/chalk",
+      "sha": "72110019e147683f60e13fa0ff5c14a0c27cd9fe",
+      "build": [
+        "bundle",
+        "source/index.js",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/chalk.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/chalk.mjs"
+        ],
+        "exports": [
+          "default",
+          "Chalk"
+        ]
+      }
+    },
+    {
+      "name": "ansi-styles",
+      "kind": "library",
+      "repo": "https://github.com/chalk/ansi-styles",
+      "sha": "8cf247afbecf29a8227f7d0beb69c2997fc6bc61",
+      "build": [
+        "bundle",
+        "index.js",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/ansi-styles.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/ansi-styles.mjs"
+        ],
+        "exports": [
+          "default"
+        ]
+      }
+    },
+    {
+      "name": "cac",
+      "kind": "library",
+      "repo": "https://github.com/cacjs/cac",
+      "sha": "12a5e8278719dfd9a4b7197a6690e7bf01b20b07",
+      "build": [
+        "bundle",
+        "src/index.ts",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/cac.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/cac.mjs"
+        ],
+        "exports": [
+          "cac"
+        ]
+      }
+    },
+    {
+      "name": "rbush",
+      "kind": "library",
+      "repo": "https://github.com/mourner/rbush",
+      "sha": "e59712716a84dda2e31f9b471b32faa178d8056f",
+      "build": [
+        "bundle",
+        "index.js",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/rbush.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/rbush.mjs"
+        ],
+        "exports": [
+          "default"
+        ]
+      }
+    },
+    {
+      "name": "flatbush",
+      "kind": "library",
+      "repo": "https://github.com/mourner/flatbush",
+      "sha": "665f71715ecb19ea8b4739f0277ed4f04d99fe6d",
+      "build": [
+        "bundle",
+        "index.js",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/flatbush.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/flatbush.mjs"
+        ],
+        "exports": [
+          "default"
+        ]
+      }
+    },
+    {
+      "name": "d3-array",
+      "kind": "library",
+      "repo": "https://github.com/d3/d3-array",
+      "sha": "24c015e4d894ee44af6cf6a2cc9e300b1885b0d9",
+      "build": [
+        "bundle",
+        "src/index.js",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/d3-array.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/d3-array.mjs"
+        ],
+        "exports": [
+          "ascending",
+          "bisect"
+        ]
+      }
+    },
+    {
+      "name": "d3-hierarchy",
+      "kind": "library",
+      "repo": "https://github.com/d3/d3-hierarchy",
+      "sha": "41f11f82647566c90150272210c50188dec4071b",
+      "build": [
+        "bundle",
+        "src/index.js",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/d3-hierarchy.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/d3-hierarchy.mjs"
+        ],
+        "exports": [
+          "hierarchy",
+          "cluster"
+        ]
+      }
+    },
+    {
+      "name": "preact",
+      "kind": "library",
+      "repo": "https://github.com/preactjs/preact",
+      "sha": "adc1acc3fd56d5f6030d134bbea43b58ba19407a",
+      "build": [
+        "bundle",
+        "src/index.js",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/preact.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/preact.mjs"
+        ],
+        "exports": [
+          "h",
+          "render"
+        ]
+      }
+    },
+    {
+      "name": "htm",
+      "kind": "library",
+      "repo": "https://github.com/developit/htm",
+      "sha": "d62dcfdc721e47bc1923a2cb7a01ebd594ab0c25",
+      "build": [
+        "bundle",
+        "src/index.mjs",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/htm.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/htm.mjs"
+        ],
+        "exports": [
+          "default"
+        ]
+      }
+    },
+    {
+      "name": "signals",
+      "kind": "library",
+      "repo": "https://github.com/preactjs/signals",
+      "sha": "0e888794dec90ea60fd7724e2bece11b15cdc6fc",
+      "build": [
+        "bundle",
+        "packages/core/src/index.ts",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/signals.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/signals.mjs"
+        ],
+        "exports": [
+          "signal",
+          "computed"
+        ]
+      }
+    },
+    {
+      "name": "underscore",
+      "kind": "library",
+      "repo": "https://github.com/jashkenas/underscore",
+      "sha": "5c1e5f686f8500af9c9d15614ed60289d6d35d6b",
+      "build": [
+        "bundle",
+        "modules/index-all.js",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/underscore.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/underscore.mjs"
+        ],
+        "exports": [
+          "map",
+          "default"
+        ]
+      }
+    },
+    {
+      "name": "uPlot",
+      "kind": "library",
+      "repo": "https://github.com/leeoniya/uPlot",
+      "sha": "1f916f350bc11e86ee407f55cc5c3a77f723d8d5",
+      "build": [
+        "bundle",
+        "src/uPlot.js",
+        "--format",
+        "esm",
+        "--outfile",
+        "out/uPlot.mjs"
+      ],
+      "expect": {
+        "files": [
+          "out/uPlot.mjs"
+        ],
+        "exports": [
+          "default"
+        ]
+      }
+    },
+    {
+      "name": "solid-template-basic",
+      "kind": "app",
+      "repo": "https://github.com/solidjs/templates",
+      "sha": "d09e110513f43f02c3ec34e8dd22ca22f9f35ebf",
+      "dir": "vanilla/basic",
+      "build": [
+        "bundle",
+        "index.html",
+        "--outdir",
+        "dist",
+        "--config",
+        "vite.config.ts"
+      ],
+      "expect": {
+        "files": [
+          "dist/index.html"
+        ]
+      }
+    },
+    {
+      "name": "solid-template-router",
+      "kind": "app",
+      "repo": "https://github.com/solidjs/templates",
+      "sha": "d09e110513f43f02c3ec34e8dd22ca22f9f35ebf",
+      "dir": "vanilla/with-solid-router",
+      "build": [
+        "bundle",
+        "index.html",
+        "--outdir",
+        "dist",
+        "--config",
+        "vite.config.ts"
+      ],
+      "expect": {
+        "files": [
+          "dist/index.html"
+        ]
+      }
+    },
+    {
+      "name": "solid-template-sass",
+      "kind": "app",
+      "repo": "https://github.com/solidjs/templates",
+      "sha": "d09e110513f43f02c3ec34e8dd22ca22f9f35ebf",
+      "dir": "vanilla/with-sass",
+      "build": [
+        "bundle",
+        "index.html",
+        "--outdir",
+        "dist",
+        "--config",
+        "vite.config.ts"
+      ],
+      "expect": {
+        "files": [
+          "dist/index.html"
+        ]
+      }
+    },
+    {
+      "name": "redux-vite-template",
+      "kind": "app",
+      "repo": "https://github.com/reduxjs/redux-templates",
+      "sha": "37f05cfd6e9ec235c202e816e083aeee578135bb",
+      "dir": "packages/vite-template-redux",
+      "build": [
+        "bundle",
+        "index.html",
+        "--outdir",
+        "dist",
+        "--config",
+        "vite.config.ts"
+      ],
+      "expect": {
+        "files": [
+          "dist/index.html"
+        ]
+      }
+    },
+    {
+      "name": "mui-vite-ts",
+      "kind": "app",
+      "repo": "https://github.com/mui/material-ui",
+      "sha": "66c99574ac1ca3b2915618c9e1fc4745b26f6d19",
+      "dir": "examples/material-ui-vite-ts",
+      "build": [
+        "bundle",
+        "index.html",
+        "--outdir",
+        "dist",
+        "--config",
+        "vite.config.ts"
+      ],
+      "expect": {
+        "files": [
+          "dist/index.html"
+        ]
+      }
+    },
+    {
+      "name": "tanstack-query-basic",
+      "kind": "app",
+      "repo": "https://github.com/TanStack/query",
+      "sha": "8f6da1e2a1b5e9afd774cd12bd3865df5c432984",
+      "dir": "examples/react/basic",
+      "build": [
+        "bundle",
+        "index.html",
+        "--outdir",
+        "dist",
+        "--config",
+        "vite.config.ts"
+      ],
+      "expect": {
+        "files": [
+          "dist/index.html"
+        ]
+      }
+    },
+    {
+      "name": "vitesse-lite",
+      "kind": "app",
+      "repo": "https://github.com/antfu-collective/vitesse-lite",
+      "sha": "0b352977755e1f7f6399698e308777760409ca71",
+      "build": [
+        "bundle",
+        "index.html",
+        "--outdir",
+        "dist",
+        "--config",
+        "vite.config.ts"
+      ],
+      "expect": {
+        "files": [
+          "dist/index.html"
+        ]
+      }
+    },
+    {
+      "name": "element-plus-starter",
+      "kind": "app",
+      "repo": "https://github.com/element-plus/element-plus-vite-starter",
+      "sha": "28b963cbf3ae81cd9d94df2547220364f6397a78",
+      "build": [
+        "bundle",
+        "index.html",
+        "--outdir",
+        "dist",
+        "--config",
+        "vite.config.ts"
+      ],
+      "expect": {
+        "files": [
+          "dist/index.html"
+        ]
+      }
+    },
+    {
+      "name": "tanstack-query-simple",
+      "kind": "app",
+      "repo": "https://github.com/TanStack/query",
+      "sha": "8f6da1e2a1b5e9afd774cd12bd3865df5c432984",
+      "dir": "examples/react/simple",
+      "build": [
+        "bundle",
+        "index.html",
+        "--outdir",
+        "dist",
+        "--config",
+        "vite.config.ts"
+      ],
+      "expect": {
+        "files": [
+          "dist/index.html"
+        ]
+      }
+    },
+    {
+      "name": "solid-template-unocss",
+      "kind": "app",
+      "repo": "https://github.com/solidjs/templates",
+      "sha": "d09e110513f43f02c3ec34e8dd22ca22f9f35ebf",
+      "dir": "vanilla/with-unocss",
+      "build": [
+        "bundle",
+        "index.html",
+        "--outdir",
+        "dist",
+        "--config",
+        "vite.config.ts"
+      ],
+      "expect": {
+        "files": [
+          "dist/index.html"
+        ]
+      }
     }
   ]
 }

@@ -103,7 +103,7 @@ jobs:
           if-no-files-found: error
 
   # The pinned open-source projects, built with this version and loaded in a browser (tools/run-corpus.mjs). It does not hold up the
-  # release, because it fetches other projects from the network and a release cannot be undone; docs/RELEASING.md asks for 24 of 24
+  # release, because it fetches other projects from the network and a release cannot be undone; docs/RELEASING.md asks for 60 of 60
   # before the tag is made, and the results of this run are kept for 90 days with the run.
   corpus:
     uses: ./.github/workflows/corpus.yml

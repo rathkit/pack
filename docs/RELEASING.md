@@ -20,7 +20,7 @@ one step that publishes there.
 1. Put the version in `Cargo.toml` (and `Cargo.lock`, which `cargo build` updates), and add the `## <version>` section to
    `CHANGELOG.md` with its date. Commit that as `chore(release): <version>` (signed, with the DCO sign-off).
 2. Push the commit, then run the corpus on it: **Actions, corpus, Run workflow**, on `main`. All of the projects must build and
-   check out (the summary of the run starts with the count, for example "24 of 24 built and checked out"). A project that
+   check out (the summary of the run starts with the count, for example "60 of 60 built and checked out"). A project that
    fails is either fixed first or named in the `CHANGELOG.md` section with the reason. The corpus fetches other projects from
    the network, so it never blocks a release by itself; it is a step here instead.
 3. Make the tag signed, on that commit: `git tag -s v<version> -m v<version>`.

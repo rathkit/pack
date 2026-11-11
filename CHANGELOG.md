@@ -16,6 +16,25 @@ What an alpha does promise, and checks on every change (`tools/check-promises.mj
 scripts in any package, a build that needs no network, provenance and checksums on every release. It promises nothing
 about stability.
 
+## Unreleased
+
+### Added
+
+- The corpus grew from 24 to 60 pinned projects (`corpus/projects.json`): more libraries (unjs, pmndrs, nanostores, chalk, d3,
+  preact and others), and Vue, Solid, Preact, React and Svelte apps, among them Vue apps with UnoCSS and Sass, Redux and
+  Material UI templates, and folders of larger repositories. All 60 build, and the apps load in a browser without errors.
+- Sass finds a package by its name, as Vite does: `@use 'element-plus/theme-chalk/src/index.scss'` is looked for in the
+  `node_modules` folders above the file. A leading `~` works too.
+
+### Fixed
+
+- `export default function() {}` (no space after `function`) in a module that another module imports by name was written as
+  `functioncluster_default () {}`, which does not parse. Found building d3-hierarchy.
+- A Vite configuration that reads `__dirname`, `__filename` or `require` at load time (as most written for CommonJS do) is
+  bundled with their values instead of failing with "is not defined in ES module scope". Found building vitesse-lite.
+- The style block of a single-file component (`App.vue?vue&type=style&index=0&lang.scss`) is compiled as Sass, Less or
+  Stylus by the language its query names, not left as source for the style sheet reader.
+
 ## 0.1.0-alpha.2 - 2026-11-09
 
 Every npm package and the crate are now listed, with the binaries, in the signed `SHA256SUMS` of the release, and the `npm` and

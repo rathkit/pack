@@ -4,7 +4,7 @@ name: corpus
 # It runs other projects' configuration files and plugins, so it is never part of the checks a change needs: run it by hand, on
 # the weekly schedule, or from the release workflow (a version tag), to learn what a change or a new release of a dependency
 # broke. It has no secrets and a read-only token. The results (corpus.json and corpus.txt) are kept as a workflow artifact for
-# 90 days, and the summary of the run starts with the count (for example "24 of 24 built and checked out").
+# 90 days, and the summary of the run starts with the count (for example "60 of 60 built and checked out").
 on:
   workflow_dispatch:
     inputs:
