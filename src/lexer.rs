@@ -195,6 +195,11 @@ pub struct Lexer<'a> {
     html_comments: bool,
     /// Where the legal comments (`/*! */`, `//!`, `@license`, `@preserve`) are, as they are met (a comment met again after the parser went back is met twice).
     pub legal: Vec<(u32, u32)>,
+    /// Where the comments are that output can do without: every one that is not legal and not an annotation other tools read (`@__PURE__`,
+    /// `#__PURE__`, `webpackChunkName` and the like). Met again after the parser went back, a comment is met twice.
+    pub droppable: Vec<(u32, u32)>,
+    /// Whether to fill `droppable` (it is only wanted for text that is written as it was read).
+    pub record_comments: bool,
 }
 
 impl<'a> Lexer<'a> {
@@ -202,7 +207,7 @@ impl<'a> Lexer<'a> {
         if src.len() > u32::MAX as usize {
             return Err(LexError::new("source files larger than 4 GiB are not supported", 0));
         }
-        let mut lexer = Lexer { src, bytes: src.as_bytes(), pos: 0, html_comments: false, legal: Vec::new() };
+        let mut lexer = Lexer { src, bytes: src.as_bytes(), pos: 0, html_comments: false, legal: Vec::new(), droppable: Vec::new(), record_comments: false };
         // A hashbang is only a comment at the very start of the file.
         if lexer.bytes.starts_with(b"#!") {
             lexer.skip_line_comment_body();
@@ -414,6 +419,8 @@ impl<'a> Lexer<'a> {
         let bang = text.get(2) == Some(&b'!');
         if bang || text.windows(8).any(|w| w == b"@license") || text.windows(9).any(|w| w == b"@preserve") {
             self.legal.push((start as u32, self.pos as u32));
+        } else if self.record_comments && !text.windows(2).any(|w| w == b"@_" || w == b"#_") && !text.windows(7).any(|w| w == b"webpack") && !text.windows(11).any(|w| w == b"vite-ignore") {
+            self.droppable.push((start as u32, self.pos as u32));
         }
     }
 

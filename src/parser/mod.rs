@@ -47,11 +47,13 @@ pub struct ParseOptions {
     /// The text is a stretch of statements cut out of a larger file: names it exports need not
     /// be declared in it, and a `return` may stand at the top level.
     pub fragment: bool,
+    /// Note where the comments are that output can do without (see [`Parsed::droppable`]).
+    pub comments: bool,
 }
 
 impl ParseOptions {
     pub const fn new(module: bool) -> ParseOptions {
-        ParseOptions { module, ts: false, jsx: false, decorator_metadata: false, strict_null_checks: false, ambient: false, record_tokens: false, fragment: false }
+        ParseOptions { module, ts: false, jsx: false, decorator_metadata: false, strict_null_checks: false, ambient: false, record_tokens: false, fragment: false, comments: false }
     }
 
     pub const fn with_recorded_tokens(mut self) -> ParseOptions {
@@ -144,7 +146,10 @@ pub fn parse(src: &str, options: ParseOptions) -> PResult<Parsed> {
     let mut legal = lexer.legal;
     legal.sort_unstable();
     legal.dedup();
-    Ok(Parsed { ast, semantic, is_ts, tokens, asi, eof_asi, legal })
+    let mut droppable = lexer.droppable;
+    droppable.sort_unstable();
+    droppable.dedup();
+    Ok(Parsed { ast, semantic, is_ts, tokens, asi, eof_asi, legal, droppable })
 }
 
 /// A parsed file: its syntax tree and what its identifiers mean.
@@ -161,6 +166,8 @@ pub struct Parsed {
     pub asi: Vec<usize>,
     /// Where the legal comments are (`/*! */`, `//!`, `@license`, `@preserve`), in order and once each.
     pub legal: Vec<(u32, u32)>,
+    /// Where the comments are that written output leaves out (not legal, not an annotation another tool reads), in order and once each.
+    pub droppable: Vec<(u32, u32)>,
     /// The last statement ended at the end of the text with no `;`: whatever is written after
     /// this text needs one in between.
     pub eof_asi: bool,
@@ -288,6 +295,7 @@ struct Parser<'a> {
 impl<'a> Parser<'a> {
     fn new(src: &'a str, options: ParseOptions) -> PResult<Self> {
         let mut lexer = Lexer::new(src)?.allow_html_comments(!options.module);
+        lexer.record_comments = options.comments;
         let tok = lexer.next_token()?;
         let mut parser = Parser {
             src,

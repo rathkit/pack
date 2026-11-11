@@ -413,6 +413,8 @@ struct Bundler<'a> {
     marks: std::sync::Mutex<Vec<Mark>>,
     /// Modules whose text can be tagged: it holds none of the tag characters.
     markable: Vec<bool>,
+    /// Per module, the comments written output leaves out, as `(start, end, what stands in their place)`, in order; see `comment_cuts`.
+    cuts: Vec<Vec<(u32, u32, &'static str)>>,
     /// The output is minified, so the bodies of big CommonJS modules may be cut for the minifier (see `nest_plan`).
     nesting: bool,
 }
@@ -542,6 +544,7 @@ impl<'a> Bundler<'a> {
             mapping: false,
             marks: std::sync::Mutex::new(Vec::new()),
             markable: Vec::new(),
+            cuts: Vec::new(),
             nesting: false,
                 }
     }
@@ -571,6 +574,8 @@ impl<'a> Bundler<'a> {
         if let Some(name) = &options.file_name {
             self.single_name = name.clone();
         }
+        // Minifying takes the comments out itself; this is for text that is written as it was read.
+        self.cuts = if options.minify.any() { Vec::new() } else { graph.modules.iter().map(|m| m.parsed.as_ref().map_or_else(Vec::new, |p| comment_cuts(&m.source, &p.droppable))).collect() };
         if self.mapping {
             self.markable = graph.modules.iter().map(|m| !m.source.contains(|c| ('\u{E000}'..='\u{E003}').contains(&c))).collect();
         }
@@ -3384,6 +3389,32 @@ impl Bundler<'_> {
         if from >= to {
             return;
         }
+        // The comments that are left out split the copy; what stands in their place is a line break or a space where one is needed.
+        if let Some(cuts) = self.cuts.get(id.index()).filter(|c| !c.is_empty()) {
+            let first = cuts.partition_point(|c| c.1 <= from);
+            if cuts.get(first).is_some_and(|c| c.0 < to) {
+                let mut at = from;
+                for &(start, end, stand_in) in &cuts[first..] {
+                    if start >= to {
+                        break;
+                    }
+                    self.copy_whole(out, id, at, start.max(from));
+                    if start >= from {
+                        out.push_str(stand_in);
+                    }
+                    at = end.min(to);
+                }
+                self.copy_whole(out, id, at, to);
+                return;
+            }
+        }
+        self.copy_whole(out, id, from, to);
+    }
+
+    fn copy_whole(&self, out: &mut String, id: ModuleId, from: u32, to: u32) {
+        if from >= to {
+            return;
+        }
         let text = &self.graph.module(id).source[from as usize..to as usize];
         if !self.mapping || !self.markable[id.index()] {
             out.push_str(text);
@@ -4764,4 +4795,57 @@ mod file_url_tests {
         assert_eq!(file_url(Path::new(r"D:\a\b c.js")), "\"file:///D:/a/b%20c.js\"");
         assert_eq!(file_url(Path::new(r"\\?\D:\a\b.js")), "\"file:///D:/a/b.js\"");
     }
+}
+
+
+/// The text to cut out for each comment in `comments` (in order), from the whole line when the comment stands alone on it, from the white
+/// space before it when it ends a line, and otherwise only the comment, with a space or a line break in its place when taking it out would
+/// join two words or remove the line break a `return` or a `++` depends on.
+fn comment_cuts(source: &str, comments: &[(u32, u32)]) -> Vec<(u32, u32, &'static str)> {
+    let bytes = source.as_bytes();
+    let mut out: Vec<(u32, u32, &'static str)> = Vec::with_capacity(comments.len());
+    let mut floor = 0usize;
+    for &(start, end) in comments {
+        let (start, end) = (start as usize, end as usize);
+        if start < floor {
+            continue;
+        }
+        let mut from = start;
+        while from > floor && matches!(bytes[from - 1], b' ' | b'\t') {
+            from -= 1;
+        }
+        let mut to = end;
+        while to < bytes.len() && matches!(bytes[to], b' ' | b'\t') {
+            to += 1;
+        }
+        let line_start = from == 0 || bytes[from - 1] == b'\n';
+        let line_end = to >= bytes.len() || matches!(bytes[to], b'\n' | b'\r');
+        let breaks = bytes[start..end].contains(&b'\n') || bytes[start..end].contains(&b'\r');
+        if line_start && line_end {
+            // A line of its own: the line goes, with its break.
+            if to < bytes.len() {
+                to += if bytes[to] == b'\r' && bytes.get(to + 1) == Some(&b'\n') { 2 } else { 1 };
+            }
+            out.push((from as u32, to as u32, ""));
+        } else if line_end {
+            // After code on the same line: the break stays.
+            out.push((from as u32, end as u32, ""));
+        } else {
+            // `from` and `to` already take in the spaces on either side of the comment.
+            let space_before = from < start || from == 0 || bytes[from - 1].is_ascii_whitespace();
+            let space_after = to > end || to >= bytes.len() || bytes[to].is_ascii_whitespace();
+            if breaks {
+                out.push((from as u32, to as u32, "\n"));
+            } else if space_before && space_after {
+                // White space on both sides: one of the two goes with the comment.
+                out.push((start as u32, to as u32, ""));
+            } else if space_before || space_after {
+                out.push((start as u32, end as u32, ""));
+            } else {
+                out.push((start as u32, end as u32, " "));
+            }
+        }
+        floor = out.last().map_or(floor, |c| c.1 as usize);
+    }
+    out
 }

@@ -1083,6 +1083,8 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
             }
         }
     }
+    // Minifying takes the comments out itself; text that is written as it was read leaves out the ones nobody reads.
+    options.drop_comments = !(bundle_options.minify.whitespace || bundle_options.minify.identifiers || bundle_options.minify.syntax);
     if watch {
         // Watching builds again and again: modules whose files did not change are kept between builds.
         options.cache = Some(std::sync::Arc::new(rathkit_pack::graph::ModuleCache::default()));

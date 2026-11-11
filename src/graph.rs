@@ -176,6 +176,8 @@ pub struct GraphOptions {
     pub jsx: JsxOptions,
     /// Emit the `design:*` metadata that dependency injection frameworks read.
     pub decorator_metadata: bool,
+    /// Note which comments the output can leave out (set when it is not minified, which takes them out itself).
+    pub drop_comments: bool,
     /// Use TypeScript's legacy decorators instead of the standard ones.
     pub experimental_decorators: bool,
     pub strict_null_checks: bool,
@@ -214,7 +216,7 @@ pub type WorkerBuilder = dyn Fn(&Path) -> Result<Vec<u8>, String> + Send + Sync;
 
 impl Default for GraphOptions {
     fn default() -> Self {
-        GraphOptions { plugins: None, resolve: ResolveOptions::default(), jsx: JsxOptions::default(), decorator_metadata: false, experimental_decorators: false, strict_null_checks: false, loaders: Vec::new(), asset_names: "[name]-[hash]".to_string(), public_path: "./".to_string(), defines: Default::default(), pure_calls: Vec::new(), inject: Vec::new(), external: Vec::new(), node_builtins: true, empty_builtins: false, packages_external: false, threads: 0, cache: None, federation: None, worker_builder: None }
+        GraphOptions { plugins: None, resolve: ResolveOptions::default(), jsx: JsxOptions::default(), decorator_metadata: false, drop_comments: false, experimental_decorators: false, strict_null_checks: false, loaders: Vec::new(), asset_names: "[name]-[hash]".to_string(), public_path: "./".to_string(), defines: Default::default(), pure_calls: Vec::new(), inject: Vec::new(), external: Vec::new(), node_builtins: true, empty_builtins: false, packages_external: false, threads: 0, cache: None, federation: None, worker_builder: None }
     }
 }
 
@@ -728,6 +730,7 @@ impl<'a> Context<'a> {
                     _ => {}
                 }
                 options.decorator_metadata = self.options.decorator_metadata;
+                options.comments = self.options.drop_comments;
                 options.strict_null_checks = self.options.strict_null_checks;
                 let (mut parsed, mut as_module) = parse_file(&source, mode, options).map_err(|e| error(e.message.clone(), Some(e.pos)))?;
                 // `import(\`./dir/${name}.js\`)` becomes a choice among imports of the files that fit (the parser noted there is one).

@@ -458,6 +458,32 @@ fn files_are_named_by_templates_and_the_hash_follows_what_they_run() {
 }
 
 #[test]
+fn plain_output_leaves_out_comments_except_legal_ones_and_annotations() {
+    let dir = scratch("comments");
+    let write = |name: &str, text: &str| std::fs::write(dir.join(name), text).unwrap();
+    write("f.js", "export const f = () => 1;\n");
+    write(
+        "main.js",
+        "/*! keep: license */\nimport { f } from './f.js';\n// a whole line\nexport const x = /* inline */ 1; // trailing\nfunction g() {\n  // inside\n  return /* a\n  b */ 5;\n}\nconst p = /* @__PURE__ */ f(/* webpackChunkName: \"c\" */ 1);\nconst q = 1/* tight */+2;\n/**\n * jsdoc\n */\nfunction h() { return x }\nconsole.log(x, g(), p, q, h());\n",
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_rkp")).current_dir(&dir).args(["bundle", "main.js", "--outfile", "out.mjs"]).output().expect("rkp starts");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let code = std::fs::read_to_string(dir.join("out.mjs")).unwrap();
+    for gone in ["a whole line", "inline", "trailing", "inside", "tight", "jsdoc"] {
+        assert!(!code.contains(gone), "{gone} is still there:\n{code}");
+    }
+    for kept in ["keep: license", "@__PURE__", "webpackChunkName"] {
+        assert!(code.contains(kept), "{kept} is gone:\n{code}");
+    }
+    // The line break inside the comment after `return` is still a line break, and the words around a tight comment do not join.
+    assert!(!code.contains("return 5") && code.contains("return\n"), "{code}");
+    assert!(code.contains("const q = 1 +2") || code.contains("const q = 1+2"), "{code}");
+    // No line is left holding nothing but the white space that was in front of a comment.
+    assert!(!code.lines().any(|l| l.trim().is_empty() && !l.is_empty()), "{code}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn legal_comments_survive_minifying_where_they_are_told_to() {
     let dir = scratch("legal");
     let write = |name: &str, text: &str| std::fs::write(dir.join(name), text).unwrap();
