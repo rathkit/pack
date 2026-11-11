@@ -966,6 +966,15 @@ fn flatten_sequence(ast: &Ast, e: NodeId, out: &mut Vec<NodeId>) {
     }
 }
 
+/// The global `Infinity`, which the minifier writes `1/0`.
+fn is_global_infinity(parsed: &parser::Parsed, n: NodeId) -> bool {
+    matches!(parsed.ast[n].kind, NodeKind::Ident(a) if parsed.ast.atom(a) == "Infinity") && parsed.semantic.symbol_of(n).is_none()
+}
+
+fn is_one_over_zero(ast: &Ast, n: NodeId) -> bool {
+    matches!(ast[n].kind, NodeKind::Binary { op: crate::ast::BinOp::Div, left, right } if matches!(ast[left].kind, NodeKind::Num(v) if v.get() == 1.0) && matches!(ast[right].kind, NodeKind::Num(v) if v.get() == 0.0))
+}
+
 fn is_void_zero(ast: &Ast, n: NodeId) -> bool {
     matches!(ast[n].kind, NodeKind::Unary { op: crate::ast::UnaryOp::Void, arg } if matches!(ast[arg].kind, NodeKind::Num(v) if v.get() == 0.0))
 }
@@ -1054,7 +1063,7 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
         if syntax && sx.declarators.is_none() && sy.declarators.is_none() {
             let rewritten = match (&nx.kind, &ny.kind) {
                 (NodeKind::Bool(v), _) => truth(&b.ast, y) == Some(*v) && matches!(ny.kind, NodeKind::Unary { .. }),
-                (NodeKind::Ident(_), _) => is_undefined(&a, x) && is_void_zero(&b.ast, y),
+                (NodeKind::Ident(_), _) => (is_undefined(&a, x) && is_void_zero(&b.ast, y)) || (is_global_infinity(&a, x) && is_one_over_zero(&b.ast, y)),
                 (NodeKind::Str(sa), NodeKind::PropName(pb)) => a.ast.atom(*sa) == b.ast.atom(*pb),
                 // A string written as a template with nothing in it to fill in: the same text.
                 (NodeKind::Str(sa), NodeKind::Template { quasis, exprs }) => {
@@ -1177,6 +1186,15 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                             continue;
                         }
                     }
+                }
+                // `-Infinity` as `-1/0`: the sign goes with the one.
+                (NodeKind::Unary { op, arg }, NodeKind::Binary { op: crate::ast::BinOp::Div, left, right })
+                    if matches!(op, crate::ast::UnaryOp::Neg | crate::ast::UnaryOp::Pos)
+                        && is_global_infinity(&a, *arg)
+                        && matches!(b.ast[*left].kind, NodeKind::Unary { op: o2, arg: one } if o2 == *op && matches!(b.ast[one].kind, NodeKind::Num(v) if v.get() == 1.0))
+                        && matches!(b.ast[*right].kind, NodeKind::Num(v) if v.get() == 0.0) =>
+                {
+                    continue;
                 }
                 (NodeKind::While { test, body }, NodeKind::For { init: None, test: None, update: None, body: bb }) if matches!(a.ast[*test].kind, NodeKind::Bool(true)) => {
                     stack.push((Side::node(*body), Side::node(*bb)));
@@ -1478,6 +1496,16 @@ mod tests {
         // A statement in between, or a missing final return, leaves the run as it was.
         assert_eq!(syntax("function f(a, b) { if (a) return 1; g(); if (b) return 2; return 3; }"), "function f(a,b){if(a)return 1;g();return b?2:3}");
         assert_eq!(syntax("function f(a, b) { if (a) return 1; if (b) return 2; g(); }"), "function f(a,b){if(a)return 1;if(b)return 2;g()}");
+    }
+
+    #[test]
+    fn infinity_is_one_over_zero() {
+        assert_eq!(syntax("x = [Infinity, -Infinity, +Infinity]; y = a + Infinity; z = Infinity;"), "x=[1/0,-1/0,+1/0];y=a+1/0;z=1/0");
+        // Where an operator binds tighter than `/`, or a form takes it as an operand, it is in parentheses.
+        assert_eq!(syntax("x = a / Infinity; y = a * -Infinity; z = typeof Infinity; w = Infinity.toString();"), "x=a/(1/0);y=a*-(1/0);z=typeof(1/0);w=(1/0).toString()");
+        // Not when something declares it, or when it is a shorthand property.
+        assert_eq!(syntax("function f(Infinity) { return Infinity }"), "function f(Infinity){return Infinity}");
+        assert_eq!(syntax("x = { Infinity };"), "x={Infinity}");
     }
 
     #[test]

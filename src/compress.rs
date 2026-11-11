@@ -237,6 +237,14 @@ impl Ctx<'_> {
                     self.write_unary(i, "void 0");
                 }
             }
+            // The global `Infinity`, read only: `1/0`, in parentheses where an operator that binds tighter than `/` stands beside it.
+            NodeKind::Ident(name) if ast.atom(name) == "Infinity" && self.is_global_undefined(n) && !self.is_shorthand_value(n) => {
+                let i = self.first_tok(node.span.start);
+                if self.tokens.get(i).is_some_and(|t| t.kind == Kind::Ident) {
+                    let text = if self.division_may_stand_here(n) { "1/0" } else { "(1/0)" };
+                    self.set_text(i, text);
+                }
+            }
             NodeKind::Empty if self.in_statement_list(n) => {
                 let i = self.first_tok(node.span.start);
                 if self.is(i, Punct::Semi) {
@@ -330,6 +338,31 @@ impl Ctx<'_> {
             self.set_text(i, &format!("({text})"));
         } else {
             self.set_text(i, text);
+        }
+    }
+
+    /// Whether `a / b` can stand where `n` stands without parentheses: its parent is not an operator or a form that binds tighter than `/`.
+    /// A sign in front (`-Infinity`) goes before the whole division, which reads the same, so that sign's own parent decides.
+    fn division_may_stand_here(&self, n: NodeId) -> bool {
+        let Some(mut parent) = self.parent[n.index()] else { return false };
+        let mut child = n;
+        if let NodeKind::Unary { op: UnaryOp::Neg | UnaryOp::Pos, .. } = self.ast[parent].kind {
+            // `-1/0` is `(-1)/0`, which is the same value as `-(1/0)`.
+            child = parent;
+            let Some(grand) = self.parent[parent.index()] else { return false };
+            parent = grand;
+        }
+        match self.ast[parent].kind {
+            NodeKind::VarDeclarator { init, .. } => init == Some(child),
+            NodeKind::Assign { value, .. } | NodeKind::Property { value, .. } => value == child,
+            NodeKind::Array(_) | NodeKind::Return(_) | NodeKind::Sequence(_) => true,
+            NodeKind::Call { callee, .. } | NodeKind::New { callee, .. } => callee != child,
+            NodeKind::Conditional { .. } => true,
+            NodeKind::Binary { op, .. } => {
+                use crate::ast::BinOp::*;
+                !matches!(op, Mul | Div | Rem | Exp)
+            }
+            _ => false,
         }
     }
 
