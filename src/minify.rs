@@ -1009,6 +1009,11 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                 (NodeKind::Bool(v), _) => truth(&b.ast, y) == Some(*v) && matches!(ny.kind, NodeKind::Unary { .. }),
                 (NodeKind::Ident(_), _) => is_undefined(&a, x) && is_void_zero(&b.ast, y),
                 (NodeKind::Str(sa), NodeKind::PropName(pb)) => a.ast.atom(*sa) == b.ast.atom(*pb),
+                // A string written as a template with nothing in it to fill in: the same text.
+                (NodeKind::Str(sa), NodeKind::Template { quasis, exprs }) => {
+                    b.ast.list(*exprs).is_empty()
+                        && matches!(b.ast.list(*quasis), [q] if matches!(b.ast[*q].kind, NodeKind::TemplateElement { cooked: Some(c), .. } if b.ast.atom(c) == a.ast.atom(*sa)))
+                }
                 (NodeKind::Num(na), NodeKind::Num(nb)) => na.get().to_bits() == nb.get().to_bits(),
                 _ => false,
             };
@@ -1287,6 +1292,26 @@ mod tests {
         let options = Options { whitespace: true, syntax: true, ..Options::default() };
         verify(source, &options).unwrap_or_else(|e| panic!("{e}\n{source}"));
         minify(source, &options).unwrap()
+    }
+
+    #[test]
+    fn a_string_with_line_breaks_is_a_template_when_that_is_shorter() {
+        // A line break and a tab are one byte in a template, two in a string; a quote needs no escape.
+        assert_eq!(syntax(r#"x = "a\nb\t\"c\"";"#), "x=`a\nb\t\"c\"`");
+        assert_eq!(syntax(r#"f("one\ntwo", ["a\nb"], {k: "c\nd"});"#), "f(`one\ntwo`,[`a\nb`],{k:`c\nd`})");
+        // Not shorter, or not the same in a template: left as written.
+        assert_eq!(syntax(r#"x = "a\x41b";"#), r#"x="a\x41b""#);
+        assert_eq!(syntax(r#"x = "a\0b\n";"#), "x=`a\\0b\n`");
+        // `\r` stays an escape (a raw carriage return would be read as a line feed).
+        assert_eq!(syntax(r#"x = "a\r\nb";"#), "x=`a\\r\nb`");
+        // A backtick or `${` is escaped, which can cost as much as it saves.
+        assert_eq!(syntax(r#"x = "a\n${b}";"#), r#"x="a\n${b}""#);
+        assert_eq!(syntax(r#"x = "a\n\n${b}";"#), "x=`a\n\n\\${b}`");
+        // Places a template would not do: a directive, a key, a module name, what `require` is given, an operand.
+        assert_eq!(syntax(r#"function f() { "use strict\n"; return 1 }"#), r#"function f(){"use strict\n";return 1}"#);
+        assert_eq!(syntax(r#"x = {"a\nb": 1};"#), r#"x={"a\nb":1}"#);
+        assert_eq!(syntax(r#"x = require("a\nb");"#), r#"x=require("a\nb")"#);
+        assert_eq!(syntax(r#"x = "a\nb" + y;"#), r#"x="a\nb"+y"#);
     }
 
     #[test]

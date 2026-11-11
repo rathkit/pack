@@ -159,6 +159,20 @@ impl Ctx<'_> {
         self.tokens.get(i).is_some_and(|t| t.kind == Kind::Keyword(k))
     }
 
+    /// Whether the string `n` stands where a template literal means the same: the value of a variable or property, an assignment, an array
+    /// element, a returned value or an argument. Not a directive, a key, a module name or the operand of an operator, and not what
+    /// `require` is given (other tools read that as a string).
+    fn string_may_be_template(&self, n: NodeId) -> bool {
+        let Some(parent) = self.parent[n.index()] else { return false };
+        match self.ast[parent].kind {
+            NodeKind::VarDeclarator { init, .. } => init == Some(n),
+            NodeKind::Assign { value, .. } | NodeKind::Property { value, .. } => value == n && !self.ast[parent].has(flags::SHORTHAND),
+            NodeKind::Array(_) | NodeKind::Return(_) => true,
+            NodeKind::Call { callee, .. } => callee != n && !matches!(self.ast[callee].kind, NodeKind::Ident(a) if self.ast.atom(a) == "require"),
+            _ => false,
+        }
+    }
+
     /// The action that writes `text` in place of a token.
     fn text_action(&mut self, text: &str) -> Action {
         if let Some(&id) = self.text_index.get(text) {
@@ -234,6 +248,14 @@ impl Ctx<'_> {
                 if self.tokens.get(i).is_some_and(|t| t.kind == Kind::Number) {
                     if let Some(short) = shorten_number(self.text(i)) {
                         self.set_text(i, &short);
+                    }
+                }
+            }
+            NodeKind::Str(_) if self.string_may_be_template(n) => {
+                let i = self.first_tok(node.span.start);
+                if self.tokens.get(i).is_some_and(|t| t.kind == Kind::String) {
+                    if let Some(template) = as_template(self.text(i)) {
+                        self.set_text(i, &template);
                     }
                 }
             }
@@ -1224,4 +1246,41 @@ mod tests {
         assert_eq!(shorten_number("017"), None);
         assert_eq!(shorten_number("0xFFFFFFFFFFFFFFFFF"), None);
     }
+}
+
+
+/// A string literal (quotes included) as a template literal, when that is shorter: a line break or a tab is one byte there where the string
+/// needs two, and a quote needs none. `None` when the string has an escape a template does not allow (an octal one), a carriage return (a
+/// template would read it as a line feed), a `${` or a backtick that would need an escape of its own more than it saves, or when the result is
+/// not shorter.
+pub(crate) fn as_template(token: &str) -> Option<String> {
+    let body = token.get(1..token.len().checked_sub(1)?)?;
+    if !body.contains('\\') || body.contains('\r') {
+        return None;
+    }
+    let mut out = String::with_capacity(token.len());
+    out.push('`');
+    let mut chars = body.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => match chars.next()? {
+                'n' => out.push('\n'),
+                't' => out.push('\t'),
+                q @ ('"' | '\'') => out.push(q),
+                // `\0` followed by a digit, and `\1` to `\9`, are octal escapes (or worse) that a template refuses.
+                '0' if !chars.peek().is_some_and(char::is_ascii_digit) => out.push_str("\\0"),
+                '1'..='9' | '0' => return None,
+                // A line continuation: a template reads it the same way, unless a carriage return is involved (ruled out above).
+                other => {
+                    out.push('\\');
+                    out.push(other);
+                }
+            },
+            '`' => out.push_str("\\`"),
+            '$' if chars.peek() == Some(&'{') => out.push_str("\\$"),
+            other => out.push(other),
+        }
+    }
+    out.push('`');
+    (out.len() < token.len()).then_some(out)
 }
