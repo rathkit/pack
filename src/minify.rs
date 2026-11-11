@@ -220,6 +220,10 @@ struct Facts {
     names_inferred: Vec<NodeId>,
     /// Where `;` is an empty statement and must stay.
     empty_statements: HashSet<u32>,
+    /// Every labeled statement, with how many labeled statements it stands in (the label's new name comes from that).
+    labels: Vec<(NodeId, usize)>,
+    /// Every `break` and `continue` that names a label, with the labeled statement it leaves or continues.
+    jumps: Vec<(NodeId, NodeId)>,
 }
 
 impl Facts {
@@ -245,7 +249,9 @@ impl Facts {
         enum Step {
             Enter(NodeId),
             Leave(usize),
+            LeaveLabel,
         }
+        let mut open_labels: Vec<NodeId> = Vec::new();
         let mut stack = vec![Step::Enter(ast.root)];
         let mut scopes: Vec<ScopeId> = vec![sem.root_scope()];
         let mut children: Vec<NodeId> = Vec::new();
@@ -253,6 +259,10 @@ impl Facts {
             let node = match step {
                 Step::Leave(count) => {
                     scopes.truncate(scopes.len() - count);
+                    continue;
+                }
+                Step::LeaveLabel => {
+                    open_labels.pop();
                     continue;
                 }
                 Step::Enter(node) => node,
@@ -271,6 +281,17 @@ impl Facts {
             let here = *scopes.last().expect("the root scope");
             let n = &ast[node];
             match n.kind {
+                NodeKind::Labeled { .. } => {
+                    self.labels.push((node, open_labels.len()));
+                    open_labels.push(node);
+                    stack.push(Step::LeaveLabel);
+                }
+                NodeKind::Break(Some(label)) | NodeKind::Continue(Some(label)) => {
+                    let target = open_labels.iter().rev().find(|&&l| matches!(ast[l].kind, NodeKind::Labeled { label: name, .. } if name == label));
+                    if let Some(&target) = target {
+                        self.jumps.push((node, target));
+                    }
+                }
                 NodeKind::Ident(_) | NodeKind::BindingIdent(_) => match sem.symbol_of(node) {
                     Some(sym) => self.occurrences.push((node, sym, here)),
                     None if matches!(n.kind, NodeKind::Ident(_)) => self.unresolved.push((node, here)),
@@ -666,6 +687,32 @@ impl Facts {
                 outer_text_ids[k] = renames.intern(new);
             }
             renames.set_id(tokens, start, outer_text_ids[k]);
+        }
+        // Labels are a namespace of their own: the outermost is `e`, the one inside it `t`, and so on, and a jump takes its target's name.
+        let label_name = |depth: usize| FIRST.get(depth).filter(|_| depth < 16).map(|&b| (b as char).to_string());
+        let word_at = |at: usize| (tokens.get(at).filter(|t| t.kind == Kind::Ident).map(|t| &source[t.start as usize..t.end as usize]), tokens.get(at).map_or(0, |t| t.start));
+        let mut depth_of: HashMap<NodeId, usize> = HashMap::default();
+        for &(node, depth) in &self.labels {
+            let NodeKind::Labeled { label, .. } = ast[node].kind else { continue };
+            let Some(new) = label_name(depth) else { continue };
+            depth_of.insert(node, depth);
+            let at = tokens.partition_point(|t| t.start < ast[node].span.start);
+            if let (Some(word), start) = word_at(at) {
+                if word == ast.atom(label) {
+                    renames.set(tokens, start, &new);
+                }
+            }
+        }
+        for &(node, target) in &self.jumps {
+            let Some(&depth) = depth_of.get(&target) else { continue };
+            let (Some(new), NodeKind::Break(Some(label)) | NodeKind::Continue(Some(label))) = (label_name(depth), ast[node].kind) else { continue };
+            // The label is the token after `break` or `continue`.
+            let at = tokens.partition_point(|t| t.start < ast[node].span.start) + 1;
+            if let (Some(word), start) = word_at(at) {
+                if word == ast.atom(label) {
+                    renames.set(tokens, start, &new);
+                }
+            }
         }
         lap("apply occurrences");
         for (start, local, imported) in &self.import_specifiers {
@@ -1341,6 +1388,17 @@ mod tests {
     }
 
     #[test]
+    fn labels_take_short_names_by_how_deep_they_are() {
+        let out = min("function f(list) { outer: for (const a of list) { inner: for (const b of a) { if (b) continue outer; if (a) break inner; } } done: { if (list) break done; } }");
+        assert!(out.contains("e:for") && out.contains("t:for") && out.contains("continue e") && out.contains("break t") && out.contains("e:{"), "{out}");
+        assert!(out.contains("break e}"), "{out}");
+        assert!(!out.contains("outer") && !out.contains("inner") && !out.contains("done"), "{out}");
+        // A label named like a variable is still a label.
+        let out = min("function f(a) { a: for (;;) { if (a) break a; } }");
+        assert!(!out.contains("break a"), "{out}");
+    }
+
+    #[test]
     fn anchors_say_where_each_token_went() {
         let source = "function add(first, second) {\n  return first + second; // sum\n}\nadd(1, 2);\n";
         let (out, anchors) = minify_with_anchors(source, &ALL).unwrap();
@@ -1414,6 +1472,15 @@ mod tests {
     }
 
     #[test]
+    fn a_run_of_returns_after_conditions_is_one_conditional() {
+        assert_eq!(syntax("function f(a, b) { if (a) return 1; if (b) return 2; return 3; }"), "function f(a,b){return a?1:b?2:3}");
+        assert_eq!(syntax("function f(a, b, c) { if (a) return 1; if (b) { return 2 } if (c) return 3; return 4 }"), "function f(a,b,c){return a?1:b?2:c?3:4}");
+        // A statement in between, or a missing final return, leaves the run as it was.
+        assert_eq!(syntax("function f(a, b) { if (a) return 1; g(); if (b) return 2; return 3; }"), "function f(a,b){if(a)return 1;g();return b?2:3}");
+        assert_eq!(syntax("function f(a, b) { if (a) return 1; if (b) return 2; g(); }"), "function f(a,b){if(a)return 1;if(b)return 2;g()}");
+    }
+
+    #[test]
     fn literals_are_written_short() {
         assert_eq!(syntax("x = [true, false, undefined, 1000, 0.5]"), "x=[!0,!1,void 0,1e3,.5]");
         // A property of a literal needs it in parentheses; a local `undefined` is its own.
@@ -1470,15 +1537,6 @@ mod tests {
         assert_eq!(syntax("while (true) { x() }"), "for(;;)x()");
         assert_eq!(syntax("x = ((a % b) + b) % b; y = (a, b); z = (a && b) || c; w = a && (b || c); v = (-a) ** 2; u = -(-a)"), "x=(a%b+b)%b;y=(a,b);z=a&&b||c;w=a&&(b||c);v=(-a)**2;u=-(-a)");
         assert_eq!(syntax("a = (b = 1); c = [(d = 2), (e, f)]; (g = 1), (h = 2); new (i.j)(k); new (l())(); (m.n)(); (o?.p)()"), "a=b=1;c=[d=2,(e,f)];g=1,h=2;new i.j(k);new(l());m.n();(o?.p)()");
-    }
-
-    #[test]
-    fn a_run_of_returns_after_conditions_is_one_conditional() {
-        assert_eq!(syntax("function f(a, b) { if (a) return 1; if (b) return 2; return 3; }"), "function f(a,b){return a?1:b?2:3}");
-        assert_eq!(syntax("function f(a, b, c) { if (a) return 1; if (b) { return 2 } if (c) return 3; return 4 }"), "function f(a,b,c){return a?1:b?2:c?3:4}");
-        // A statement in between, or a missing final return, leaves the run as it was.
-        assert_eq!(syntax("function f(a, b) { if (a) return 1; g(); if (b) return 2; return 3; }"), "function f(a,b){if(a)return 1;g();return b?2:3}");
-        assert_eq!(syntax("function f(a, b) { if (a) return 1; if (b) return 2; g(); }"), "function f(a,b){if(a)return 1;if(b)return 2;g()}");
     }
 
     #[test]
