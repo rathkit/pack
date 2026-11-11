@@ -1048,10 +1048,28 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                         }
                     }
                     (NodeKind::Conditional { test: ct, cons: cc, alt: ca_ }, Some(alt)) => {
-                        if let (Some(ce), Some(ae)) = (sole(&a, *cons), sole(&a, *alt)) {
+                        // A body of several expression statements is a sequence in parentheses.
+                        let parts = |s: NodeId, branch: NodeId| -> Option<Vec<(NodeId, NodeId)>> {
+                            if let Some(e) = sole(&a, s) {
+                                return Some(vec![(e, branch)]);
+                            }
+                            let NodeKind::Block(list) = a.ast[s].kind else { return None };
+                            let mut from = Vec::new();
+                            for &item in a.ast.list(list) {
+                                match a.ast[item].kind {
+                                    NodeKind::ExprStmt(e) if !a.ast[item].has(flags::DIRECTIVE) => flatten_sequence(&a.ast, e, &mut from),
+                                    _ => return None,
+                                }
+                            }
+                            let mut to = Vec::new();
+                            flatten_sequence(&b.ast, branch, &mut to);
+                            (from.len() == to.len()).then(|| from.into_iter().zip(to).collect())
+                        };
+                        if let (Some(c), Some(e)) = (parts(*cons, *cc), parts(*alt, *ca_)) {
                             stack.push((Side::node(*test), Side::node(*ct)));
-                            stack.push((Side::node(ce), Side::node(*cc)));
-                            stack.push((Side::node(ae), Side::node(*ca_)));
+                            for (x, y) in c.into_iter().chain(e) {
+                                stack.push((Side::node(x), Side::node(y)));
+                            }
                             continue;
                         }
                     }
@@ -1064,6 +1082,33 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                         stack.push((Side::node(*left), Side::node(*lb)));
                         continue;
                     }
+                }
+                // `{ a(); b(); }` as `a(), b();`, and `{ a(); return b; }` as `return a(), b;` (`throw` too): the statements are the parts of a sequence.
+                (NodeKind::Block(list), NodeKind::ExprStmt(_) | NodeKind::Return(Some(_)) | NodeKind::Throw(_)) if a.ast.list(*list).len() > 1 => {
+                    let joined = match ny.kind {
+                        NodeKind::ExprStmt(e) | NodeKind::Return(Some(e)) | NodeKind::Throw(e) => e,
+                        _ => unreachable!(),
+                    };
+                    let mut from = Vec::new();
+                    let items = a.ast.list(*list);
+                    for (i, &s) in items.iter().enumerate() {
+                        let last = i + 1 == items.len();
+                        match (&a.ast[s].kind, &ny.kind) {
+                            (NodeKind::ExprStmt(e), _) if !a.ast[s].has(flags::DIRECTIVE) => flatten_sequence(&a.ast, *e, &mut from),
+                            (NodeKind::Return(Some(e)), NodeKind::Return(_)) if last => flatten_sequence(&a.ast, *e, &mut from),
+                            (NodeKind::Throw(e), NodeKind::Throw(_)) if last => flatten_sequence(&a.ast, *e, &mut from),
+                            _ => return Err(format!("block at {} became {:?}", nx.span.start, ny.kind)),
+                        }
+                    }
+                    let mut to = Vec::new();
+                    flatten_sequence(&b.ast, joined, &mut to);
+                    if from.len() != to.len() {
+                        return Err(format!("block at {} has {} parts in its sequence, then {}", nx.span.start, from.len(), to.len()));
+                    }
+                    for (x, y) in from.into_iter().zip(to) {
+                        stack.push((Side::node(x), Side::node(y)));
+                    }
+                    continue;
                 }
                 // `if (c) return a; else return b;` that stands alone (the body of an `else`) written as `return c ? a : b;`.
                 (NodeKind::If { test, cons, alt: Some(alt) }, NodeKind::Return(Some(joined))) => {
@@ -1312,6 +1357,26 @@ mod tests {
         assert_eq!(syntax(r#"x = {"a\nb": 1};"#), r#"x={"a\nb":1}"#);
         assert_eq!(syntax(r#"x = require("a\nb");"#), r#"x=require("a\nb")"#);
         assert_eq!(syntax(r#"x = "a\nb" + y;"#), r#"x="a\nb"+y"#);
+    }
+
+    #[test]
+    fn a_body_of_expression_statements_is_one_sequence() {
+        assert_eq!(syntax("function f(a, b) { if (a) { b(); a(); } }"), "function f(a,b){if(a)b(),a()}");
+        assert_eq!(syntax("function f(a, b) { if (a) { b(); return a(); } return 1 }"), "function f(a,b){if(a)return b(),a();return 1}");
+        assert_eq!(syntax("function f(a, b) { if (a) { b(); throw new Error('x'); } }"), "function f(a,b){if(a)throw b(),new Error('x')}");
+        assert_eq!(syntax("function f(a, b) { for (let i = 0; i < 3; i++) { a(i); b(i) } d(); }"), "function f(a,b){for(let i=0;i<3;i++)a(i),b(i);d()}");
+        // Not when a statement is not an expression, or a line break stands for a `;` that has no token to become a comma.
+        assert_eq!(syntax("function f(a, b) { if (a) { b(); var c = 1; } }"), "function f(a,b){if(a){b();var c=1}}");
+        assert_eq!(syntax("function f(a, b) { if (a) { b()\n a() } }"), "function f(a,b){if(a){b();a()}}");
+    }
+
+    #[test]
+    fn two_bodies_of_expression_statements_are_a_conditional_expression() {
+        assert_eq!(syntax("function f(a, b, c) { if (a) { b(); c(); } else { c(); b(); } }"), "function f(a,b,c){a?(b(),c()):(c(),b())}");
+        assert_eq!(syntax("function f(a, b, c) { if (a) b(); else { c(); b(); } d(); }"), "function f(a,b,c){a?b():(c(),b());d()}");
+        assert_eq!(syntax("function f(a, b, c) { if (a) { b(); c(); } else c(); d(); }"), "function f(a,b,c){a?(b(),c()):c();d()}");
+        // A body that is not only expressions keeps the `if`.
+        assert_eq!(syntax("function f(a, b, c) { if (a) { b(); c(); } else { return b(); } }"), "function f(a,b,c){if(a)b(),c();else return b()}");
     }
 
     #[test]

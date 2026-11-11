@@ -438,7 +438,12 @@ impl Ctx<'_> {
     /// `if (a) b();` is `a&&b();`, `if (!a) b();` is `a||b();` and `if (a) b(); else c();` is `a?b():c();`.
     fn if_to_expression(&mut self, n: NodeId, test: NodeId, cons: NodeId, alt: Option<NodeId>) {
         let ast = self.ast;
-        let Some(ce) = self.sole_expression(cons) else { return };
+        let Some(ce) = self.sole_expression(cons) else {
+            if let Some(alt) = alt {
+                self.if_else_sequences(n, test, cons, alt);
+            }
+            return;
+        };
         let if_tok = self.first_tok(ast[n].span.start);
         let open = if_tok + 1;
         let close = self.first_tok(ast[cons].span.start).wrapping_sub(1);
@@ -467,7 +472,7 @@ impl Ctx<'_> {
                 }
             }
             Some(alt) => {
-                let Some(ae) = self.sole_expression(alt) else { return };
+                let Some(ae) = self.sole_expression(alt) else { return self.if_else_sequences(n, test, cons, alt) };
                 let Some(cons_semi) = self.sole_statement_semi(cons) else { return };
                 let else_tok = self.last_tok(ast[cons].span.end) + 1;
                 if !self.kw(else_tok, Kw::Else) || self.precedence(ce) < 2 || self.precedence(ae) < 2 {
@@ -483,6 +488,79 @@ impl Ctx<'_> {
                 self.force_text(cons_semi, ":");
                 self.force(else_tok, Action::Skip);
             }
+        }
+    }
+
+    /// A body that `block_sequence` made one comma expression: the block, its statements (at least two, all expressions), the `;` of the
+    /// last one and the braces.
+    fn expression_block(&self, s: NodeId) -> Option<(usize, usize, usize)> {
+        let NodeKind::Block(list) = self.ast[s].kind else { return None };
+        let items = self.ast.list(list);
+        let (&last, before) = items.split_last()?;
+        if before.is_empty() || !matches!(self.ast[last].kind, NodeKind::ExprStmt(_)) || before.iter().any(|&b| !matches!(self.ast[b].kind, NodeKind::ExprStmt(_))) {
+            return None;
+        }
+        let open = self.first_tok(self.ast[s].span.start);
+        let close = self.last_tok(self.ast[s].span.end);
+        // Its braces were taken off; the `;` of the last statement is written, so there is one to turn into the closing parenthesis.
+        if self.actions[open] != Action::Skip || !self.is(close, Punct::RBrace) || close == 0 || !self.is(close - 1, Punct::Semi) || self.actions[close - 1] != Action::Keep {
+            return None;
+        }
+        Some((open, close - 1, close))
+    }
+
+    /// `if (a) { b(); c(); } else { d(); }` is `a?(b(),c()):d();`: each body is one expression, in parentheses when it is a sequence.
+    fn if_else_sequences(&mut self, n: NodeId, test: NodeId, cons: NodeId, alt: NodeId) {
+        let ast = self.ast;
+        // How each body is written: a sequence block, or a single expression statement.
+        let cons_block = self.expression_block(cons);
+        let alt_block = self.expression_block(alt);
+        if cons_block.is_none() && alt_block.is_none() {
+            return;
+        }
+        let (ce, ae) = (self.sole_expression(cons), self.sole_expression(alt));
+        if (cons_block.is_none() && ce.is_none_or(|e| self.precedence(e) < 2)) || (alt_block.is_none() && ae.is_none_or(|e| self.precedence(e) < 2)) {
+            return;
+        }
+        let cons_end = match cons_block {
+            Some((_, semi, close)) => (semi, close),
+            None => match self.sole_statement_semi(cons) {
+                Some(semi) => (semi, semi),
+                None => return,
+            },
+        };
+        let if_tok = self.first_tok(ast[n].span.start);
+        let open = if_tok + 1;
+        let close = self.first_tok(ast[cons].span.start).wrapping_sub(1);
+        let else_tok = self.last_tok(ast[cons].span.end) + 1;
+        if !self.kw(if_tok, Kw::If) || !self.is(open, Punct::LParen) || !self.is(close, Punct::RParen) || self.starts_statement_badly(test) || !self.kw(else_tok, Kw::Else) {
+            return;
+        }
+        // `{` is the first token of a block body, which is where the `(` goes; a body that is a sequence has no braces left.
+        let keeps_parens = ast[test].has(flags::PARENTHESIZED);
+        self.force(if_tok, Action::Skip);
+        if keeps_parens || self.precedence(test) <= 3 {
+            self.force_text(close, ")?");
+        } else {
+            self.force(open, Action::Skip);
+            self.force_text(close, "?");
+        }
+        match cons_block {
+            Some((brace, semi, end)) => {
+                self.force_text(brace, "(");
+                self.force_text(semi, ")");
+                self.force(end, Action::Skip);
+                self.force_text(else_tok, ":");
+            }
+            None => {
+                self.force_text(cons_end.0, ":");
+                self.force(else_tok, Action::Skip);
+            }
+        }
+        if let Some((brace, semi, end)) = alt_block {
+            self.force_text(brace, "(");
+            self.force_text(semi, ")");
+            self.force(end, Action::Semi);
         }
     }
 
@@ -854,7 +932,7 @@ impl Ctx<'_> {
     fn unbrace(&mut self, block: NodeId) {
         let NodeKind::Block(list) = self.ast[block].kind else { return };
         let items = self.ast.list(list);
-        let [s] = items else { return };
+        let [s] = items else { return self.block_sequence(block) };
         let s = *s;
         if !self.can_stand_alone(s) || (self.ends_open(s) && self.else_follows(block)) {
             return;
@@ -871,6 +949,63 @@ impl Ctx<'_> {
         self.set(open, Action::Skip);
         // The statement's own `;` stays; one that a line break or the `}` stood for is written.
         if self.is(close - 1, Punct::Semi) || !self.needs_semicolon(s) {
+            self.set(close, Action::Skip);
+        } else {
+            self.set(close, Action::Semi);
+        }
+    }
+
+    /// `if (a) { b(); c(); }` is `if (a) b(), c();` and `if (a) { b(); return c; }` is `if (a) return b(), c;`: a body of expression statements
+    /// (and perhaps a `return` or `throw` at the end) is one comma expression, which needs no braces.
+    fn block_sequence(&mut self, block: NodeId) {
+        let ast = self.ast;
+        let NodeKind::Block(list) = ast[block].kind else { return };
+        let items = ast.list(list);
+        let Some((&last, before)) = items.split_last() else { return };
+        if before.is_empty() {
+            return;
+        }
+        let mut commas = Vec::with_capacity(before.len());
+        for &s in before {
+            if !matches!(ast[s].kind, NodeKind::ExprStmt(_)) || ast[s].has(flags::DIRECTIVE) {
+                return;
+            }
+            // A line break that stood for the `;` has no token to become a comma.
+            match self.semi_of(s) {
+                Some(semi) if self.actions[semi] == Action::Keep => commas.push(semi),
+                _ => return,
+            }
+        }
+        if self.starts_statement_badly(before[0]) {
+            return;
+        }
+        // The last statement decides what the sequence is: an expression, a returned value or a thrown one.
+        let keyword = match ast[last].kind {
+            NodeKind::ExprStmt(_) if !ast[last].has(flags::DIRECTIVE) => None,
+            NodeKind::Return(Some(arg)) if !self.is_nothing(arg) => Some(Kw::Return),
+            NodeKind::Throw(_) => Some(Kw::Throw),
+            _ => return,
+        };
+        let open = self.first_tok(ast[block].span.start);
+        let close = self.last_tok(ast[block].span.end);
+        if !self.is(open, Punct::LBrace) || !self.is(close, Punct::RBrace) {
+            return;
+        }
+        if let Some(kw) = keyword {
+            let at = self.first_tok(ast[last].span.start);
+            if !self.kw(at, kw) || self.actions[at] != Action::Keep {
+                return;
+            }
+            self.set_text(open, if kw == Kw::Return { "return" } else { "throw" });
+            self.set(at, Action::Skip);
+        } else {
+            self.set(open, Action::Skip);
+        }
+        for semi in commas {
+            self.set_text(semi, ",");
+        }
+        // The last statement's own `;` stays; one that a line break or the `}` stood for is written.
+        if self.is(close - 1, Punct::Semi) && close - 1 > open {
             self.set(close, Action::Skip);
         } else {
             self.set(close, Action::Semi);
