@@ -108,6 +108,10 @@ jobs:
         with:
           path: ~/apt-debs
           key: apt-debs-playwright-1.64.1-v1
+      # The runner's first apt mirror (azure.archive.ubuntu.com) often fails to resolve and apt then gives up; see tools/ci-apt-mirror.sh.
+      - if: matrix.other-browsers
+        name: Make the apt mirror name resolve
+        run: bash tools/ci-apt-mirror.sh
       - if: matrix.other-browsers
         name: Install Firefox and WebKit
         timeout-minutes: 16
