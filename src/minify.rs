@@ -1274,6 +1274,40 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                                 j += 1;
                                 continue;
                             }
+                            // `if (a) return 1; if (b) return 2; return 3;`: the conditional goes on in its last branch.
+                            if alt.is_none() {
+                                if let Some(first) = returned(*cons) {
+                                    let mut pairs = vec![(Side::node(*test), Side::node(*ct)), (Side::node(first), Side::node(*cc))];
+                                    let (mut k, mut target) = (i, *ca_);
+                                    let done = loop {
+                                        let Some(next) = ca.get(k) else { break false };
+                                        if next.declarators.is_some() {
+                                            break false;
+                                        }
+                                        match a.ast[next.id].kind {
+                                            NodeKind::Return(Some(arg)) => {
+                                                pairs.push((Side::node(arg), Side::node(target)));
+                                                k += 1;
+                                                break true;
+                                            }
+                                            NodeKind::If { test: t2, cons: c2, alt: None } => {
+                                                let (Some(r2), NodeKind::Conditional { test: ct2, cons: cc2, alt: ca2 }) = (returned(c2), &b.ast[target].kind) else { break false };
+                                                pairs.push((Side::node(t2), Side::node(*ct2)));
+                                                pairs.push((Side::node(r2), Side::node(*cc2)));
+                                                target = *ca2;
+                                                k += 1;
+                                            }
+                                            _ => break false,
+                                        }
+                                    };
+                                    if done {
+                                        aligned.extend(pairs);
+                                        i = k;
+                                        j += 1;
+                                        continue;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1436,6 +1470,15 @@ mod tests {
         assert_eq!(syntax("while (true) { x() }"), "for(;;)x()");
         assert_eq!(syntax("x = ((a % b) + b) % b; y = (a, b); z = (a && b) || c; w = a && (b || c); v = (-a) ** 2; u = -(-a)"), "x=(a%b+b)%b;y=(a,b);z=a&&b||c;w=a&&(b||c);v=(-a)**2;u=-(-a)");
         assert_eq!(syntax("a = (b = 1); c = [(d = 2), (e, f)]; (g = 1), (h = 2); new (i.j)(k); new (l())(); (m.n)(); (o?.p)()"), "a=b=1;c=[d=2,(e,f)];g=1,h=2;new i.j(k);new(l());m.n();(o?.p)()");
+    }
+
+    #[test]
+    fn a_run_of_returns_after_conditions_is_one_conditional() {
+        assert_eq!(syntax("function f(a, b) { if (a) return 1; if (b) return 2; return 3; }"), "function f(a,b){return a?1:b?2:3}");
+        assert_eq!(syntax("function f(a, b, c) { if (a) return 1; if (b) { return 2 } if (c) return 3; return 4 }"), "function f(a,b,c){return a?1:b?2:c?3:4}");
+        // A statement in between, or a missing final return, leaves the run as it was.
+        assert_eq!(syntax("function f(a, b) { if (a) return 1; g(); if (b) return 2; return 3; }"), "function f(a,b){if(a)return 1;g();return b?2:3}");
+        assert_eq!(syntax("function f(a, b) { if (a) return 1; if (b) return 2; g(); }"), "function f(a,b){if(a)return 1;if(b)return 2;g()}");
     }
 
     #[test]

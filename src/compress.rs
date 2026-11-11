@@ -582,7 +582,10 @@ impl Ctx<'_> {
     /// `if (a) return b; return c;` is `return a?b:c;`, and so is `if (a) return b; else return c;`.
     fn merge_returns(&mut self, list: &[NodeId]) {
         let ast = self.ast;
-        for (i, &s) in list.iter().enumerate() {
+        // From the end, so that `if (a) return 1; if (b) return 2; return 3;` is `return a?1:b?2:3;`: the pair at the end is joined first, and the
+        // statement before it is then followed by a return (the joined pair).
+        let mut joined: Vec<NodeId> = Vec::new();
+        for (i, &s) in list.iter().enumerate().rev() {
             let NodeKind::If { test, cons, alt } = ast[s].kind else { continue };
             if self.constant(test).is_some() {
                 continue;
@@ -600,11 +603,14 @@ impl Ctx<'_> {
                 },
                 None => match list.get(i + 1).map(|&next| (next, ast[next].kind)) {
                     Some((next, NodeKind::Return(Some(b)))) => (next, b, None),
+                    // The next statement was joined into a return of its own: its `return` is the one that goes.
+                    Some((next, NodeKind::If { .. })) if joined.contains(&next) => (next, next, None),
                     _ => continue,
                 },
             };
+            let chained = other_return == b;
             // `return undefined` is written as `return`, which has no value to put in a condition.
-            if self.precedence(a) < 2 || self.precedence(b) < 2 || self.is_nothing(a) || self.is_nothing(b) {
+            if self.precedence(a) < 2 || (!chained && (self.precedence(b) < 2 || self.is_nothing(b))) || self.is_nothing(a) {
                 continue;
             }
             let if_tok = self.first_tok(ast[s].span.start);
@@ -616,7 +622,7 @@ impl Ctx<'_> {
             }
             let first_return = self.first_tok(ast[cons_return].span.start);
             let second_return = self.first_tok(ast[other_return].span.start);
-            if !self.kw(first_return, Kw::Return) || !self.kw(second_return, Kw::Return) {
+            if !self.kw(first_return, Kw::Return) || !(self.kw(second_return, Kw::Return) || (chained && self.kw(second_return, Kw::If))) {
                 continue;
             }
             if let Some(e) = else_tok {
@@ -635,6 +641,7 @@ impl Ctx<'_> {
             self.force(first_return, Action::Skip);
             self.force_text(cons_semi, ":");
             self.force(second_return, Action::Skip);
+            joined.push(s);
         }
     }
 
