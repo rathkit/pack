@@ -87,6 +87,13 @@ cargo test --release
 
 CI runs more checks, listed in `.github/workflows/ci.yml`. Run what applies to your change.
 
+**Size and memory gate.** A change to the parser, the minifier, the linker or the emit can change the output or the memory the
+bundler needs. `node tools/check-baseline.mjs` (after `pnpm install` in `test-deps`) builds five workloads three ways and compares the output
+bytes, gzip bytes, map bytes and peak memory with `tests/baseline.json`; CI runs it and fails when a figure grows past its tolerance
+(0.05% for bytes, 0.2% for gzip, 10% for memory). If the growth is wanted, run it with `--update`, commit the new `tests/baseline.json`
+and say why in the message; if a figure fell, update it too, so the gain is kept. Time is not gated in CI (a shared runner is too
+noisy); the maintainer checks it before a release ([docs/RELEASING.md](docs/RELEASING.md)).
+
 ## Pull requests
 
 - One change per pull request, small enough to review in one sitting.

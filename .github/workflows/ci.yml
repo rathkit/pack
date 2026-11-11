@@ -27,7 +27,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: "ubuntu-24.04 node 24", os: ubuntu-24.04, node: 24, browser: true, other-browsers: true }
+          - { name: "ubuntu-24.04 node 24", os: ubuntu-24.04, node: 24, browser: true, other-browsers: true, baseline: true }
           - { name: "ubuntu-24.04 node 26", os: ubuntu-24.04, node: 26, browser: true, other-browsers: true }
           - { name: "ubuntu-26.04 node 24", os: ubuntu-26.04, node: 24, browser: true }
           - { name: "ubuntu-26.04 node 26", os: ubuntu-26.04, node: 26, browser: true }
@@ -67,6 +67,11 @@ jobs:
         run: getent hosts localhost || true; cat /etc/hosts || true
       - run: cargo build --release
       - run: ./target/release/rkp --version
+      # Output size and peak memory against tests/baseline.json (roadmap 3.6): a build that got bigger or used more memory fails here.
+      # One leg runs it (GNU time and a fixed CPU count make the memory figures comparable); the leg's name is already required, so
+      # the gate needs no ruleset change. Update the baseline with `node tools/check-baseline.mjs --update` when the change is wanted.
+      - if: matrix.baseline
+        run: node tools/check-baseline.mjs
       # A step that runs out of time ends with its log kept (a job that runs out of time loses it), and cargo names a test that runs over 60 seconds.
       - run: cargo test --release
         timeout-minutes: 20
@@ -245,7 +250,7 @@ jobs:
           runtime: node@24
           working-directory: test-deps
           install: false
-      - run: node --test tools/scan-secrets.test.mjs tools/approve-release.test.mjs
+      - run: node --test tools/scan-secrets.test.mjs tools/approve-release.test.mjs tools/check-baseline.test.mjs
       - run: node tools/scan-secrets.mjs
       - name: Word check
         if: env.RATHKIT_DENYLIST != ''

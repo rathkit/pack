@@ -1,0 +1,91 @@
+{
+  "note": "Output bytes, gzip bytes, map bytes and peak memory (KB, the first four CPUs) of rkp on the workloads in test-deps/baseline, from tools/check-baseline.mjs; rewrite with --update when the output changes on purpose.",
+  "tolerance": {
+    "bytes": 0.0005,
+    "gzip": 0.002,
+    "map": 0.0005,
+    "rssPercent": 10
+  },
+  "cells": {
+    "react/plain": {
+      "bytes": 592017,
+      "gzip": 106994,
+      "rssKb": 10632
+    },
+    "react/min": {
+      "bytes": 233382,
+      "gzip": 69950,
+      "rssKb": 16260
+    },
+    "react/min-map": {
+      "bytes": 233426,
+      "gzip": 69982,
+      "map": 874269,
+      "rssKb": 18584
+    },
+    "rxjs/plain": {
+      "bytes": 61348,
+      "gzip": 11357,
+      "rssKb": 9616
+    },
+    "rxjs/min": {
+      "bytes": 25312,
+      "gzip": 7564,
+      "rssKb": 10264
+    },
+    "rxjs/min-map": {
+      "bytes": 25355,
+      "gzip": 7605,
+      "map": 232153,
+      "rssKb": 11524
+    },
+    "lodash/plain": {
+      "bytes": 190346,
+      "gzip": 41175,
+      "rssKb": 15112
+    },
+    "lodash/min": {
+      "bytes": 77489,
+      "gzip": 27362,
+      "rssKb": 18036
+    },
+    "lodash/min-map": {
+      "bytes": 77534,
+      "gzip": 27392,
+      "map": 803817,
+      "rssKb": 23032
+    },
+    "three/plain": {
+      "bytes": 899765,
+      "gzip": 168063,
+      "rssKb": 21356
+    },
+    "three/min": {
+      "bytes": 527716,
+      "gzip": 130634,
+      "rssKb": 32444
+    },
+    "three/min-map": {
+      "bytes": 527760,
+      "gzip": 130667,
+      "map": 2795346,
+      "rssKb": 39084
+    },
+    "ts5/plain": {
+      "bytes": 8412756,
+      "gzip": 1510828,
+      "rssKb": 78336
+    },
+    "ts5/min": {
+      "bytes": 3560768,
+      "gzip": 996192,
+      "rssKb": 170116
+    },
+    "ts5/min-map": {
+      "bytes": 3560810,
+      "gzip": 996219,
+      "map": 13932890,
+      "rssKb": 204712
+    }
+  }
+}

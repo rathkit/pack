@@ -25,6 +25,9 @@ about stability.
   Material UI templates, and folders of larger repositories. All 60 build, and the apps load in a browser without errors.
 - Sass finds a package by its name, as Vite does: `@use 'element-plus/theme-chalk/src/index.scss'` is looked for in the
   `node_modules` folders above the file. A leading `~` works too.
+- CI checks the output size and the peak memory of the bundler against a stored baseline (`tests/baseline.json`, `tools/check-baseline.mjs`):
+  five workloads built plain, minified and minified with a source map; a figure that grows past its tolerance fails the build. Time is
+  checked by the maintainer before a release ([docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Fixed
 
