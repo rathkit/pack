@@ -6,4 +6,7 @@ import v from './expr.js';
 import arrow from './arrow.js';
 import { default as viaRe } from './re.js';
 import reDefault, { other } from './re.js';
+import tight from './anon-fn-tight.js';
+import tightGen from './anon-gen-tight.js';
+console.log(tight(1, 2), [...tightGen()].join());
 console.log(f1(), f2(), new C1().hi(), new C2().hi(), v, arrow(), viaRe(), reDefault === viaRe, other);

@@ -3514,8 +3514,9 @@ impl Bundler<'_> {
                     while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t' || bytes[i] == b'\n' || bytes[i] == b'*') {
                         i += 1;
                     }
-                    // Keep the `*` of a generator before the name.
-                    self.insert_text(&mut text, i, &format!("{} ", names[key]));
+                    // Keep the `*` of a generator before the name. `function(` has no space to put the name after.
+                    let glued = i == at + "function".len();
+                    self.insert_text(&mut text, i, &format!("{}{} ", if glued { " " } else { "" }, names[key]));
                 }
             }
             Form::Class { key, original, decorated } => {
