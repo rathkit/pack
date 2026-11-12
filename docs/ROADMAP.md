@@ -93,6 +93,7 @@ Performance bars met: time, size and memory at or beyond the other benchmarked t
 - [ ] [3.2](https://github.com/rathkit/pack/issues/26) Persistent cache and a faster dev server start `P0`
 - [ ] [3.4](https://github.com/rathkit/pack/issues/27) Memory: free per-module data after emit; worst-case inputs `P0`
 - [ ] [3.12](https://github.com/rathkit/pack/issues/28) Every workload where another tool wins is listed, with a reason and an issue `P1`
+- [ ] [3.16](https://github.com/rathkit/pack/issues/86) Where esbuild is ahead on the 15-workload benchmark: time, size and warm rebuild `P1`
 
 ### 0.6.0-beta.0
 
