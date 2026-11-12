@@ -16,10 +16,20 @@ What an alpha or beta does promise, and checks on every change (`tools/check-pro
 scripts in any package, a build that needs no network, provenance and checksums on every release. It promises nothing
 about stability.
 
-## Unreleased
+## 0.2.0-beta.0 - 2026-11-11
+
+The first beta: measured and gated. The benchmark suite has 15 workloads with warm-rebuild, development server and type-check
+measurements, CI fails on a regression in output size or peak memory, and the corpus has 60 projects.
 
 ### Added
 
+- The benchmark ([rathkit/pack-bench](https://github.com/rathkit/pack-bench), figures in [docs/benchmarks.md](docs/benchmarks.md)) has
+  15 workloads (Preact, Vue, Solid and Svelte apps, a monorepo-style TypeScript app, date-fns, Zod and D3 beside the original seven)
+  and times warm rebuilds in each tool's watch mode, development server start and HMR, and build plus type check for the
+  TypeScript workloads. Pack took the least memory in all 45 build cases and less time than every tool but esbuild and Parcel 3, which
+  were faster in 3 cases each. In watch mode a Pack rebuild is not the fastest, and HMR notices a change in 85 to 318 ms because it
+  polls; both are listed as gaps. There is no type-check figure for Pack, which has no checker yet. Against the previous published run, Pack's medians on the seven original workloads moved by -3% to +12% with
+  identical output and memory, and Pack is still ahead of esbuild in each of them.
 - The corpus grew from 24 to 60 pinned projects (`corpus/projects.json`): more libraries (unjs, pmndrs, nanostores, chalk, d3,
   preact and others), and Vue, Solid, Preact, React and Svelte apps, among them Vue apps with UnoCSS and Sass, Redux and
   Material UI templates, and folders of larger repositories. All 60 build, and the apps load in a browser without errors.
