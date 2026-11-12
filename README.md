@@ -13,7 +13,7 @@ Site: <https://rathkit.com>
 Measured on 15 workloads in three modes (45 cases: the TypeScript compiler, three.js, lodash-es, React, rxjs, date-fns, Zod, D3,
 Preact, Vue, Solid and Svelte apps, a monorepo-style TypeScript app, two generated apps; plain, minified, minified with a source map),
 the whole command took the least memory in every case and less time than rolldown, rspack, Vite, webpack, Rollup and Parcel 2 (where it built) in
-every case. Against esbuild it took less time in 42 of the 45 cases; esbuild was faster in the other three, by 1.2 ms or less. Parcel 3
+every case. Against esbuild it took less time in 43 of the 45 cases; esbuild was faster in the other two, by 1.8 ms or less. Parcel 3
 took less time in 42 cases and was faster in the three lodash-es cases, where it kept none of the exports, so those are not the same
 work. Output sizes are about equal, and others are smaller in some cases. In watch mode a rebuild of Pack is not the fastest (Parcel 3 and
 esbuild are quicker on most workloads), and its development server starts fastest on most workloads but is slower to announce an
