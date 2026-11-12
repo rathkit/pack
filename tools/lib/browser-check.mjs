@@ -59,6 +59,7 @@ export async function checkPage(dir, expect = {}, browser = findBrowser()) {
     }
     let loaded = false;
     const requests = new Map();
+    const missing = [];
     page.onEvent((e) => {
       switch (e.type) {
         case 'load':
@@ -80,7 +81,9 @@ export async function checkPage(dir, expect = {}, browser = findBrowser()) {
         case 'response':
           // Only the site's own files count; a page that calls an outside service gets what the network gives it.
           // A browser asks for /favicon.ico by itself; a page that has none is not broken.
-          if (e.status >= 400 && e.url.startsWith(origin) && !e.url.endsWith('/favicon.ico')) note(`${e.status} for ${e.url.slice(origin.length)}`);
+          // The same for an icon the page names in a <link rel="icon">: whether a browser fetches it is its own choice (a headless one
+          // sometimes does), so a missing one is judged after the page has loaded, below.
+          if (e.status >= 400 && e.url.startsWith(origin) && !e.url.endsWith('/favicon.ico')) missing.push([e.status, e.url]);
           break;
         case 'failed':
           if (e.url.startsWith(origin) && !e.canceled) note(`failed to load ${e.url.slice(origin.length)}: ${e.text}`);
@@ -98,6 +101,8 @@ export async function checkPage(dir, expect = {}, browser = findBrowser()) {
     if (children === -1) note(`no element matches ${expect.selector}`);
     else if (!expect.empty && !text && !(await evaluate('document.body.querySelectorAll("img,canvas,svg,video,input,button").length'))) note('the page shows nothing');
     if (expect.text && !new RegExp(expect.text).test(text)) note(`the page text does not match /${expect.text}/: ${text}`);
+    const icons = (await evaluate(`[...document.querySelectorAll('link[rel~="icon"]')].map((l) => l.href)`)) ?? [];
+    for (const [status, url] of missing) if (!icons.includes(url)) note(`${status} for ${url.slice(origin.length)}`);
     const html = String((await evaluate('document.body.innerHTML')) ?? '').replace(/\s+/g, ' ').slice(0, 400);
     return { ok: problems.length === 0, problems, text, html, log };
   } finally {

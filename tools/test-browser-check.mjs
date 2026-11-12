@@ -23,6 +23,8 @@ site('good', page, 'fetch("/favicon.ico").catch(() => {}); document.getElementBy
 site('throws', page, 'throw new Error("boom")');
 site('empty', '<!doctype html><body><div id="root"></div>');
 site('missing', '<!doctype html><body><div id="root">hi</div><script type="module" src="/gone.js"></script>');
+// An icon the page names but does not ship (a browser may or may not fetch it) is not a broken page; another missing file still is.
+site('icon', '<!doctype html><head><link rel="icon" type="image/svg+xml" href="/gone.svg"></head><body><div id="root">hi</div></body>');
 site('console', '<!doctype html><body><div id="root"><p>x</p></div><script type="module" src="/a.js"></script>', 'console.error("bad thing")');
 
 let failed = 0;
@@ -41,6 +43,8 @@ r = await at('empty');
 expect(!r.ok && r.problems.includes('the page shows nothing'), 'an empty page is found', JSON.stringify(r));
 r = await at('missing');
 expect(!r.ok && r.problems.includes('404 for /gone.js'), 'a missing file of the site is found', JSON.stringify(r));
+r = await at('icon');
+expect(r.ok, 'a missing icon the page names is not reported', JSON.stringify(r));
 r = await at('console');
 expect(!r.ok && r.problems.some((p) => p.includes('bad thing')), 'a console error is found', JSON.stringify(r));
 r = await at('console', { allowErrors: ['bad thing'] });
