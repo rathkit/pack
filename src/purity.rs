@@ -22,6 +22,9 @@ const SAFE_GLOBALS: &[&str] = &[
     "encodeURIComponent", "decodeURIComponent", "encodeURI", "decodeURI",
 ];
 
+/// Built-in constructors that have a `prototype`.
+const PROTOTYPE_HOLDERS: &[&str] = &["Object", "Function", "Array", "String", "Number", "Boolean", "Symbol", "BigInt", "Promise", "Map", "Set", "WeakMap", "WeakSet", "Date", "RegExp", "Error"];
+
 pub struct Purity<'a> {
     /// The module's text, where the `@__PURE__` comments are.
     pub source: &'a str,
@@ -130,7 +133,9 @@ impl Purity<'_> {
             NodeKind::Conditional { test, cons, alt } => self.expr_is_pure(test) && self.expr_is_pure(cons) && self.expr_is_pure(alt),
             NodeKind::Sequence(items) => ast.list(items).iter().all(|&e| self.expr_is_pure(e)),
             // A call the author marked as free of effects: only evaluating its arguments can matter.
-            NodeKind::Call { args, .. } | NodeKind::New { args, .. } => self.is_marked_pure(id) && ast.list(args).iter().all(|&a| self.expr_is_pure(a)),
+            NodeKind::Call { args, .. } | NodeKind::New { args, .. } => (self.is_marked_pure(id) && ast.list(args).iter().all(|&a| self.expr_is_pure(a))) || self.is_known_pure_call(id),
+            // `Object.keys`, `Array.prototype.indexOf`: reading a member of a built-in that is there in every environment.
+            NodeKind::Member { .. } => self.is_builtin_member(id),
             // A tagged template of a name given to --pure (`styled.div`...``): free of effects when what is in it is too.
             NodeKind::TaggedTemplate { tag, quasi } => {
                 !self.pure_calls.is_empty()
@@ -139,6 +144,79 @@ impl Purity<'_> {
             }
             _ => false,
         }
+    }
+
+    /// A call of the language itself that only makes a value: `Symbol("name")`, and `new Map`, `new Set`, `new WeakMap` or `new WeakSet` with no
+    /// argument or with an array of values written out.
+    fn is_known_pure_call(&self, id: NodeId) -> bool {
+        let ast = self.ast;
+        let (callee, args, is_new) = match ast[id].kind {
+            NodeKind::Call { callee, args } => (callee, args, false),
+            NodeKind::New { callee, args } => (callee, args, true),
+            _ => return false,
+        };
+        let NodeKind::Ident(name) = ast[callee].kind else { return false };
+        if self.semantic.symbol_of(callee).is_some() || ast[id].has(flags::OPTIONAL) {
+            return false;
+        }
+        let args = ast.list(args);
+        match (ast.atom(name), is_new) {
+            // `Symbol(x)` reads `x` as a string, which can run code unless it is a primitive.
+            ("Symbol", false) => args.len() <= 1 && args.iter().all(|&a| self.is_primitive(a)),
+            ("Map" | "WeakMap", true) => match args {
+                [] => true,
+                [list] => match ast[*list].kind {
+                    NodeKind::Array(items) => ast.list(items).iter().all(|&e| matches!(ast[e].kind, NodeKind::Array(_)) && self.expr_is_pure(e)),
+                    _ => false,
+                },
+                _ => false,
+            },
+            ("Set" | "WeakSet", true) => match args {
+                [] => true,
+                [list] => match ast[*list].kind {
+                    NodeKind::Array(items) => ast.list(items).iter().all(|&e| !matches!(ast[e].kind, NodeKind::Spread(_) | NodeKind::Hole) && self.expr_is_pure(e)),
+                    _ => false,
+                },
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// `Object.keys` (a member of a global that is always there), or `Array.prototype.indexOf` (a member of the prototype of a built-in constructor): reading
+    /// either cannot throw, because everything before the last name is certain to exist.
+    fn is_builtin_member(&self, id: NodeId) -> bool {
+        let ast = self.ast;
+        let plain = |n: NodeId| -> Option<&str> {
+            match ast[n].kind {
+                NodeKind::Member { prop, .. } if !ast[n].has(flags::COMPUTED) && !ast[n].has(flags::OPTIONAL) => match ast[prop].kind {
+                    NodeKind::PropName(p) => Some(ast.atom(p)),
+                    _ => None,
+                },
+                _ => None,
+            }
+        };
+        let root_of = |n: NodeId| -> Option<&str> {
+            match ast[n].kind {
+                NodeKind::Ident(a) if self.semantic.symbol_of(n).is_none() => Some(ast.atom(a)),
+                _ => None,
+            }
+        };
+        let NodeKind::Member { object, .. } = ast[id].kind else { return false };
+        if plain(id).is_none() {
+            return false;
+        }
+        if let Some(root) = root_of(object) {
+            return root != "undefined" && SAFE_GLOBALS.contains(&root);
+        }
+        // `X.prototype.name`: `X.prototype` is there for the built-in constructors.
+        if let NodeKind::Member { object: inner, .. } = ast[object].kind {
+            if plain(object) == Some("prototype") {
+                return root_of(inner).is_some_and(|r| PROTOTYPE_HOLDERS.contains(&r));
+            }
+        }
+        // `X.prototype`.
+        plain(id) == Some("prototype") && root_of(object).is_some_and(|r| PROTOTYPE_HOLDERS.contains(&r))
     }
 
     /// Whether a `/* @__PURE__ */` or `/* #__PURE__ */` comment comes right before the expression
@@ -257,6 +335,12 @@ mod tests {
             "export * from 'x';",
             "import a from 'x';",
             ";",
+            "Symbol('name');",
+            "Symbol();",
+            "const s = Symbol(`x`);",
+            "new Map; new Set; new WeakMap; new WeakSet;",
+            "const m = new Map([[1, 2], ['a', [3]]]), t = new Set(['a', 'b', 1]);",
+            "Object.keys; Array.prototype.indexOf; Math.PI; String.prototype;",
         ] {
             assert!(pure(src), "should be pure: {src}");
         }
@@ -298,6 +382,21 @@ mod tests {
             "export default f();",
             "export const x = f();",
             "export default class extends f() {}",
+            "Symbol(obj); var obj;",
+            "Symbol(...a); var a;",
+            "Symbol('x'); function Symbol() {}",
+            "new Set(items); var items;",
+            "new Set([...items]); var items;",
+            "new Set([f()]);",
+            "new Map([1]);",
+            "new Map(entries); var entries;",
+            "new Set('abc');",
+            "Object.a.b;",
+            "undefined.x;",
+            "Math.prototype.x;",
+            "foo.prototype.x;",
+            "Object[key]; var key;",
+            "Object?.keys;",
         ] {
             assert!(!pure(src), "should have effects: {src}");
         }

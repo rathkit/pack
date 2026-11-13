@@ -2326,12 +2326,23 @@ impl<'a> Scanner<'_, 'a> {
     fn scan_esm(&mut self, id: ModuleId) -> Code {
         let ast = self.ast;
         let shake = &self.bundler.shaken.modules[id.index()];
-        let live: Vec<(NodeId, Vec<SymbolId>)> = shake.parts.iter().zip(&shake.live).filter(|(_, l)| **l).map(|(p, _)| (p.stmt, p.declares.clone())).collect();
+        // One entry per statement that stays; for a declaration of several declarators, the ones that stay (a part each).
+        let mut live: Vec<(NodeId, Vec<SymbolId>, Option<Vec<NodeId>>)> = Vec::new();
+        for (p, _) in shake.parts.iter().zip(&shake.live).filter(|(_, l)| **l) {
+            match (p.declarator, live.last_mut()) {
+                (Some(d), Some((stmt, declares, Some(kept)))) if *stmt == p.stmt => {
+                    declares.extend(p.declares.iter().copied());
+                    kept.push(d);
+                }
+                (Some(d), _) => live.push((p.stmt, p.declares.clone(), Some(vec![d]))),
+                (None, _) => live.push((p.stmt, p.declares.clone(), None)),
+            }
+        }
         let declared: HashSet<SymbolId> = shake.parts.iter().flat_map(|p| p.declares.iter().copied()).collect();
         let root = self.semantic.root_scope();
         let hoistable = self.semantic.symbols().all(|(sid, sym)| sym.scope != root || sym.kind == SymbolKind::Import || declared.contains(&sid));
         let mut stmts = Vec::new();
-        for (stmt, declares) in live {
+        for (stmt, declares, kept) in live {
             let (decl, form_default) = match ast[stmt].kind {
                 NodeKind::ExportNamed(export) => (ast.export(export).decl.unwrap_or(stmt), false),
                 NodeKind::ExportDefault(value) => (value, true),
@@ -2422,6 +2433,7 @@ impl<'a> Scanner<'_, 'a> {
                 NodeKind::VarDecl { decls, .. } => Shape::Vars(
                     ast.list(decls)
                         .iter()
+                        .filter(|d| kept.as_ref().is_none_or(|k| k.contains(d)))
                         .filter_map(|&d| {
                             let NodeKind::VarDeclarator { target, init } = ast[d].kind else { return None };
                             Some(Declarator { target: self.span(target), init: init.map(|i| self.span(i)), object_pattern: matches!(ast[target].kind, NodeKind::ObjectPattern(_)) })
@@ -2430,7 +2442,30 @@ impl<'a> Scanner<'_, 'a> {
                 ),
                 _ => Shape::Other,
             };
-            self.walk(decl, false);
+            match (&kept, ast[decl].kind) {
+                // Declarators nothing uses are cut out, and only the ones that stay are looked at.
+                (Some(kept), NodeKind::VarDecl { decls, .. }) => {
+                    let all = ast.list(decls);
+                    for &d in all.iter().filter(|d| kept.contains(d)) {
+                        self.walk(d, false);
+                    }
+                    let last_kept = all.iter().rposition(|d| kept.contains(d));
+                    for (i, &d) in all.iter().enumerate() {
+                        if kept.contains(&d) {
+                            continue;
+                        }
+                        // Before the last one that stays: up to the start of the next declarator. After it: from the end of the one that stays, once.
+                        let (from, to) = match last_kept {
+                            Some(k) if i < k => (ast[d].span.start, ast[all[i + 1]].span.start),
+                            Some(k) if i == k + 1 => (ast[all[k]].span.end, ast[*all.last().unwrap_or(&d)].span.end),
+                            Some(_) => continue,
+                            None => continue,
+                        };
+                        self.edits.push(Edit { start: from, end: to, pieces: Vec::new(), shorthand: None, transparent: false });
+                    }
+                }
+                _ => self.walk(decl, false),
+            }
             let (start, end) = self.span(decl);
             self.add_erasures(start, end);
             let edits = std::mem::take(&mut self.edits);

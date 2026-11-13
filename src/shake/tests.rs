@@ -198,3 +198,31 @@ fn cycles_between_modules_terminate() {
     assert_eq!(r.live("a.js"), ["a"]);
     assert_eq!(r.live("b.js"), ["b"]);
 }
+
+#[test]
+fn a_declaration_of_several_names_keeps_only_the_ones_that_are_used() {
+    let r = run(&[
+        ("main.js", "import { a, d } from './lib.js'; console.log(a, d);"),
+        ("lib.js", "export var a = 1, b = [1, 2], c = function () { return a; }, d = a + 1, e = new Set([1]), f = Symbol('x'); export function g() { return b; }"),
+    ]);
+    assert_eq!(r.live("lib.js"), ["a", "d"], "b, c, e and f are free of effects and nothing uses them");
+}
+
+#[test]
+fn a_declarator_with_effects_stays_and_so_do_the_names_it_uses() {
+    let r = run(&[
+        ("main.js", "import './lib.js';"),
+        ("lib.js", "const a = 1, b = a + 1, c = register(b), d = 4, { e } = { e: 5 }; function register(x) { globalThis.seen = x; return x; } export const marker = 0;"),
+    ]);
+    // `c` runs code, so it stays with what it reads (`b`, then `a`, and `register`); `d` goes; a destructuring declarator always stays.
+    assert_eq!(r.live("lib.js"), ["a", "b", "c", "e", "register"]);
+}
+
+#[test]
+fn builtin_members_and_collections_are_free_of_effects() {
+    let r = run(&[
+        ("main.js", "import './lib.js';"),
+        ("lib.js", "Symbol('a'); Array.prototype.indexOf; Object.keys; new Map; new WeakSet; const s = Symbol('b'), m = new Map([[1, 2]]); new Set(items); var items = [1]; export const marker = 0;"),
+    ]);
+    assert_eq!(r.live("lib.js"), ["<stmt>", "items"], "only `new Set(items)` (it reads `items`, which may be anything) stays");
+}
