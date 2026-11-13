@@ -38,12 +38,30 @@ fn main() -> ExitCode {
         Some((cmd, rest)) if cmd == "bundle" && !rest.is_empty() => bundle_command(rest, false),
         // The development server: the build in memory, reloads on change.
         Some((cmd, rest)) if cmd == "serve" => bundle_command(rest, true),
+        // The optional checker, a separate program found the way cargo finds `cargo-*` (src/checker.rs); nothing of it is in rkp.
+        Some((cmd, rest)) if cmd == "check" => check_command(rest),
         Some((cmd, files)) if cmd == "--graph" && !files.is_empty() => graph(files),
         Some((cmd, files)) if cmd == "--resolve-dump" && !files.is_empty() => resolve_dump(files),
         Some((cmd, files)) if cmd == "--ts-verdicts" && !files.is_empty() => ts_verdicts(files),
         Some((cmd, files)) if cmd == "--link-dump" && !files.is_empty() => link_dump(files),
         _ => {
-            eprintln!("usage: rkp bundle <entry>... | serve <entry>... | --version\n       rkp --lex-check|--parse-check|--parse-verdicts|--script-verdicts|--bench <file.js>... (development aids)\n       rkp --scopes <file.js>\n       rkp bundle <entry.js>... [--outfile FILE | --outdir DIR --splitting] [--format esm|cjs|iife] [--no-treeshake] [--define KEY=VALUE]... [--loader .ext=NAME]... [--jsx automatic|classic] [--external NAME]... [--condition NAME]...\n       rkp --graph <entry.js>... [--quiet] [--threads N] [--external NAME]... [--condition NAME]...");
+            eprintln!("usage: rkp bundle <entry>... | serve <entry>... | check <file.ts>... | --version\n       rkp --lex-check|--parse-check|--parse-verdicts|--script-verdicts|--bench <file.js>... (development aids)\n       rkp --scopes <file.js>\n       rkp bundle <entry.js>... [--outfile FILE | --outdir DIR --splitting] [--format esm|cjs|iife] [--no-treeshake] [--define KEY=VALUE]... [--loader .ext=NAME]... [--jsx automatic|classic] [--external NAME]... [--condition NAME]...\n       rkp --graph <entry.js>... [--quiet] [--threads N] [--external NAME]... [--condition NAME]...");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// `rkp check ARGS...`: runs the optional checker with the same arguments and its exit code.
+fn check_command(args: &[String]) -> ExitCode {
+    let (found, _) = rathkit_pack::checker::find();
+    let Some(checker) = found else {
+        eprintln!("{}", rathkit_pack::checker::not_installed_message());
+        return ExitCode::from(2);
+    };
+    match std::process::Command::new(&checker).args(args).status() {
+        Ok(status) => ExitCode::from(status.code().map_or(1, |c| c as u8)),
+        Err(e) => {
+            eprintln!("rkp check: cannot run {}: {e}", checker.display());
             ExitCode::from(2)
         }
     }

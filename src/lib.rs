@@ -13,6 +13,7 @@ pub mod lexer;
 pub mod minify;
 pub mod browserslist;
 pub mod bundle;
+pub mod checker;
 pub(crate) mod compress;
 pub mod glob;
 pub mod graph;
