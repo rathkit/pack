@@ -66,6 +66,8 @@ pub struct Module {
     pub css: Option<CssSheet>,
     /// Modification time and size of the file when it was read, for builds that reuse modules (watching).
     pub stamp: Option<Stamp>,
+    /// Where each request of the module was found, for builds that reuse modules and the places they found (watching with file events).
+    pub targets: Option<Vec<Target>>,
 }
 
 /// A file's modification time and size.
@@ -80,6 +82,9 @@ pub fn file_stamp(path: &Path) -> Option<Stamp> {
 #[derive(Default)]
 pub struct ModuleCache {
     modules: Mutex<HashMap<PathBuf, Module>>,
+    /// Whether a module that has not changed also keeps where its imports were found. That holds while every change to the
+    /// folders involved (a file made, removed or renamed; a `package.json`) is heard of, and `forget_resolutions` is called for it.
+    reuse_resolutions: std::sync::atomic::AtomicBool,
 }
 
 impl ModuleCache {
@@ -99,6 +104,18 @@ impl ModuleCache {
             if module.stamp.is_some() {
                 modules.insert(module.path.clone(), module);
             }
+        }
+    }
+
+    /// Keep where imports were found, for modules that have not changed. Only for watchers that hear of every change in the folders.
+    pub fn reuse_resolutions(&self, on: bool) {
+        self.reuse_resolutions.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Something was made, removed or renamed: imports are looked up again.
+    pub fn forget_resolutions(&self) {
+        for module in self.modules.lock().unwrap().values_mut() {
+            module.targets = None;
         }
     }
 
@@ -347,7 +364,8 @@ struct Processed {
     diagnostics: Vec<Diagnostic>,
 }
 
-enum Target {
+#[derive(Clone)]
+pub enum Target {
     Path(PathBuf),
     /// A file to copy, found by `new URL(...)`.
     Asset(PathBuf),
@@ -399,6 +417,8 @@ impl<'a> Context<'a> {
             let mut shared = lock.lock().unwrap();
             match processed {
                 Ok(Processed { mut module, targets, diagnostics }) => {
+                    // A module the next build may take from the cache keeps where its imports went, unless looking them up said something.
+                    module.targets = (self.options.cache.is_some() && module.stamp.is_some() && diagnostics.is_empty()).then(|| targets.clone());
                     module.edges = targets
                         .into_iter()
                         .map(|t| match t {
@@ -457,10 +477,17 @@ impl<'a> Context<'a> {
         if let (Some(cache), Some(stamp)) = (&self.options.cache, stamp) {
             if let Some(mut module) = cache.take(path, stamp) {
                 let dir = path.parent().unwrap_or(Path::new("/"));
-                let mut targets = Vec::with_capacity(module.record.requests.len());
-                for request in &module.record.requests {
-                    targets.push(self.resolve_request(dir, path, request, module.css.is_some(), &mut diagnostics));
-                }
+                let kept = module.targets.take().filter(|t| t.len() == module.record.requests.len() && cache.reuse_resolutions.load(std::sync::atomic::Ordering::Relaxed));
+                let targets = match kept {
+                    Some(targets) => targets,
+                    None => {
+                        let mut targets = Vec::with_capacity(module.record.requests.len());
+                        for request in &module.record.requests {
+                            targets.push(self.resolve_request(dir, path, request, module.css.is_some(), &mut diagnostics));
+                        }
+                        targets
+                    }
+                };
                 module.id = ModuleId(slot as u32);
                 module.edges = Vec::new();
                 module.package = package;
@@ -794,7 +821,7 @@ impl<'a> Context<'a> {
             None => package.as_ref().is_none_or(|p| p.file_has_side_effects(path)),
         });
         let stamp = if used_glob { None } else { stamp };
-        let module = Module { id: ModuleId(slot as u32), path: module_path.to_path_buf(), source, kind, parsed, record, edges: Vec::new(), package, side_effects, asset, css, stamp };
+        let module = Module { id: ModuleId(slot as u32), path: module_path.to_path_buf(), source, kind, parsed, record, edges: Vec::new(), package, side_effects, asset, css, stamp, targets: None };
         Ok(Processed { module, targets, diagnostics })
     }
 

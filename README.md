@@ -161,7 +161,7 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   - Vite's `handleHotUpdate` can stop or add reloads; modules are swapped in place by `--hmr` (see the development server). Not supported: webpack plugins that
     depend on webpack's own module and chunk graph internals beyond the above (for example `SplitChunksPlugin`
     settings are ignored), Parcel packagers and bundlers (the bundler's own are used).
-- `--watch` builds again when a file the build read changes (and plugins' `addWatchFile` files): plugins hear it
+- `--watch` builds again when a file the build read changes (and plugins' `addWatchFile` files): plugins hear it. On Linux it hears of changes through file events (inotify); elsewhere it polls the files every 80 ms.
   through `watchChange`, a changed config starts everything again, and Ctrl-C ends it cleanly. Modules whose files
   did not change are kept between builds (no reading, parsing or scanning again; without plugins).
 - `rkp serve ENTRY... [--port N] [--host H]` is a development server with the same options as `bundle`.

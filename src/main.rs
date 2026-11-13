@@ -1868,27 +1868,111 @@ fn watch_loop(job: std::sync::Arc<Job>) -> Done {
     };
     remember(&outcome, &mut stamps, began);
     let mut restart = false;
-    // Files under node_modules rarely change and are many: they are looked at every 25th time.
+    // Files under node_modules rarely change and are many: when polling they are looked at every 25th time.
     let in_node_modules = |path: &std::path::Path| path.components().any(|c| c.as_os_str() == "node_modules");
+    // File-system events where the platform has them: a change is heard at once instead of at the next tick. Polling is the
+    // fallback (no events here, or a limit was met) and, slowly, the safety net under events.
+    let mut notifier = rathkit_pack::watch::Notifier::new();
+    let mut synced = false;
+    // Imports of unchanged modules are not looked up again while events tell of every file made or removed.
+    let mut resolutions_dirty = false;
+    if let (Some(cache), Some(_)) = (&job.options.cache, &notifier) {
+        cache.reuse_resolutions(true);
+    }
     let mut tick: u32 = 0;
     while !INTERRUPTED.load(Ordering::SeqCst) {
-        std::thread::sleep(std::time::Duration::from_millis(80));
-        tick = tick.wrapping_add(1);
-        let full_look = tick % 25 == 0;
-        let mut changed: Vec<(std::path::PathBuf, &'static str)> = stamps
-            .iter()
-            .filter(|(path, _)| full_look || !in_node_modules(path))
-            .filter_map(|(path, old)| {
-                let now = stamp(path);
-                if now == *old { None } else { Some((path.clone(), if old.is_none() { "create" } else if now.is_none() { "delete" } else { "update" })) }
-            })
-            .collect();
+        if let Some(n) = notifier.as_mut() {
+            // Folders of files the last build read; a new one may have changed before it was watched, so it is looked at in full once.
+            match n.watch(stamps.keys()) {
+                Some(0) => {}
+                Some(_) => synced = false,
+                None => {
+                    eprintln!("note: file events are not available here; polling instead");
+                    notifier = None;
+                    if let Some(cache) = &job.options.cache {
+                        cache.reuse_resolutions(false);
+                    }
+                }
+            }
+        }
+        // `Some` when events name the files to look at, `None` when all are looked at.
+        let mut candidates: Option<std::collections::HashSet<std::path::PathBuf>> = None;
+        let full_look;
+        if let Some(n) = notifier.as_mut() {
+            tick = tick.wrapping_add(1);
+            let wake = if synced { n.wait(100) } else { rathkit_pack::watch::Wake::Overflow };
+            synced = true;
+            match wake {
+                rathkit_pack::watch::Wake::Timeout => {
+                    // Events are trusted, but not blindly: everything is looked at every 2 seconds.
+                    if tick % 20 != 0 {
+                        continue;
+                    }
+                    full_look = true;
+                }
+                rathkit_pack::watch::Wake::Overflow => full_look = true,
+                rathkit_pack::watch::Wake::Paths(mut paths) => {
+                    // A save is often several writes: take what follows until it is quiet.
+                    let quiet_from = Instant::now();
+                    while quiet_from.elapsed() < std::time::Duration::from_millis(50) {
+                        match n.wait(4) {
+                            rathkit_pack::watch::Wake::Paths(more) => paths.extend(more),
+                            _ => break,
+                        }
+                    }
+                    // A path is a file that is watched, or a folder that is (a glob's) whose contents changed.
+                    let mut set = std::collections::HashSet::new();
+                    for path in paths {
+                        let mut known = false;
+                        if stamps.contains_key(&path) {
+                            set.insert(path.clone());
+                            known = true;
+                        }
+                        if let Some(parent) = path.parent() {
+                            if stamps.contains_key(parent) {
+                                set.insert(parent.to_path_buf());
+                            }
+                        }
+                        // A file or folder no build read has appeared, gone or moved beside the ones that were: it may change where an
+                        // import is found (`./a` is `a.ts` now, not `a.js`), though it starts no build by itself.
+                        if !known && !path.extension().is_some_and(|e| e == "map") {
+                            resolutions_dirty = true;
+                        }
+                    }
+                    if set.is_empty() {
+                        continue;
+                    }
+                    candidates = Some(set);
+                    full_look = false;
+                }
+            }
+        } else {
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            tick = tick.wrapping_add(1);
+            full_look = tick % 25 == 0;
+        }
+        let look = |stamps: &std::collections::HashMap<std::path::PathBuf, Stamp>| -> Vec<(std::path::PathBuf, &'static str)> {
+            stamps
+                .iter()
+                .filter(|(path, _)| match &candidates {
+                    Some(set) => set.contains(*path),
+                    None => full_look || notifier.is_some() || !in_node_modules(path),
+                })
+                .filter_map(|(path, old)| {
+                    let now = stamp(path);
+                    if now == *old { None } else { Some((path.clone(), if old.is_none() { "create" } else if now.is_none() { "delete" } else { "update" })) }
+                })
+                .collect()
+        };
+        let mut changed = look(&stamps);
         if changed.is_empty() {
             continue;
         }
-        // An editor often writes a file in several steps; let it finish.
-        std::thread::sleep(std::time::Duration::from_millis(40));
-        changed = stamps.iter().filter(|(path, _)| full_look || !in_node_modules(path)).filter_map(|(path, old)| { let now = stamp(path); if now == *old { None } else { Some((path.clone(), if old.is_none() { "create" } else if now.is_none() { "delete" } else { "update" })) } }).collect();
+        if notifier.is_none() {
+            // An editor often writes a file in several steps; let it finish.
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            changed = look(&stamps);
+        }
         changed.sort();
         if config_path.as_ref().is_some_and(|c| changed.iter().any(|(p, _)| p == c)) || changed.iter().any(|(p, _)| job.restart_files.contains(p)) {
             eprintln!("the config changed; starting again");
@@ -1897,6 +1981,12 @@ fn watch_loop(job: std::sync::Arc<Job>) -> Done {
         }
         for (path, _) in &changed {
             eprintln!("changed: {}", path.strip_prefix(&job.cwd).unwrap_or(path).display());
+        }
+        if resolutions_dirty || changed.iter().any(|(p, e)| *e != "update" || p.extension().is_some_and(|x| x == "json")) {
+            resolutions_dirty = false;
+            if let Some(cache) = &job.options.cache {
+                cache.forget_resolutions();
+            }
         }
         // A package.json decides how its modules are built, so modules kept from before may be out of date.
         if changed.iter().any(|(p, _)| p.file_name().is_some_and(|n| n == "package.json")) {

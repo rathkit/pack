@@ -16,6 +16,16 @@ What an alpha or beta does promise, and checks on every change (`tools/check-pro
 scripts in any package, a build that needs no network, provenance and checksums on every release. It promises nothing
 about stability.
 
+## Unreleased
+
+### Changed
+
+- Watch mode and the development server hear of a change at once on Linux (inotify, called through the C library, no dependency)
+  instead of at the next 80 ms poll and a 40 ms wait; the change is taken after a 4 ms quiet spell. A build keeps, for every module
+  whose file did not change, the places its imports were found, so a warm rebuild looks nothing up again for them. Elsewhere
+  (macOS, Windows, or when inotify has no watch left) the files are polled as before; FSEvents, kqueue and `ReadDirectoryChangesW`
+  need a run loop or overlapped I/O that cannot be had without a dependency.
+
 ## 0.2.0-beta.0 - 2026-11-11
 
 The first beta: measured and gated. The benchmark suite has 15 workloads with warm-rebuild, development server and type-check
