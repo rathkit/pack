@@ -71,8 +71,8 @@ pub(crate) fn const_is_let(ast: &Ast, sem: &Semantic, decl: NodeId) -> bool {
     true
 }
 
-pub(crate) fn plan(source: &str, ast: &Ast, sem: &Semantic, tokens: &[Token], barriers: &[u32]) -> Plan {
-    let mut ctx = Ctx { source, ast, sem, tokens, barriers, parent: vec![None; ast.node_count() + 1], actions: vec![Action::Keep; tokens.len()], locked: vec![false; tokens.len()], dead: Vec::new(), kept_semi: Vec::new(), done: Default::default(), texts: Vec::new(), text_index: Default::default() };
+pub(crate) fn plan(source: &str, ast: &Ast, sem: &Semantic, tokens: &[Token], barriers: &[u32], legacy: bool) -> Plan {
+    let mut ctx = Ctx { legacy, source, ast, sem, tokens, barriers, parent: vec![None; ast.node_count() + 1], actions: vec![Action::Keep; tokens.len()], locked: vec![false; tokens.len()], dead: Vec::new(), kept_semi: Vec::new(), done: Default::default(), texts: Vec::new(), text_index: Default::default() };
     let mut order = Vec::new();
     let mut stack = vec![ast.root];
     while let Some(n) = stack.pop() {
@@ -131,6 +131,8 @@ pub(crate) fn plan(source: &str, ast: &Ast, sem: &Semantic, tokens: &[Token], ba
 }
 
 struct Ctx<'a> {
+    /// The output is es5.
+    legacy: bool,
     source: &'a str,
     ast: &'a Ast,
     sem: &'a Semantic,
@@ -175,6 +177,10 @@ impl Ctx<'_> {
     /// element, a returned value or an argument. Not a directive, a key, a module name or the operand of an operator, and not what
     /// `require` is given (other tools read that as a string).
     fn string_may_be_template(&self, n: NodeId) -> bool {
+        // An es5 output has no template literals.
+        if self.legacy {
+            return false;
+        }
         let Some(parent) = self.parent[n.index()] else { return false };
         match self.ast[parent].kind {
             NodeKind::VarDeclarator { init, .. } => init == Some(n),

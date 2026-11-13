@@ -291,7 +291,7 @@ fn main() {
                 }
             }
             "minify" => {
-                let options = rathkit_pack::minify::Options { whitespace: true, identifiers: true, syntax: true, keep_top_level: false, keep_names: None };
+                let options = rathkit_pack::minify::Options { whitespace: true, identifiers: true, syntax: true, keep_top_level: false, keep_names: None, legacy: false };
                 for s in &usable {
                     checksum += rathkit_pack::minify::minify(s, &options).map_or(0, |m| m.len());
                 }

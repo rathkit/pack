@@ -39,11 +39,24 @@ for (const name of names) {
   const list = existsSync(join(dir, 'targets.txt')) ? readFileSync(join(dir, 'targets.txt'), 'utf8').split(/\s+/).filter(Boolean) : targets;
   // `modes.txt`: the modes to try, one a line (`plain` for none), when the program cannot be built in all of them (top-level await needs ESM or an IIFE).
   const modeList = existsSync(join(dir, 'modes.txt')) ? readFileSync(join(dir, 'modes.txt'), 'utf8').split('\n').map((l) => l.trim()).filter(Boolean).map((l) => (l === 'plain' ? [] : l.split(/\s+/))) : modes;
+  // `refuses.txt`: what the error says when the program cannot be rewritten for its (first) target; the build must fail with it.
+  if (existsSync(join(dir, 'refuses.txt'))) {
+    const expected = readFileSync(join(dir, 'refuses.txt'), 'utf8').trim();
+    const b = spawnSync(bin, ['bundle', 'main.js', '--outfile', join(tmp, `${name}-refused.js`), '--target', list[0], ...modeList[0]], { cwd: dir, encoding: 'utf8' });
+    builds++;
+    if (b.status === 0 || !b.stderr.includes(expected)) {
+      failed++;
+      console.log(`FAIL ${name} [${list[0]}]: expected the build to fail naming "${expected}", got exit ${b.status}: ${b.stderr.trim()}`);
+    }
+    continue;
+  }
   for (const target of list) {
     for (const mode of modeList) {
       const format = mode.includes('cjs') ? 'cjs' : mode.includes('iife') ? 'iife' : 'esm';
       const out = join(tmp, `${name}-${target}-${mode.join('') || 'plain'}.${format === 'esm' ? 'mjs' : 'cjs'}`);
-      const b = spawnSync(bin, ['bundle', 'main.js', '--outfile', out, '--target', target, ...mode], { cwd: dir, encoding: 'utf8' });
+      // `browserslist`: no --target, so the project's own queries (a .browserslistrc) say what the output may use.
+      const targetArgs = target === 'browserslist' ? [] : ['--target', target];
+      const b = spawnSync(bin, ['bundle', 'main.js', '--outfile', out, ...targetArgs, ...mode], { cwd: dir, encoding: 'utf8', env: { ...process.env, BROWSERSLIST: '' } });
       builds++;
       let problem = null;
       if (b.status !== 0) problem = `bundler failed: ${b.stderr.trim()}`;
@@ -52,7 +65,8 @@ for (const name of names) {
         if (r.status !== 0 || r.stdout !== original.stdout) problem = `output differs\n--- expected\n${original.stdout}--- got (exit ${r.status})\n${r.stdout}${r.stderr}`;
         else if (acorn && target !== 'esnext') {
           // An engine target keeps what the engine has, which may be newer than the syntax it lacks; only a year is checked strictly.
-          const year = /^es\d+$/.test(target) ? Number(target.slice(2)) : 'latest';
+          // es5, and the engines with no es2015 at all (ie11, or the project's queries), are checked as es5.
+          const year = /^es\d+$/.test(target) ? Number(target.slice(2)) : /^ie\d+$/.test(target) || target === 'browserslist' ? 5 : 'latest';
           try {
             acorn.parse(readFileSync(out, 'utf8'), { ecmaVersion: year, sourceType: format === 'esm' ? 'module' : 'script' });
           } catch (e) {

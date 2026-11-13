@@ -16,7 +16,7 @@ fn main() -> ExitCode {
         Some((cmd, files)) if cmd == "--minify-verify" && !files.is_empty() => minify_verify(files),
         // Development aid: prints each file as the minifier writes it.
         Some((cmd, files)) if cmd == "--minify-print" && !files.is_empty() => {
-            let options = rathkit_pack::minify::Options { whitespace: true, identifiers: true, syntax: true, keep_top_level: false, keep_names: None };
+            let options = rathkit_pack::minify::Options { whitespace: true, identifiers: true, syntax: true, keep_top_level: false, keep_names: None, legacy: false };
             for file in files {
                 match std::fs::read_to_string(file).map_err(|e| e.to_string()).and_then(|src| rathkit_pack::minify::minify(&src, &options)) {
                     Ok(out) => println!("{out}"),
@@ -52,7 +52,7 @@ fn main() -> ExitCode {
 /// Development aid: minifies each file as a module (those that parse as one) and checks the
 /// result is the same program under other names. Files that need script mode are skipped.
 fn minify_verify(files: &[String]) -> ExitCode {
-    let options = rathkit_pack::minify::Options { whitespace: true, identifiers: true, syntax: true, keep_top_level: false, keep_names: None };
+    let options = rathkit_pack::minify::Options { whitespace: true, identifiers: true, syntax: true, keep_top_level: false, keep_names: None, legacy: false };
     let (mut checked, mut skipped, mut failures, mut before, mut after) = (0, 0, 0, 0usize, 0usize);
     for file in files {
         let Ok(src) = std::fs::read_to_string(file) else { continue };
@@ -558,6 +558,8 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     let mut dts_bundle = false;
     let mut inject_files: Vec<String> = Vec::new();
     let mut tsconfig_raw: Option<String> = None;
+    let mut target_given = false;
+    let mut browserslist_queries: Option<String> = None;
     let mut bundle_options = rathkit_pack::bundle::Options::default();
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -670,12 +672,19 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
             arg if arg == "--target" || arg.starts_with("--target=") => {
                 let value = if arg == "--target" { it.next().cloned().unwrap_or_default() } else { arg["--target=".len()..].to_string() };
                 match rathkit_pack::target::Target::parse(&value) {
-                    Ok(target) => bundle_options.target = target,
+                    Ok(target) => {
+                        bundle_options.target = target;
+                        target_given = true;
+                    }
                     Err(message) => {
                         eprintln!("error: --target: {message}");
                         return Done::Exit(ExitCode::from(2));
                     }
                 }
+            }
+            // --browserslist='chrome >= 80, ie 11': the queries to use when --target is not given (otherwise the project's are read).
+            arg if arg == "--browserslist" || arg.starts_with("--browserslist=") => {
+                browserslist_queries = Some(if arg == "--browserslist" { it.next().cloned().unwrap_or_default() } else { arg["--browserslist=".len()..].to_string() });
             }
             // --tsconfig-raw='{"compilerOptions":{...}}': a tsconfig given as text, which is used instead of any tsconfig.json.
             arg if arg == "--tsconfig-raw" || arg.starts_with("--tsconfig-raw=") => {
@@ -844,6 +853,30 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
         }
     }
     let cwd = std::env::current_dir().expect("working directory");
+    // No --target: the project's browserslist (a variable, a file, or package.json) says which engines the output must run in.
+    if !target_given {
+        let env = std::env::var("BROWSERSLIST_ENV").or_else(|_| std::env::var("NODE_ENV")).unwrap_or_else(|_| "production".to_string());
+        let from = entries.first().map(|e| rathkit_pack::graph::absolute(&cwd, e)).and_then(|p| p.parent().map(|d| d.to_path_buf())).unwrap_or_else(|| cwd.clone());
+        let variable = std::env::var("BROWSERSLIST").ok();
+        let found = browserslist_queries.clone().map(|q| Ok(Some(rathkit_pack::browserslist::Found { queries: vec![q], origin: "--browserslist".to_string() }))).unwrap_or_else(|| rathkit_pack::browserslist::read_project(&from, &env, variable.as_deref()));
+        match found {
+            Ok(Some(found)) => match rathkit_pack::browserslist::to_target(&found.queries).and_then(|t| rathkit_pack::target::Target::parse(&t)) {
+                Ok(target) => bundle_options.target = target,
+                // The project's own queries may need data this program lacks (`defaults`): the build goes on with nothing rewritten,
+                // as it did before browserslist was read. A query given with --browserslist is an error.
+                Err(message) if browserslist_queries.is_none() => eprintln!("warning: browserslist from {}: {message}; the output is not rewritten for it", found.origin),
+                Err(message) => {
+                    eprintln!("error: browserslist from {}: {message}", found.origin);
+                    return Done::Exit(ExitCode::from(2));
+                }
+            },
+            Ok(None) => {}
+            Err(message) => {
+                eprintln!("error: browserslist: {message}");
+                return Done::Exit(ExitCode::from(2));
+            }
+        }
+    }
     let mut restart_files: Vec<std::path::PathBuf> = Vec::new();
     for file in &inject_files {
         match rathkit_pack::graph::Inject::read(&rathkit_pack::graph::absolute(&cwd, file)) {

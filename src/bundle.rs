@@ -20,6 +20,11 @@
 
 mod lower;
 mod lower_class;
+mod lower_es5;
+mod lower_es5_blocks;
+mod lower_es5_class;
+mod lower_es5_stmt;
+mod es5_helpers;
 mod refresh;
 mod registry;
 mod std_decorators;
@@ -360,6 +365,12 @@ struct Helpers {
     async_fn: bool,
     for_await: bool,
     async_gen: bool,
+    /// `__ck`, `__tpl`, `__arr`: object literals, tagged templates and iterables written for an es5 target.
+    es5_object: bool,
+    es5_template: bool,
+    es5_array: bool,
+    es5_iter: bool,
+    es5_class: bool,
 }
 
 struct Bundler<'a> {
@@ -391,6 +402,9 @@ struct Bundler<'a> {
     out_extensions: Vec<(String, String)>,
     /// `--target`: syntax newer than this is rewritten.
     target: crate::target::Target,
+    /// The target lacks some syntax of es2015 (arrow functions, `let`, classes, ...), so the helpers and templates written into the
+    /// output use only es5.
+    legacy: bool,
     /// The temporaries rewritten code uses, each declared once at the top of the chunk of the module that uses it.
     temps: Vec<(ModuleId, String)>,
     temp_count: u32,
@@ -529,6 +543,7 @@ impl<'a> Bundler<'a> {
             drop_debugger: false,
             out_extensions: Vec::new(),
             target: crate::target::Target::ESNEXT,
+            legacy: false,
             temps: Vec::new(),
             temp_count: 0,
             entry_names: Vec::new(),
@@ -564,6 +579,7 @@ impl<'a> Bundler<'a> {
         self.drop_debugger = options.drop_debugger;
         self.out_extensions = options.out_extensions.clone();
         self.target = options.target;
+        self.legacy = options.target.lacks_es2015();
         self.federation = options.federation.clone();
         self.format = options.format;
         self.splitting = options.splitting && options.format == Format::Esm && !options.hmr;
@@ -699,7 +715,7 @@ impl<'a> Bundler<'a> {
         // Frameworks that use decorators read class names at run time (Nest builds its module
         // tokens from them), so shortening them breaks those programs unless asked for.
         let keep_names = options.minify.keep_names.unwrap_or(graph.decorator_metadata || graph.experimental_decorators);
-        let settings = crate::minify::Options { keep_top_level: self.format == Format::Iife, keep_names: Some(keep_names), ..options.minify };
+        let settings = crate::minify::Options { keep_top_level: self.format == Format::Iife, keep_names: Some(keep_names), legacy: !self.target.supports(crate::target::Feature::Template), ..options.minify };
         let marks = std::mem::take(&mut *self.marks.lock().expect("marks"));
         // The chunks are independent from here on, so with several they are finished side by side.
         let finish = |c: usize, (raw, layout): (String, crate::minify::Layout)| self.finish_chunk(c, raw, layout, options, &settings, &marks);
@@ -788,6 +804,20 @@ impl<'a> Bundler<'a> {
             let pieces = self.binding_pieces(Some(first), &binding);
             self.ready_calls.insert(c, pieces);
         }
+    }
+
+    /// `() =>` or, for an es5 target, `function ()`: the start of a function whose body is a block.
+    fn arrow_head(&self) -> String {
+        self.arrow_head_with("")
+    }
+
+    fn arrow_head_with(&self, params: &str) -> String {
+        if self.legacy { format!("function ({params})") } else { format!("({params}) =>") }
+    }
+
+    /// `prefix` and a function with `params` that returns the expression `body`.
+    fn arrow_expr(&self, prefix: &str, params: &str, body: &str) -> String {
+        if self.legacy { format!("{prefix}function ({params}) {{ return {body}; }}") } else { format!("{prefix}({params}) => {body}") }
     }
 
     /// The target has no async functions, so `__async` runs a generator in their place.
@@ -2243,7 +2273,7 @@ impl<'a> Bundler<'a> {
             self.code.insert(id, Code::Wrapped { edits: Vec::new(), json: true, require_cases: None });
             return;
         };
-        let mut scanner = Scanner { bundler: self, module, places: None, private_scopes: Vec::new(), private_refs: HashMap::new(), chain_members: HashSet::new(), call_callees: HashSet::new(), ast: &parsed.ast, semantic: &parsed.semantic, edits: Vec::new(), statement_starts: HashSet::new(), shorthand: HashSet::new(), skip: HashSet::new(), written: HashSet::new(), fn_depth: 0, async_ctx: Vec::new(), site_next: HashMap::new(), has_tla: false, needs_require: false, top_decl: None, in_wrapper: false, name_hint: None, shared_names: None };
+        let mut scanner = Scanner { bundler: self, module, places: None, private_scopes: Vec::new(), private_refs: HashMap::new(), chain_members: HashSet::new(), call_callees: HashSet::new(), ast: &parsed.ast, semantic: &parsed.semantic, edits: Vec::new(), statement_starts: HashSet::new(), shorthand: HashSet::new(), skip: HashSet::new(), written: HashSet::new(), fn_depth: 0, async_ctx: Vec::new(), site_next: HashMap::new(), has_tla: false, needs_require: false, top_decl: None, in_wrapper: false, name_hint: None, shared_names: None, es5: Default::default() };
         let code = if module.kind == ModuleKind::Esm && scanner.bundler.registry { scanner.scan_registry(id) } else if module.kind == ModuleKind::Esm { scanner.scan_esm(id) } else { scanner.scan_wrapped(id) };
         self.code.insert(id, code);
     }
@@ -2332,12 +2362,19 @@ struct Scanner<'b, 'a> {
     shared_names: Option<HashSet<SymbolId>>,
     /// An anonymous class expression and the name its surroundings give it (`const X = class {}`).
     name_hint: Option<(NodeId, String)>,
+    /// The state of the es5 rewrites (`lower_es5.rs`).
+    es5: lower_es5::State,
 }
 
 impl<'a> Scanner<'_, 'a> {
     fn span(&self, node: NodeId) -> (u32, u32) {
         let s = self.ast[node].span;
         (s.start, s.end)
+    }
+
+    /// The target lacks syntax of es2015, which `lower_es5.rs` rewrites.
+    fn legacy_syntax(&self) -> bool {
+        self.bundler.legacy
     }
 
     /// Everything in an ES module that stays, one statement at a time.
@@ -2746,9 +2783,10 @@ impl<'a> Scanner<'_, 'a> {
             vec![Piece::Text("__toNs(".into()), Piece::Name(key), Piece::Text("(), 1)".into())]
         };
         if kind == RequestKind::Dynamic {
-            let mut pieces = vec![Piece::Text("Promise.resolve().then(() => ".into())];
+            let legacy = self.bundler.legacy;
+            let mut pieces = vec![Piece::Text(if legacy { "Promise.resolve().then(function () { return " } else { "Promise.resolve().then(() => " }.into())];
             pieces.extend(value);
-            pieces.push(Piece::Text(")".into()));
+            pieces.push(Piece::Text(if legacy { "; })" } else { ")" }.into()));
             Some(pieces)
         } else {
             Some(value)
@@ -3004,7 +3042,14 @@ impl<'a> Scanner<'_, 'a> {
                     NodeKind::AssignPattern { target, .. } | NodeKind::Assign { target, .. } => target,
                     _ => value,
                 };
-                self.shorthand.insert(target);
+                // A shorthand that is rewritten as `a: a` has its name written as any other.
+                let rewritten = match ast[node].kind {
+                    NodeKind::Property { .. } => self.lowers(crate::target::Feature::ObjectLiteral),
+                    _ => self.lowers(crate::target::Feature::Destructuring),
+                };
+                if !rewritten {
+                    self.shorthand.insert(target);
+                }
             }
             NodeKind::JsxElement(_) | NodeKind::JsxFragment { .. } => self.jsx_edit(node),
             NodeKind::ImportMeta if !wrapped && self.bundler.format != Format::Esm => {
@@ -3022,15 +3067,27 @@ impl<'a> Scanner<'_, 'a> {
                 }
                 self.walk_in(key, wrapped, this_bound);
                 if let Some(value) = value {
+                    if self.legacy_syntax() {
+                        self.es5_enter_this_scope();
+                    }
                     self.walk_in(value, wrapped, true);
+                    if self.legacy_syntax() {
+                        self.es5_exit();
+                    }
                 }
                 return;
             }
             NodeKind::StaticBlock(_) => {
                 let mut children = Vec::new();
                 ast.for_each_child(node, |c| children.push(c));
+                if self.legacy_syntax() {
+                    self.es5_enter_this_scope();
+                }
                 for child in children {
                     self.walk_in(child, wrapped, true);
+                }
+                if self.legacy_syntax() {
+                    self.es5_exit();
                 }
                 return;
             }
@@ -3047,12 +3104,18 @@ impl<'a> Scanner<'_, 'a> {
         if is_function {
             let ctx = self.fn_ctx(node);
             self.async_ctx.push(ctx);
+            if self.legacy_syntax() {
+                self.es5_enter(node);
+            }
         }
         for child in children {
             self.walk_in(child, wrapped, bound);
         }
         if is_function {
             self.async_ctx.pop();
+            if self.legacy_syntax() {
+                self.es5_exit();
+            }
         }
         self.fn_depth -= is_function as u32;
         if is_function {
@@ -3581,12 +3644,15 @@ impl Bundler<'_> {
                 }
             }
             Form::Class { key, original, decorated } => {
-                if &names[key] != original || *decorated {
+                if !self.target.supports(crate::target::Feature::Class) {
+                    // The class became an expression (a function), which this names.
+                    text = format!("var {} = {text}", names[key]);
+                } else if &names[key] != original || *decorated {
                     text = format!("let {} = {text}", names[key]);
                 }
             }
         }
-        let renamed_class = matches!(stmt.form, Form::Class { .. }) && text.starts_with("let ");
+        let renamed_class = matches!(stmt.form, Form::Class { .. }) && (text.starts_with("let ") || text.starts_with("var "));
         if (stmt.terminate || renamed_class) && !ends_with_semicolon(&text) {
             text.push(';');
         }
@@ -3643,9 +3709,11 @@ impl Bundler<'_> {
             Format::Iife => {
                 match &self.global_name {
                     Some(name) => {
-                        let _ = writeln!(out, "var {name} = (() => {{");
+                        let _ = writeln!(out, "var {name} = ({} {{", self.arrow_head());
                     }
-                    None => out.push_str("(() => {\n"),
+                    None => {
+                        out.push_str(&format!("({} {{\n", self.arrow_head()));
+                    }
                 }
                 head = out.len();
                 out.push_str("\"use strict\";\n");
@@ -3708,10 +3776,10 @@ impl Bundler<'_> {
         }
         let needs_cjs = self.code.values().any(|c| matches!(c, Code::Wrapped { .. }));
         if needs_cjs {
-            out.push_str(HELPER_CJS);
+            out.push_str(if self.legacy { es5_helpers::CJS } else { HELPER_CJS });
         }
         if self.helpers.esm {
-            out.push_str(HELPER_ESM);
+            out.push_str(if self.legacy { es5_helpers::ESM } else { HELPER_ESM });
         }
         if self.helpers.decorate {
             out.push_str(HELPER_DECORATE);
@@ -3723,13 +3791,28 @@ impl Bundler<'_> {
             out.push_str(HELPER_STD_DECORATORS);
         }
         if self.helpers.spread {
-            out.push_str(HELPER_SPREAD);
+            out.push_str(if self.legacy { es5_helpers::SPREAD } else { HELPER_SPREAD });
         }
         if self.helpers.class_private {
-            out.push_str(HELPER_CLASS_PRIVATE);
+            out.push_str(if self.legacy { es5_helpers::CLASS_PRIVATE } else { HELPER_CLASS_PRIVATE });
+        }
+        if self.helpers.es5_object {
+            out.push_str(es5_helpers::OBJECT);
+        }
+        if self.helpers.es5_template {
+            out.push_str(es5_helpers::TEMPLATE);
+        }
+        if self.helpers.es5_array {
+            out.push_str(es5_helpers::ARRAY);
+        }
+        if self.helpers.es5_iter {
+            out.push_str(es5_helpers::ITER);
+        }
+        if self.helpers.es5_class {
+            out.push_str(es5_helpers::CLASS);
         }
         if self.helpers.async_fn {
-            out.push_str(HELPER_ASYNC);
+            out.push_str(if self.legacy { es5_helpers::ASYNC } else { HELPER_ASYNC });
         }
         if self.helpers.for_await || self.helpers.async_gen {
             out.push_str(HELPER_FOR_AWAIT);
@@ -3739,20 +3822,23 @@ impl Bundler<'_> {
         }
         if self.code.values().any(|c| matches!(c, Code::Wrapped { require_cases: Some(_), .. })) {
             out.push_str(match format {
+                Format::Esm if self.legacy => es5_helpers::REQ,
+                Format::Cjs if self.legacy => es5_helpers::REQ_CJS,
+                Format::Iife if self.legacy => es5_helpers::REQ_IIFE,
                 Format::Esm => HELPER_REQ,
                 Format::Cjs => HELPER_REQ_CJS,
                 Format::Iife => HELPER_REQ_IIFE,
             });
         }
         if self.helpers.to_default {
-            out.push_str(HELPER_TO_DEFAULT);
+            out.push_str(if self.legacy { es5_helpers::TO_DEFAULT } else { HELPER_TO_DEFAULT });
         }
         if self.helpers.to_ns {
-            out.push_str(HELPER_TO_NS);
+            out.push_str(if self.legacy { es5_helpers::TO_NS } else { HELPER_TO_NS });
         }
         let has_ns = self.keys.iter().any(|k| matches!(k, Key::Namespace(_)));
         if has_ns {
-            out.push_str(HELPER_NS);
+            out.push_str(if self.legacy { es5_helpers::NS } else { HELPER_NS });
         }
         // The temporaries of rewritten syntax (`--target`) that the modules of this chunk use.
         let temps: Vec<&str> = self.temps.iter().filter(|(m, _)| self.in_chunk(*m, chunk)).map(|(_, n)| n.as_str()).collect();
@@ -3783,7 +3869,7 @@ impl Bundler<'_> {
             let target = if format == Format::Cjs { "exports" } else { "__exports" };
             // An iife with no global name has nobody to hand its exports to.
             if !exports.is_empty() && cjs_entry.is_none() && (format != Format::Iife || self.global_name.is_some()) {
-                out.push_str(HELPER_EXPORT);
+                out.push_str(if self.legacy { es5_helpers::EXPORT } else { HELPER_EXPORT });
                 if format == Format::Iife {
                     out.push_str("var __exports = {};\n");
                 }
@@ -3791,7 +3877,7 @@ impl Bundler<'_> {
                     .iter()
                     .map(|(name, pieces)| {
                         let label = if is_identifier_name(name) { name.clone() } else { json_string(name) };
-                        format!("{label}: () => {}", self.text_of(pieces, names))
+                        self.arrow_expr(&format!("{label}: "), "", &self.text_of(pieces, names))
                     })
                     .collect();
                 let _ = writeln!(out, "__export({target}, {{ {} }});", fields.join(", "));
@@ -3840,7 +3926,7 @@ impl Bundler<'_> {
                     None => "\n});\n".to_string(),
                     Some(cases) => {
                         // The arrow's two parameters are names of the module's scope, so they are shortened with the rest.
-                        let mut table = String::from("__req((__i, __r) => { switch (__i) { ");
+                        let mut table = format!("__req({} {{ switch (__i) {{ ", self.arrow_head_with("__i, __r"));
                         let list: Vec<String> = cases.iter().map(|(spec, pieces)| format!("case {}: return {}", json_string(spec), self.text_of(pieces, names))).collect();
                         table.push_str(&list.join("; "));
                         let url = if format != Format::Esm { "0".to_string() } else if self.original_paths { file_url(&module.path) } else { "import.meta.url".to_string() };
@@ -3879,7 +3965,7 @@ impl Bundler<'_> {
                     let _ = write!(out, "var {name} = __cjs(function (exports, module) {{\n{body}\n}});\n");
                 }
                 Some(cases) => {
-                    let mut table = String::from("__req((id, r) => { switch (id) { ");
+                    let mut table = format!("__req({} {{ switch (id) {{ ", self.arrow_head_with("id, r"));
                     for (spec, pieces) in cases {
                         let _ = write!(table, "case {}: return {}; ", json_string(spec), self.text_of(pieces, names));
                     }
@@ -3900,7 +3986,7 @@ impl Bundler<'_> {
             let mut fields = Vec::new();
             for (name, pieces) in self.ns_entries.get(id).map(|v| v.as_slice()).unwrap_or(&[]) {
                 let label = if is_identifier_name(name) { name.clone() } else { json_string(name) };
-                fields.push(format!("{label}: () => {}", self.text_of(pieces, names)));
+                fields.push(self.arrow_expr(&format!("{label}: "), "", &self.text_of(pieces, names)));
             }
             let _ = writeln!(out, "var {} = __ns({{ {} }});", names[key], fields.join(", "));
             cuts.push(out.len());
@@ -3994,7 +4080,7 @@ impl Bundler<'_> {
                 let _ = writeln!(out, "var {};", hoisted.join(", "));
             }
             out.push_str(&functions);
-            let _ = write!(out, "var {} = __esm(() => {{\n{body}}});\n", names[&Key::Init(module.id)]);
+            let _ = write!(out, "var {} = __esm({} {{\n{body}}});\n", names[&Key::Init(module.id)], self.arrow_head());
             cuts.push(out.len());
         }
         if let Some(pieces) = self.ready_calls.get(&chunk) {
@@ -4134,9 +4220,9 @@ impl Scanner<'_, '_> {
             pieces.extend(target.iter().cloned());
             pieces.push(text(";\n"));
         }
-        pieces.push(text("(("));
+        pieces.push(text(if self.bundler.legacy { "(function (" } else { "((" }));
         pieces.extend(target.iter().cloned());
-        pieces.push(text(") => {\n"));
+        pieces.push(text(if self.bundler.legacy { ") {\n" } else { ") => {\n" }));
         let mut values: HashMap<crate::ast::Atom, EnumValue> = HashMap::new();
         let mut auto: Option<f64> = Some(0.0);
         let mut previous: Option<String> = None;

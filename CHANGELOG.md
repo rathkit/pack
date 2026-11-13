@@ -26,6 +26,13 @@ about stability.
   (macOS, Windows, or when inotify has no watch left) the files are polled as before; FSEvents, kqueue and `ReadDirectoryChangesW`
   need a run loop or overlapped I/O that cannot be had without a dependency.
 
+### Added
+
+- `--target=es5`, and engines without es2015 (`ie11`, `chrome44`): arrow functions, classes, `let` and `const`, templates, destructuring, default and
+  rest parameters, spread, `for of`, new object literal forms and the output's own helpers are written as es5 (generators and async functions are
+  refused by name). A browserslist input: `--target` defaults to the queries of the project (`.browserslistrc`, `package.json`, `BROWSERSLIST`) or of
+  `--browserslist`, for the queries that name engines and versions.
+
 ## 0.2.0-beta.0 - 2026-11-11
 
 The first beta: measured and gated. The benchmark suite has 15 workloads with warm-rebuild, development server and type-check

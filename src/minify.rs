@@ -44,6 +44,8 @@ pub struct Options {
     /// name an anonymous function or class (`const f = () => {}`).
     /// `None` leaves the choice to the caller.
     pub keep_names: Option<bool>,
+    /// The output is es5: syntax of es2015 (template literals) is not written.
+    pub legacy: bool,
 }
 
 impl Options {
@@ -98,7 +100,7 @@ fn run(source: &str, options: &Options, anchors: Option<&mut Vec<Anchor>>, barri
     // Which tokens the syntax rewrites change does not depend on the names, so the two plans
     // are made side by side.
     let plan = std::thread::scope(|scope| {
-        let syntax = options.syntax.then(|| scope.spawn(|| crate::compress::plan(source, &parsed.ast, &parsed.semantic, tokens, barriers)));
+        let syntax = options.syntax.then(|| scope.spawn(|| crate::compress::plan(source, &parsed.ast, &parsed.semantic, tokens, barriers, options.legacy)));
         if options.any() {
             facts.collect(&parsed.ast, &parsed.semantic, source);
             lap("collect facts");
@@ -1618,8 +1620,8 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    const ALL: Options = Options { whitespace: true, identifiers: true, syntax: false, keep_top_level: false, keep_names: None };
-    const SYNTAX: Options = Options { whitespace: true, identifiers: true, syntax: true, keep_top_level: false, keep_names: None };
+    const ALL: Options = Options { whitespace: true, identifiers: true, syntax: false, keep_top_level: false, keep_names: None, legacy: false };
+    const SYNTAX: Options = Options { whitespace: true, identifiers: true, syntax: true, keep_top_level: false, keep_names: None, legacy: false };
 
     fn min(source: &str) -> String {
         verify(source, &ALL).unwrap_or_else(|e| panic!("{e}\n{source}"));
