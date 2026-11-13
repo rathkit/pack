@@ -14,9 +14,14 @@ import { testModules } from './lib/test-deps.mjs';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const bin = process.env.RATHKIT_PACK_BIN ?? join(root, 'target', 'release', 'rkp');
 const dir = mkdtempSync(join(tmpdir(), 'hmr-'));
+// A file lands whole, like the save of an editor that writes a temporary file and renames it over the old one. A plain writeFileSync empties
+// the file first and writes after, and on a loaded machine (the Alpine legs of CI) the server can look in between and build a module with
+// no exports, so the update the check waits for comes late or differently.
 const write = (name, text) => {
   mkdirSync(dirname(join(dir, name)), { recursive: true });
-  writeFileSync(join(dir, name), text);
+  const temporary = join(dir, `.${name.replaceAll('/', '_')}.${process.pid}.tmp`);
+  writeFileSync(temporary, text);
+  renameSync(temporary, join(dir, name));
 };
 write('index.html', '<!doctype html><html><body><script type="module" src="/main.js"></script></body></html>\n');
 write('main.js', `
@@ -107,6 +112,11 @@ try {
       }
     }
   }).catch(() => {});
+
+  // The page has not heard of an update until its stream is open: an edit made before the server has accepted the connection is broadcast
+  // to nobody, and the page would wait for a message that was sent before it was listening (on a slow or loaded machine, as in the
+  // Alpine legs of CI, that is how this check failed). A page does the same by acting on "connected" only.
+  check(await until(() => messages.some((m) => m.type === 'connected')), 'the page is connected to the server');
 
   // The page: the build run in this process.
   globalThis.location = { reload() { globalThis.reloaded = (globalThis.reloaded ?? 0) + 1; } };
