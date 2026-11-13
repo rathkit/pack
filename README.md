@@ -98,7 +98,7 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   or release data, which this program does not ship, stop `--browserslist` with a message and, when read from the project, give a warning and leave the output not rewritten.
   `--target` wins over browserslist.
 - `--dts` (and `--dts-dir=DIR`, for a folder other than the output's): declaration files for the entries, written with the project's own
-  `typescript` package (run by Node; it is an error if it is not installed). With TypeScript 7, the native compiler, its command line writes them (`--dts-bundle` still needs TypeScript 5 or 6, because the merge reads the declarations with the JavaScript API that version 7 does not have; the files differ from version 5's only in quote style and a `declare` on JavaScript entries). They are what `tsc --declaration --emitDeclarationOnly`
+  `typescript` package (run by Node; it is an error if it is not installed). With TypeScript 7, the native compiler, its command line writes them, and `--dts-bundle` merges them with a reader of declaration files of our own (version 7 has no JavaScript API to read them with; the files differ from version 5's only in quote style, the order of the export list and a `declare` on JavaScript entries). Module federation's types are written the same way. They are what `tsc --declaration --emitDeclarationOnly`
   writes: one `.d.ts` for each source file the entries reach, laid out from the folder the sources share (so `src/index.ts` becomes
   `dist/index.d.ts` beside `dist/index.js`). With `--dts-bundle` (`dtsBundle: true`) each entry gets one file instead, named after it, with
   everything it reaches by relative imports merged in: two files' declarations with the same name are told apart (`Item`, `Item$1`), the
@@ -115,6 +115,16 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   starts a new build when watching); workers: `new Worker(new URL("./w.js", import.meta.url))`, `./w.js?worker`,
   `?sharedworker`, `?worker&inline` and `?worker&url`. A worker script is built on its own as an ES module (shared
   code is repeated in it) and copied beside the output; workers need an ES module environment.
+- Library mode. `--format esm,cjs` writes both in one build (`.mjs` and `.cjs`; with several entries the ES modules share chunks and each
+  CommonJS file stands alone), and an entry whose only export is `default` is `module.exports` itself in the CommonJS file (`--exports auto`,
+  the default for a list of formats; `--exports named` always writes an `exports` object). The CommonJS files say their names the way Node
+  reads them, so `import { name } from "./x.cjs"` works. `--preserve-modules` (with `--preserve-modules-root DIR`, default the folder the
+  sources share) writes a file for each module in the folders the sources are in, with every module keeping all its exports; what is bundled
+  from `node_modules` goes under `_deps/`. In CommonJS files the other files of the build are read when a name is used, so files that import one
+  another in a circle work. `--write-exports[=FILE]` sets `main`, `module`, `types` and the `exports` map (a subpath for each entry, `.` for
+  `index`, with `types`, `import` and `require` conditions) in the `package.json`, keeping its other fields. Checked on a fixture library
+  (`tools/run-library.mjs`) and on 38 corpus libraries built in both ways and compared, subpath by subpath and format by format, with the
+  release their authors publish (`tools/run-corpus.mjs`, the `library` block of `corpus/projects.json`).
 - Links imports across modules (re-exports, `export *`, namespaces, cycles) and reports a
   missing or ambiguous name as an error before anything runs.
 - Loaders (`--loader .ext=NAME`): `text`, `base64`, `dataurl`, `binary`, `file` (copied to the output as

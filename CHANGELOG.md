@@ -32,6 +32,14 @@ about stability.
   rest parameters, spread, `for of` (closing its iterator), new object literal forms, private members, `new.target`, generators, async functions,
   async generators and `for await` (a state machine) and the output's own helpers are written as es5. A browserslist input: `--target` defaults to the queries of the project (`.browserslistrc`, `package.json`, `BROWSERSLIST`) or of
   `--browserslist`, for the queries that name engines and versions.
+- Library mode: `--format esm,cjs` writes both formats in one build, `--exports auto|named` chooses how a CommonJS entry hands out its exports, `--preserve-modules`
+  (and `--preserve-modules-root`) writes one file for each module, and `--write-exports` sets `main`, `module`, `types` and `exports` in the `package.json`.
+  The corpus libraries are built in both ways and compared with the releases their authors publish.
+- `--dts-bundle` and the types of module federation work with TypeScript 7: its command line writes the declarations and a reader of our own merges them.
+
+### Fixed
+
+- `--dts-bundle` follows a re-export written with a `.ts` extension (`export { A } from './a.ts'`), which it left out.
 
 ## 0.2.0-beta.0 - 2026-11-11
 
