@@ -1152,9 +1152,10 @@ const stylePlugin = async (projectRoot, cssConfig = {}, mode = 'production', com
         async findFileUrl(url) {
           if (/^(\.|\/|[a-z][a-z0-9+.-]*:)/i.test(url) && !url.startsWith('~')) return null;
           const name = url.replace(/^~/, '');
+          // `~/styles/x` is an alias of the config, not a package named "": it goes to the alias lookup below.
           const parts = name.split('/');
           const first = name.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0];
-          for (let dir = path.dirname(file); ; dir = path.dirname(dir)) {
+          for (let dir = path.dirname(file); first; dir = path.dirname(dir)) {
             const base = path.join(dir, 'node_modules');
             if (fs.existsSync(path.join(base, first))) return pathToFileURL(path.join(base, name));
             if (path.dirname(dir) === dir) break;
