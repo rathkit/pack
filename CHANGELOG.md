@@ -29,8 +29,8 @@ about stability.
 ### Added
 
 - `--target=es5`, and engines without es2015 (`ie11`, `chrome44`): arrow functions, classes, `let` and `const`, templates, destructuring, default and
-  rest parameters, spread, `for of`, new object literal forms and the output's own helpers are written as es5 (generators and async functions are
-  refused by name). A browserslist input: `--target` defaults to the queries of the project (`.browserslistrc`, `package.json`, `BROWSERSLIST`) or of
+  rest parameters, spread, `for of` (closing its iterator), new object literal forms, private members, `new.target`, generators, async functions,
+  async generators and `for await` (a state machine) and the output's own helpers are written as es5. A browserslist input: `--target` defaults to the queries of the project (`.browserslistrc`, `package.json`, `BROWSERSLIST`) or of
   `--browserslist`, for the queries that name engines and versions.
 
 ## 0.2.0-beta.0 - 2026-11-11

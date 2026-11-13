@@ -99,7 +99,7 @@ impl Scanner<'_, '_> {
 
     /// `this` where `super` is used: the variable of an arrow that is rewritten, or of a derived constructor.
     fn this_for_super(&self) -> &'static str {
-        if self.bundler.legacy && (self.lowers(Feature::Arrow) && self.es5_in_arrow() || self.in_derived_ctor()) { "_$this" } else { "this" }
+        if self.bundler.legacy && (self.arrows_rewritten() && self.es5_in_arrow() || self.in_derived_ctor()) { "_$this" } else { "this" }
     }
 
     fn arguments_array(&mut self, items: &[NodeId]) -> Vec<Piece> {
@@ -145,10 +145,6 @@ impl Scanner<'_, '_> {
         }
         for &m in &members {
             match ast[m].kind {
-                NodeKind::ClassMethod { key, .. } | NodeKind::ClassField { key, .. } if matches!(ast[key].kind, NodeKind::PrivateName(_)) => {
-                    self.refuse(Feature::ClassPrivate, m, "and Rathkit Pack cannot rewrite it yet");
-                    return;
-                }
                 NodeKind::ClassField { .. } if ast[m].has(crate::ast::flags::ACCESSOR) => {
                     self.refuse(Feature::ClassField, m, "and an accessor field cannot be rewritten for it yet");
                     return;
@@ -162,6 +158,15 @@ impl Scanner<'_, '_> {
         }
         self.bundler.helpers.es5_class = true;
         self.bundler.helpers.es5_object = true;
+        let has_private = members.iter().any(|&m| matches!(ast[m].kind, NodeKind::ClassMethod { key, .. } | NodeKind::ClassField { key, .. } if matches!(ast[key].kind, NodeKind::PrivateName(_))));
+        let declared = if has_private {
+            self.bundler.helpers.class_private = true;
+            let declared = self.declare_privates(&members);
+            self.rewrite_privates(node, true);
+            declared
+        } else {
+            Vec::new()
+        };
         let derived = superclass.is_some();
         let n = self.bundler.temp_count;
         self.bundler.temp_count += 1;
@@ -182,7 +187,20 @@ impl Scanner<'_, '_> {
         let named = |pieces: &mut Vec<Piece>| pieces.extend(class_name.clone());
         // Fields set for each new object.
         let instance_fields: Vec<NodeId> = members.iter().copied().filter(|&m| matches!(ast[m].kind, NodeKind::ClassField { .. }) && !ast[m].has(crate::ast::flags::STATIC)).collect();
-        let init = (!instance_fields.is_empty()).then(|| format!("_$init{n}"));
+        // Private methods and accessors of the objects are recorded for each new object.
+        let mut instance_brands: Vec<String> = Vec::new();
+        for &m in &members {
+            if let NodeKind::ClassMethod { key, .. } = ast[m].kind {
+                if !ast[m].has(crate::ast::flags::STATIC) {
+                    if let Some(info) = self.private_info(key) {
+                        if !instance_brands.contains(&info.brand) {
+                            instance_brands.push(info.brand);
+                        }
+                    }
+                }
+            }
+        }
+        let init = (!instance_fields.is_empty() || !instance_brands.is_empty()).then(|| format!("_$init{n}"));
         let mut constructor: Option<NodeId> = None;
         for &m in &members {
             if let NodeKind::ClassMethod { value, kind, .. } = ast[m].kind {
@@ -198,6 +216,9 @@ impl Scanner<'_, '_> {
             }
         }
         let mut body: Vec<Piece> = Vec::new();
+        for (_, info) in &declared {
+            body.push(Piece::Text(format!(" {} = new {}();", info.brand, if info.kind == super::lower_class::PrivateKind::Field { "WeakMap" } else { "WeakSet" })));
+        }
         if derived {
             body.push(text(" __extends("));
             named(&mut body);
@@ -249,12 +270,22 @@ impl Scanner<'_, '_> {
         if let Some(init) = &init {
             let mut statements: Vec<Piece> = Vec::new();
             let mut uses = lower_es5::Uses::default();
+            for brand in &instance_brands {
+                statements.push(Piece::Text(format!(" __privateAdd(this, {brand});")));
+            }
             for &f in &instance_fields {
                 if let NodeKind::ClassField { key, value } = ast[f].kind {
-                    let key_pieces = self.field_key(f, key);
-                    statements.push(text(" __ck(this, "));
-                    statements.extend(key_pieces);
-                    statements.push(text(", "));
+                    match self.private_info(key) {
+                        Some(info) => {
+                            statements.push(Piece::Text(format!(" __privateAdd(this, {}, ", info.brand)));
+                        }
+                        None => {
+                            let key_pieces = self.field_key(f, key);
+                            statements.push(text(" __ck(this, "));
+                            statements.extend(key_pieces);
+                            statements.push(text(", "));
+                        }
+                    }
                     match value {
                         Some(v) => {
                             statements.extend(self.rng(v));
@@ -266,7 +297,7 @@ impl Scanner<'_, '_> {
                 }
             }
             let mut head = Vec::new();
-            if uses.this && self.lowers(Feature::Arrow) {
+            if uses.this && self.arrows_rewritten() {
                 head.push(text(" var _$this = this;"));
             }
             body.push(Piece::Text(format!(" var {init} = function () {{")));
@@ -278,6 +309,25 @@ impl Scanner<'_, '_> {
         for &m in &members {
             let NodeKind::ClassMethod { key, value, kind } = ast[m].kind else { continue };
             if kind == MethodKind::Constructor && !ast[m].has(crate::ast::flags::STATIC) {
+                continue;
+            }
+            // A private method, getter or setter is a function in a variable of the chunk.
+            if let Some(info) = self.private_info(key) {
+                let function = match kind {
+                    MethodKind::Get => info.getter.clone(),
+                    MethodKind::Set => info.setter.clone(),
+                    _ => info.method.clone(),
+                }
+                .unwrap_or_default();
+                let (fa, fb) = self.span(value);
+                body.push(Piece::Text(format!(" {function} = function ")));
+                body.push(Piece::Range(fa, fb));
+                body.push(text(";"));
+                if ast[m].has(crate::ast::flags::STATIC) {
+                    body.push(text(" __privateAdd("));
+                    named(&mut body);
+                    body.push(Piece::Text(format!(", {});", info.brand)));
+                }
                 continue;
             }
             let is_static = ast[m].has(crate::ast::flags::STATIC);
@@ -292,7 +342,7 @@ impl Scanner<'_, '_> {
             // `named` wrote the class; the call's first argument is the class or its prototype.
             let _ = value;
             body.extend(self.field_key(m, key));
-            body.push(text(", function "));
+            body.push(Piece::Text(format!(", function{} ", self.native_star(value))));
             let (fa, fb) = self.span(value);
             body.push(Piece::Range(fa, fb));
             body.push(Piece::Text(format!(", {kind_code});")));
@@ -305,9 +355,14 @@ impl Scanner<'_, '_> {
             for &s in &statics {
                 match ast[s].kind {
                     NodeKind::ClassField { key, value } => {
-                        statements.push(text(" __ck(this, "));
-                        statements.extend(self.field_key(s, key));
-                        statements.push(text(", "));
+                        match self.private_info(key) {
+                            Some(info) => statements.push(Piece::Text(format!(" __privateAdd(this, {}, ", info.brand))),
+                            None => {
+                                statements.push(text(" __ck(this, "));
+                                statements.extend(self.field_key(s, key));
+                                statements.push(text(", "));
+                            }
+                        }
                         match value {
                             Some(v) => {
                                 statements.extend(self.rng(v));
@@ -331,7 +386,7 @@ impl Scanner<'_, '_> {
                 }
             }
             body.push(text(" (function () {"));
-            if uses.this && self.lowers(Feature::Arrow) {
+            if uses.this && self.arrows_rewritten() {
                 body.push(text(" var _$this = this;"));
             }
             body.extend(statements);
@@ -359,6 +414,9 @@ impl Scanner<'_, '_> {
         pieces.push(text(")"));
         if declaration {
             pieces.push(text(";"));
+        }
+        if has_private {
+            self.private_scopes.pop();
         }
         self.push(node, pieces);
     }

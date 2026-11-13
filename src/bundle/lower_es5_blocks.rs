@@ -9,13 +9,15 @@ use crate::target::Feature;
 #[derive(Default)]
 pub(super) struct Blocks {
     /// The names given to block-scoped bindings and the references to them.
-    renames: HashMap<NodeId, String>,
+    pub(super) renames: HashMap<NodeId, String>,
     /// Declarations in a loop, whose names without a value start as `undefined` in every turn.
     loop_decls: HashSet<NodeId>,
     /// Function declarations in a block, which es5 has no place for in strict code.
     block_functions: HashSet<NodeId>,
     /// Declarations that are the head of a `for in` or `for of`.
-    heads: HashSet<NodeId>,
+    pub(super) heads: HashSet<NodeId>,
+    /// Declarations that are the first part of a `for (;;)`.
+    pub(super) for_inits: HashSet<NodeId>,
     /// The blocks that are the body of a function.
     function_bodies: HashSet<NodeId>,
     /// The loops whose body is a function in es5, because a function inside it captures a binding that is new in each turn, with the
@@ -110,6 +112,25 @@ impl Scanner<'_, '_> {
                 }
             }
         }
+        // A function declared in a block stays where it is, as a `var` with a function: it is not there before its line.
+        for &f in &blocks.block_functions {
+            let NodeKind::Function { name: Some(n), .. } = ast[f].kind else { continue };
+            let Some(sym) = semantic.symbol_of(n) else { continue };
+            let Some(&at) = index.get(&n) else { continue };
+            let (fa, _) = self.span(f);
+            // The name is inside the function node, one deeper than where the declaration is.
+            let depth = seen[at].fn_depth.saturating_sub(1);
+            let symbol_name = semantic.symbol(sym).name;
+            let (ba, _) = self.scope_span(semantic.symbol(sym).scope);
+            for &i in by_name.get(&symbol_name).map(|v| v.as_slice()).unwrap_or(&[]) {
+                let r = &seen[i];
+                let start = ast[r.node].span.start;
+                if (r.symbol == Some(sym) || (r.symbol.is_some() && r.symbol == semantic.symbol(sym).alias)) && r.fn_depth == depth && start < fa && start >= ba && r.node != n {
+                    errors.push((r.node, format!("the function '{}' is used before its declaration in the block, which es5 does not hoist; Rathkit Pack cannot rewrite that yet", ast.atom(symbol_name))));
+                    break;
+                }
+            }
+        }
         self.bundler.temp_count += taken + 1;
         for (node, message) in errors {
             self.lower_error_message(node, message);
@@ -163,9 +184,6 @@ impl Scanner<'_, '_> {
                 if !loops.is_empty() && !head {
                     blocks.loop_decls.insert(node);
                 }
-                if head {
-                    blocks.heads.insert(node);
-                }
             }
             NodeKind::Block(list) | NodeKind::StaticBlock(list) => {
                 if matches!(ast[node].kind, NodeKind::Block(_)) {
@@ -186,6 +204,9 @@ impl Scanner<'_, '_> {
             NodeKind::For { init, test, update, body } => {
                 loops.push(node);
                 if let Some(i) = init {
+                    if matches!(ast[i].kind, NodeKind::VarDecl { .. }) {
+                        blocks.for_inits.insert(i);
+                    }
                     self.visit_blocks(i, fn_depth, loops, true, blocks, seen);
                 }
                 for c in [test, update].into_iter().flatten() {
@@ -197,6 +218,9 @@ impl Scanner<'_, '_> {
             }
             NodeKind::ForIn { left, right, body } | NodeKind::ForOf { left, right, body } => {
                 loops.push(node);
+                if matches!(ast[left].kind, NodeKind::VarDecl { .. }) {
+                    blocks.heads.insert(left);
+                }
                 self.visit_blocks(left, fn_depth, loops, true, blocks, seen);
                 self.visit_blocks(right, fn_depth, loops, false, blocks, seen);
                 self.visit_blocks(body, fn_depth, loops, false, blocks, seen);
@@ -218,7 +242,7 @@ impl Scanner<'_, '_> {
         }
     }
 
-    fn children(&self, node: NodeId) -> Vec<NodeId> {
+    pub(super) fn children(&self, node: NodeId) -> Vec<NodeId> {
         let mut out = Vec::new();
         self.ast.for_each_child(node, |c| out.push(c));
         out
@@ -286,16 +310,34 @@ impl Scanner<'_, '_> {
             return None;
         }
         let mut exits = Exits::default();
-        self.scan_exits(body, label, false, false, &mut exits);
+        self.scan_exits(body, label, false, false, true, &mut exits);
         if exits.refused {
             return None;
         }
         let o = self.local("o");
         let (ba, bb) = self.span(body);
-        let this = if self.lowers(Feature::Arrow) && self.es5_in_arrow() || self.es5_top_function().is_some_and(|(_, derived)| derived) { "_$this" } else { "this" };
-        let nested = self.es5.active_wraps.iter().any(|&(a, b, depth)| a <= ba && bb <= b && depth == self.es5_depth());
-        self.es5.active_wraps.push((ba, bb, self.es5_depth()));
-        let mut pieces = vec![Piece::Text(format!("{{ {}(function ({}) {{", if exits.returns || exits.breaks { format!("var {o} = ") } else { String::new() }, params.join(", ")))];
+        let this = if self.arrows_rewritten() && self.es5_in_arrow() || self.es5_top_function().is_some_and(|(_, derived)| derived) { "_$this" } else { "this" };
+        let enclosing = self.es5.active_wraps.iter().rev().find(|w| w.start <= ba && bb <= w.end && w.depth == self.es5_depth()).cloned();
+        let nested = enclosing.is_some();
+        self.es5.active_wraps.push(super::lower_es5::Wrap { start: ba, end: bb, depth: self.es5_depth(), label, inside: exits.inner_labels.clone(), codes: exits.outer.clone() });
+        // Jumps to the labels of loops outside this one.
+        let mut after = String::new();
+        for &(is_continue, l, code) in &exits.outer {
+            let name = self.ast.atom(l).to_string();
+            let inside_enclosing = enclosing.as_ref().map_or(true, |w| w.inside.contains(&l));
+            let action = if inside_enclosing {
+                format!("{} {name};", if is_continue { "continue" } else { "break" })
+            } else if enclosing.as_ref().is_some_and(|w| w.label == Some(l)) {
+                if is_continue { "return;".to_string() } else { "return 1;".to_string() }
+            } else if let Some(&(_, _, outer_code)) = enclosing.as_ref().and_then(|w| w.codes.iter().find(|&&(k, lab, _)| k == is_continue && lab == l)) {
+                format!("return {outer_code};")
+            } else {
+                self.refuse(Feature::LetConst, body, "and a break or continue to a label out of a loop body that is a function cannot be rewritten for es5 yet");
+                return None;
+            };
+            after.push_str(&format!(" if ({o} === {code}) {action}"));
+        }
+        let mut pieces = vec![Piece::Text(format!("{{ {}(function ({}) {{", if exits.returns || exits.breaks || !exits.outer.is_empty() { format!("var {o} = ") } else { String::new() }, params.join(", ")))];
         if matches!(ast[body].kind, NodeKind::Block(_)) {
             pieces.push(Piece::Range(ba + 1, bb));
         } else {
@@ -305,12 +347,13 @@ impl Scanner<'_, '_> {
         let arguments = if params.is_empty() { String::new() } else { format!(", {}", params.join(", ")) };
         pieces.push(Piece::Text(format!(").call({this}{arguments});")));
         let propagate = if nested { format!("return {{ v: {o}.v }};") } else { format!("return {o}.v;") };
-        match (exits.returns, exits.breaks) {
-            (true, true) => pieces.push(Piece::Text(format!(" if ({o}) {{ if ({o} === 1) break; {propagate} }}"))),
-            (true, false) => pieces.push(Piece::Text(format!(" if ({o}) {propagate}"))),
-            (false, true) => pieces.push(Piece::Text(format!(" if ({o} === 1) break;"))),
-            (false, false) => {}
+        if exits.breaks {
+            pieces.push(Piece::Text(format!(" if ({o} === 1) break;")));
         }
+        if exits.returns {
+            pieces.push(Piece::Text(format!(" if (typeof {o} == \"object\") {propagate}")));
+        }
+        pieces.push(Piece::Text(after));
         pieces.push(Piece::Text(" }".to_string()));
         Some(pieces)
     }
@@ -329,7 +372,7 @@ impl Scanner<'_, '_> {
     }
 
     /// Rewrites the `return`, `break` and `continue` of a loop's body that leave it, into what the function for the body returns.
-    fn scan_exits(&mut self, node: NodeId, label: Option<crate::ast::Atom>, in_loop: bool, in_switch: bool, exits: &mut Exits) {
+    fn scan_exits(&mut self, node: NodeId, label: Option<crate::ast::Atom>, in_loop: bool, in_switch: bool, edit: bool, exits: &mut Exits) {
         let ast = self.ast;
         let text = |s: &str| Piece::Text(s.to_string());
         match ast[node].kind {
@@ -342,10 +385,9 @@ impl Scanner<'_, '_> {
                     None => pieces.push(text("void 0")),
                 }
                 pieces.push(text(" };"));
-                if !self.es5.exit_edits.insert(node) {
-                    return;
+                if edit && self.es5.exit_edits.insert(node) {
+                    self.push(node, pieces);
                 }
-                self.push(node, pieces);
             }
             NodeKind::Break(target) => {
                 let ours = match target {
@@ -354,13 +396,15 @@ impl Scanner<'_, '_> {
                 };
                 if ours {
                     exits.breaks = true;
-                    if self.es5.exit_edits.insert(node) {
+                    if edit && self.es5.exit_edits.insert(node) {
                         self.push(node, vec![text("return 1;")]);
                     }
                 } else if let Some(l) = target {
                     if !exits.inner_labels.contains(&l) {
-                        exits.refused = true;
-                        self.refuse(Feature::LetConst, node, "and a break out to a label outside a loop whose body needs a function cannot be rewritten for it yet");
+                        let code = exits.code(false, l);
+                        if edit && self.es5.exit_edits.insert(node) {
+                            self.push(node, vec![Piece::Text(format!("return {code};"))]);
+                        }
                     }
                 }
             }
@@ -370,33 +414,37 @@ impl Scanner<'_, '_> {
                     Some(l) => Some(l) == label,
                 };
                 if ours {
-                    if self.es5.exit_edits.insert(node) {
+                    if edit && self.es5.exit_edits.insert(node) {
                         self.push(node, vec![text("return;")]);
                     }
                 } else if let Some(l) = target {
                     if !exits.inner_labels.contains(&l) {
-                        exits.refused = true;
-                        self.refuse(Feature::LetConst, node, "and a continue to a label outside a loop whose body needs a function cannot be rewritten for it yet");
+                        let code = exits.code(true, l);
+                        if edit && self.es5.exit_edits.insert(node) {
+                            self.push(node, vec![Piece::Text(format!("return {code};"))]);
+                        }
                     }
                 }
             }
             NodeKind::Labeled { label: l, body } => {
                 exits.inner_labels.push(l);
-                self.scan_exits(body, label, in_loop, in_switch, exits);
+                self.scan_exits(body, label, in_loop, in_switch, edit, exits);
             }
             NodeKind::For { .. } | NodeKind::ForIn { .. } | NodeKind::ForOf { .. } | NodeKind::While { .. } | NodeKind::DoWhile { .. } => {
+                // A loop that is a function of its own takes care of its exits (and tells this one what it must do).
+                let own_wrap = self.blocks().wrapped.contains_key(&node);
                 for c in self.children(node) {
-                    self.scan_exits(c, label, true, in_switch, exits);
+                    self.scan_exits(c, label, true, in_switch, edit && !own_wrap, exits);
                 }
             }
             NodeKind::Switch { .. } => {
                 for c in self.children(node) {
-                    self.scan_exits(c, label, in_loop, true, exits);
+                    self.scan_exits(c, label, in_loop, true, edit, exits);
                 }
             }
             _ => {
                 for c in self.children(node) {
-                    self.scan_exits(c, label, in_loop, in_switch, exits);
+                    self.scan_exits(c, label, in_loop, in_switch, edit, exits);
                 }
             }
         }
@@ -409,4 +457,17 @@ struct Exits {
     breaks: bool,
     refused: bool,
     inner_labels: Vec<crate::ast::Atom>,
+    /// Jumps to a label outside: (is a continue, the label, the code the function returns for it).
+    outer: Vec<(bool, crate::ast::Atom, u32)>,
+}
+
+impl Exits {
+    fn code(&mut self, is_continue: bool, label: crate::ast::Atom) -> u32 {
+        if let Some(&(_, _, c)) = self.outer.iter().find(|&&(k, l, _)| k == is_continue && l == label) {
+            return c;
+        }
+        let code = 3 + self.outer.len() as u32;
+        self.outer.push((is_continue, label, code));
+        code
+    }
 }

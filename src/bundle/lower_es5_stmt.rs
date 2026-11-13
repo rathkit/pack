@@ -59,7 +59,14 @@ impl Scanner<'_, '_> {
                 pieces.push(text(")))()"));
                 self.push(node, pieces);
             }
-            NodeKind::ForOf { left, right, body } if self.lowers(Feature::ForOf) => self.lower_for_of(node, left, right, body),
+            NodeKind::ForOf { left, right, body } if self.lowers(Feature::ForOf) => self.lower_for_of(node, left, right, body, None),
+            NodeKind::Labeled { label, body: inner } if self.lowers(Feature::ForOf) && matches!(ast[inner].kind, NodeKind::ForOf { .. }) && !ast[inner].has(crate::ast::flags::AWAIT) => {
+                let NodeKind::ForOf { left, right, body } = ast[inner].kind else { return };
+                let _ = label;
+                let prefix = self.source_between(ast[node].span.start, ast[inner].span.start).to_string();
+                self.es5.handled.insert(inner);
+                self.lower_for_of(node, left, right, body, Some((inner, prefix)));
+            }
             NodeKind::ForOf { left, body, .. } | NodeKind::ForIn { left, body, .. } if self.lowers(Feature::Destructuring) && !ast[node].has(crate::ast::flags::AWAIT) => self.lower_pattern_head(left, body),
             _ => {}
         }
@@ -211,10 +218,14 @@ impl Scanner<'_, '_> {
         self.push(body, pieces);
     }
 
-    fn lower_for_of(&mut self, node: NodeId, left: NodeId, right: NodeId, body: NodeId) {
+    fn lower_for_of(&mut self, node: NodeId, left: NodeId, right: NodeId, body: NodeId, labeled: Option<(NodeId, String)>) {
         let ast = self.ast;
-        if ast[node].has(crate::ast::flags::AWAIT) {
-            self.refuse(Feature::ForOf, node, "and a for await loop is written with a generator, which Rathkit Pack cannot rewrite for it yet");
+        let node_for_flags = labeled.as_ref().map_or(node, |(n, _)| *n);
+        if ast[node_for_flags].has(crate::ast::flags::AWAIT) {
+            // Part of the state machine of the async function it is in.
+            if !self.es5_in_machine() {
+                self.refuse(Feature::ForOf, node, "and a for await loop outside an async function cannot be rewritten");
+            }
             return;
         }
         self.bundler.helpers.es5_iter = true;
@@ -254,12 +265,14 @@ impl Scanner<'_, '_> {
                 take.push(Piece::Text(format!(" = {value};")));
             }
         }
-        let mut pieces = vec![Piece::Text(format!("for (var {it} = __iter("))];
+        // Leaving the loop early closes the iterator, as the language does (and `next` that throws does not).
+        let label = labeled.as_ref().map_or(String::new(), |(_, p)| p.clone());
+        let mut pieces = vec![Piece::Text(format!("try {{ {label}for (var {it} = __iter("))];
         pieces.extend(self.rng(right));
-        pieces.push(Piece::Text(format!("), {step}; !({step} = {it}.next()).done;) {{")));
+        pieces.push(Piece::Text(format!("), {step}; !({step} = ({step} = 0, {it}.next())).done;) {{")));
         pieces.extend(take);
         let (ba, bb) = self.span(body);
-        if let Some(wrapped) = self.loop_wrapper(node, body) {
+        if let Some(wrapped) = self.loop_wrapper(node_for_flags, body) {
             // The body is a function called in each turn; it holds the statements of the block too.
             pieces.extend(wrapped);
             pieces.push(text(" }"));
@@ -270,6 +283,7 @@ impl Scanner<'_, '_> {
             pieces.push(Piece::Range(ba, bb));
             pieces.push(text(" }"));
         }
+        pieces.push(Piece::Text(format!(" }} finally {{ if ({step} && !{step}.done && {it}[\"return\"]) {it}[\"return\"](); }}")));
         self.push(node, pieces);
     }
 }

@@ -23,6 +23,7 @@ mod lower_class;
 mod lower_es5;
 mod lower_es5_blocks;
 mod lower_es5_class;
+mod lower_es5_gen;
 mod lower_es5_stmt;
 mod es5_helpers;
 mod refresh;
@@ -370,6 +371,7 @@ struct Helpers {
     es5_template: bool,
     es5_array: bool,
     es5_iter: bool,
+    es5_generator: bool,
     es5_class: bool,
 }
 
@@ -595,7 +597,7 @@ impl<'a> Bundler<'a> {
         if self.mapping {
             self.markable = graph.modules.iter().map(|m| !m.source.contains(|c| ('\u{E000}'..='\u{E003}').contains(&c))).collect();
         }
-        self.tla_possible = !self.target.supports(crate::target::Feature::TopLevelAwait) && !self.splitting && !options.hmr && (self.format == Format::Esm || (self.format == Format::Iife && self.global_name.is_none()));
+        self.tla_possible = !self.target.supports(crate::target::Feature::TopLevelAwait) && self.target.supports(crate::target::Feature::Generator) && !self.splitting && !options.hmr && (self.format == Format::Esm || (self.format == Format::Iife && self.global_name.is_none()));
         // Scan every module that will be emitted, collecting edits and the names they need.
         let included: Vec<ModuleId> = graph.modules.iter().filter(|m| self.included(m.id)).map(|m| m.id).collect();
         for id in included {
@@ -3805,7 +3807,7 @@ impl Bundler<'_> {
         if self.helpers.es5_array {
             out.push_str(es5_helpers::ARRAY);
         }
-        if self.helpers.es5_iter {
+        if self.helpers.es5_iter || self.legacy && (self.helpers.for_await || self.helpers.async_gen) {
             out.push_str(es5_helpers::ITER);
         }
         if self.helpers.es5_class {
@@ -3814,11 +3816,17 @@ impl Bundler<'_> {
         if self.helpers.async_fn {
             out.push_str(if self.legacy { es5_helpers::ASYNC } else { HELPER_ASYNC });
         }
+        if self.helpers.es5_generator {
+            out.push_str(es5_helpers::GENERATOR);
+        }
         if self.helpers.for_await || self.helpers.async_gen {
-            out.push_str(HELPER_FOR_AWAIT);
+            out.push_str(if self.legacy { es5_helpers::FOR_AWAIT } else { HELPER_FOR_AWAIT });
         }
         if self.helpers.async_gen {
-            out.push_str(HELPER_ASYNC_GEN);
+            out.push_str(if self.legacy { es5_helpers::ASYNC_GEN } else { HELPER_ASYNC_GEN });
+            if self.legacy && self.target.supports(crate::target::Feature::Generator) {
+                out.push_str(es5_helpers::YIELD_STAR);
+            }
         }
         if self.code.values().any(|c| matches!(c, Code::Wrapped { require_cases: Some(_), .. })) {
             out.push_str(match format {

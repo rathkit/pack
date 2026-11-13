@@ -699,9 +699,10 @@ fn what_a_target_cannot_have_stops_the_build_and_is_named() {
     }
     // es5 is a target: what it cannot have (generators) is named.
     assert_eq!(rkp("export const x = (a) => a;", "es5").0, Some(0));
-    let (code, stderr) = rkp("export function* g() { yield 1; }", "es5");
+    assert_eq!(rkp("export function* g() { yield 1; }", "es5").0, Some(0));
+    let (code, stderr) = rkp("{ f(); function f() {} }", "es5");
     assert_eq!(code, Some(1), "{stderr}");
-    assert!(stderr.contains("a generator is not available in the target es5"), "{stderr}");
+    assert!(stderr.contains("is used before its declaration in the block"), "{stderr}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

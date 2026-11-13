@@ -88,6 +88,18 @@ struct Frame {
     derived_ctor: bool,
 }
 
+/// The body of a loop that is a function: where it is, how many functions deep, the loop's label and the labels inside it.
+#[derive(Clone)]
+pub(super) struct Wrap {
+    pub start: u32,
+    pub end: u32,
+    pub depth: usize,
+    pub label: Option<crate::ast::Atom>,
+    pub inside: Vec<crate::ast::Atom>,
+    /// The codes the function returns for a jump to a label outside it.
+    pub codes: Vec<(bool, crate::ast::Atom, u32)>,
+}
+
 #[derive(Default)]
 pub(super) struct State {
     frames: Vec<Frame>,
@@ -97,10 +109,14 @@ pub(super) struct State {
     pub(super) unused: HashSet<NodeId>,
     /// Nodes a rewrite has already taken over.
     pub(super) handled: HashSet<NodeId>,
+    /// The functions that are state machines (their `arguments` is the outer function's).
+    pub(super) gen_fns: HashSet<NodeId>,
+    /// `var _$this = this;` has been put at the top of this CommonJS module.
+    pub(super) top_this: bool,
     /// The `return`, `break` and `continue` already rewritten for the function that is the body of a loop.
     pub(super) exit_edits: HashSet<NodeId>,
     /// The bodies of loops that are functions (start, end, how many functions deep).
-    pub(super) active_wraps: Vec<(u32, u32, usize)>,
+    pub(super) active_wraps: Vec<Wrap>,
     /// For the functions of a class that is rewritten: what `super` is there.
     pub(super) homes: HashMap<NodeId, super::lower_es5_class::Home>,
     /// What `let` and `const` need in this module (found when first wanted).
@@ -180,7 +196,7 @@ impl Scanner<'_, '_> {
         let mut crossed_arrow = false;
         for frame in self.es5.frames.iter().rev() {
             if frame.arrow {
-                crossed_arrow = crossed_arrow || self.lowers(Feature::Arrow);
+                crossed_arrow = crossed_arrow || self.arrows_rewritten();
                 continue;
             }
             return if frame.derived_ctor || crossed_arrow { Some("_$this") } else { None };
@@ -194,7 +210,7 @@ impl Scanner<'_, '_> {
         let mut crossed_arrow = false;
         for frame in self.es5.frames.iter().rev() {
             if frame.arrow {
-                crossed_arrow = crossed_arrow || self.lowers(Feature::Arrow);
+                crossed_arrow = crossed_arrow || self.arrows_rewritten();
                 continue;
             }
             return crossed_arrow;
@@ -236,6 +252,11 @@ impl Scanner<'_, '_> {
         if self.es5.handled.contains(&node) {
             return;
         }
+        if let NodeKind::Property { key, value, .. } | NodeKind::ClassMethod { key, value, .. } = ast[node].kind {
+            if matches!(ast[value].kind, NodeKind::Function { .. }) && self.gen_kind(ast[value].flags).is_some() {
+                self.strip_modifiers(node, key);
+            }
+        }
         if self.lowers(Feature::Class) && self.lower_super_use(node) {
             return;
         }
@@ -265,10 +286,16 @@ impl Scanner<'_, '_> {
                 if let Some(name) = self.this_name() {
                     self.push(node, vec![text(name)]);
                 } else if self.beyond_top_arrow() {
-                    self.refuse(Feature::Arrow, node, "and an arrow function that reads `this` at the top of a CommonJS module cannot be rewritten");
+                    // The module's own `this` (its `exports`), kept in a variable at the top of the module.
+                    if !self.es5.top_this {
+                        self.es5.top_this = true;
+                        let at = if self.module.source.starts_with("#!") { self.module.source.find('\n').unwrap_or(0) as u32 } else { 0 };
+                        self.insert(at, vec![text("var _$this = this;\n")]);
+                    }
+                    self.push(node, vec![text("_$this")]);
                 }
             }
-            NodeKind::Ident(a) if ast.atom(a) == "arguments" && self.beyond_arrow() && self.semantic.symbol_of(node).is_none_or(|s| self.semantic.symbol(s).kind == SymbolKind::Arguments) => {
+            NodeKind::Ident(a) if ast.atom(a) == "arguments" && (self.beyond_arrow() || self.in_machine()) && self.semantic.symbol_of(node).is_none_or(|s| self.semantic.symbol(s).kind == SymbolKind::Arguments) => {
                 self.push(node, vec![text("_$args")]);
             }
             NodeKind::NewTarget if self.lowers(Feature::NewTarget) => self.lower_new_target(node),
@@ -297,37 +324,54 @@ impl Scanner<'_, '_> {
         }
     }
 
-    /// `new.target` in a constructor, a method or a named function.
-    fn lower_new_target(&mut self, node: NodeId) {
-        if self.beyond_arrow() {
-            self.refuse(Feature::NewTarget, node, "and new.target in an arrow function cannot be rewritten for it yet");
-            return;
+    /// What `new.target` is in `function` (not an arrow): the class in a constructor, nothing in a method, and for a named function whether `this` was made by `new`.
+    fn new_target_text(&self, function: NodeId) -> Option<String> {
+        match self.es5.homes.get(&function) {
+            Some(home) if home.is_ctor => Some("Object.getPrototypeOf(this).constructor".to_string()),
+            Some(_) => Some("void 0".to_string()),
+            None => match self.ast[function].kind {
+                NodeKind::Function { name: Some(n), .. } => {
+                    let (a, b) = self.span(n);
+                    let name = self.source_between(a, b);
+                    Some(format!("(this instanceof {name} ? this.constructor : void 0)"))
+                }
+                _ => None,
+            },
         }
+    }
+
+    /// `new.target` in a constructor, a method, a named function, or an arrow in one of them (the function keeps it in `_$nt`).
+    fn lower_new_target(&mut self, node: NodeId) {
         let Some((function, _)) = self.es5_top_function() else {
             self.refuse(Feature::NewTarget, node, "and new.target outside a function cannot be rewritten");
             return;
         };
-        let replacement = match self.es5.homes.get(&function) {
-            Some(home) if home.is_ctor => "Object.getPrototypeOf(this).constructor".to_string(),
-            Some(_) => "void 0".to_string(),
-            None => match self.ast[function].kind {
-                NodeKind::Function { name: Some(n), .. } => {
-                    let (a, b) = self.span(n);
-                    let name = self.source_between(a, b).to_string();
-                    format!("(this instanceof {name} ? this.constructor : void 0)")
-                }
-                _ => {
-                    self.refuse(Feature::NewTarget, node, "and new.target in a function with no name cannot be rewritten for it yet");
-                    return;
-                }
-            },
-        };
-        self.push(node, vec![Piece::Text(replacement)]);
+        if self.beyond_arrow() {
+            if self.new_target_text(function).is_none() {
+                self.refuse(Feature::NewTarget, node, "and new.target in a function with no name cannot be rewritten for it yet");
+                return;
+            }
+            self.push(node, vec![Piece::Text("_$nt".to_string())]);
+            return;
+        }
+        match self.new_target_text(function) {
+            Some(replacement) => self.push(node, vec![Piece::Text(replacement)]),
+            None => self.refuse(Feature::NewTarget, node, "and new.target in a function with no name cannot be rewritten for it yet"),
+        }
+    }
+
+    /// Whether the nearest function that is not an arrow is a state machine.
+    pub(super) fn es5_in_machine(&self) -> bool {
+        self.es5_top_function().is_some_and(|(f, _)| self.es5.gen_fns.contains(&f)) || self.es5.frames.iter().any(|f| f.function.is_some_and(|n| self.es5.gen_fns.contains(&n)))
+    }
+
+    fn in_machine(&self) -> bool {
+        self.es5_top_function().is_some_and(|(f, _)| self.es5.gen_fns.contains(&f)) && !self.es5_in_arrow()
     }
 
     /// `this` at the top of a module, inside an arrow that is rewritten.
     fn beyond_top_arrow(&self) -> bool {
-        self.in_wrapper && self.lowers(Feature::Arrow) && !self.es5.frames.is_empty() && self.es5.frames.iter().all(|f| f.arrow)
+        self.in_wrapper && self.arrows_rewritten() && !self.es5.frames.is_empty() && self.es5.frames.iter().all(|f| f.arrow)
     }
 
     // ---- template literals ----
@@ -447,7 +491,8 @@ impl Scanner<'_, '_> {
             PropKind::Method => {
                 let (ka, kb) = self.span(key);
                 let (fa, fb) = self.span(value);
-                self.push(node, vec![Piece::Range(ka, kb), text(": function "), Piece::Range(fa, fb)]);
+                let star = self.native_star(value);
+                self.push(node, vec![Piece::Range(ka, kb), Piece::Text(format!(": function{star} ")), Piece::Range(fa, fb)]);
             }
             _ => {}
         }
@@ -482,7 +527,7 @@ impl Scanner<'_, '_> {
                     let computed = ast[p].has(crate::ast::flags::COMPUTED);
                     let key_pieces = if computed { self.rng(key) } else { vec![Piece::Text(self.key_string(key))] };
                     let (fa, fb) = self.span(value);
-                    let function_text = vec![text("function "), Piece::Range(fa, fb)];
+                    let function_text = vec![Piece::Text(format!("function{} ", self.native_star(value))), Piece::Range(fa, fb)];
                     match kind {
                         PropKind::Init => {
                             next.push(text("__ck("));
@@ -528,25 +573,25 @@ impl Scanner<'_, '_> {
         let ast = self.ast;
         let f = ast[node].flags;
         use crate::ast::flags;
-        if f & flags::GENERATOR != 0 && self.lowers(Feature::Generator) {
-            self.refuse(Feature::Generator, node, "and Rathkit Pack cannot rewrite it yet");
-            return;
-        }
-        if f & flags::ASYNC != 0 && self.lowers(Feature::Generator) && self.lowers(Feature::AsyncFunction) {
-            self.refuse(Feature::AsyncFunction, node, "and it is written with a generator, which Rathkit Pack cannot rewrite for it yet");
-            return;
+        let machine = self.gen_kind(f);
+        if machine.is_some() {
+            self.es5.gen_fns.insert(node);
         }
         let arrow = f & flags::ARROW != 0;
         let param_nodes = ast.list(params).to_vec();
         let (list, prologue) = self.plan_params(&param_nodes);
         let block_body = !(arrow && f & flags::EXPR_BODY != 0);
         let (body_start, body_end) = self.span(body);
-        if arrow && self.lowers(Feature::Arrow) {
+        if arrow && (self.lowers(Feature::Arrow) || machine.is_some()) {
             let mut pieces = vec![text("function (")];
             pieces.extend(list.unwrap_or_else(|| self.plain_params(&param_nodes)));
             pieces.push(text(") {"));
             pieces.extend(prologue);
-            if block_body {
+            if let Some(kind) = machine {
+                let Some(inner) = self.gen_body(node, body, kind) else { return };
+                pieces.extend(inner);
+                pieces.push(text(" }"));
+            } else if block_body {
                 pieces.push(Piece::Range(body_start + 1, body_end));
             } else {
                 pieces.push(text(" return "));
@@ -557,7 +602,7 @@ impl Scanner<'_, '_> {
             return;
         }
         let mut insertion = Vec::new();
-        if !arrow && self.lowers(Feature::Arrow) {
+        if !arrow && self.arrows_rewritten() {
             let mut uses = Uses::default();
             ast.for_each_child(body, |c| self.arrow_uses(c, false, &mut uses));
             if uses.this && !self.es5.derived.contains(&node) {
@@ -565,6 +610,11 @@ impl Scanner<'_, '_> {
             }
             if uses.arguments {
                 insertion.push(text(" var _$args = arguments;"));
+            }
+            if uses.new_target {
+                if let Some(expression) = self.new_target_text(node) {
+                    insertion.push(Piece::Text(format!(" var _$nt = {expression};")));
+                }
             }
         }
         if let Some(list) = list {
@@ -577,9 +627,62 @@ impl Scanner<'_, '_> {
             self.edits.push(Edit { start: open, end: close, pieces: list, shorthand: None, transparent: false });
         }
         insertion.extend(prologue);
+        if let Some(kind) = machine {
+            if !insertion.is_empty() {
+                self.insert(body_start + 1, insertion);
+            }
+            // The header loses `async` and `*`; the body becomes the machine.
+            let header_from = self.header_start(node);
+            let start = ast[node].span.start;
+            if self.source_between(start, start + 1) != "(" {
+                let open_at = self.source_between(header_from, body_start).find('(').map(|i| header_from + i as u32);
+                if let Some(open_at) = open_at {
+                    let mut head = vec![text("function ")];
+                    if let NodeKind::Function { name: Some(n), .. } = ast[node].kind {
+                        head.extend(self.rng(n));
+                        head.push(text(" "));
+                    }
+                    self.edits.push(Edit { start, end: open_at, pieces: head, shorthand: None, transparent: false });
+                }
+            }
+            let Some(inner) = self.gen_body(node, body, kind) else { return };
+            let mut pieces = vec![text("{"), Piece::Range(body_start + 1, body_start + 1)];
+            pieces.extend(inner);
+            pieces.push(text(" }"));
+            self.push(body, pieces);
+            return;
+        }
         if !insertion.is_empty() && block_body {
             self.insert(body_start + 1, insertion);
         }
+    }
+
+    /// Removes the `async` and `*` before the key of a method that becomes an ordinary function.
+    fn strip_modifiers(&mut self, method: NodeId, key: NodeId) {
+        let from = self.ast[method].span.start;
+        let to = self.ast[key].span.start;
+        let region = self.source_between(from, to).to_string();
+        let limit = region.find('[').unwrap_or(region.len());
+        let head = &region[..limit];
+        let bytes = head.as_bytes();
+        if let Some(i) = head.match_indices("async").map(|(i, _)| i).find(|&i| i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_' || bytes[i - 1] == b'$')) {
+            let at = from + i as u32;
+            self.edits.push(Edit { start: at, end: at + 5, pieces: Vec::new(), shorthand: None, transparent: false });
+        }
+        if let Some(i) = head.find('*') {
+            let at = from + i as u32;
+            self.edits.push(Edit { start: at, end: at + 1, pieces: Vec::new(), shorthand: None, transparent: false });
+        }
+    }
+
+    /// Whether arrow functions are written as functions (an arrow that is async is one when the target lacks async functions, even if it has arrows).
+    pub(super) fn arrows_rewritten(&self) -> bool {
+        self.lowers(Feature::Arrow)
+    }
+
+    /// `*` for a generator method that the target has (the method's own `*` is dropped with its key).
+    pub(super) fn native_star(&self, function: NodeId) -> &'static str {
+        if self.ast[function].has(crate::ast::flags::GENERATOR) && self.gen_kind(self.ast[function].flags).is_none() { "*" } else { "" }
     }
 
     /// Where the text between a function's start and its first parameter begins.

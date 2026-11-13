@@ -54,7 +54,7 @@ impl Scanner<'_, '_> {
     /// Whether an async function or async generator with these flags is rewritten (it is not an `async` any more).
     pub(super) fn async_lowered(&self, flags: u8) -> bool {
         use crate::ast::flags;
-        flags & flags::ASYNC != 0 && self.lowers(if flags & flags::GENERATOR != 0 { Feature::AsyncIteration } else { Feature::AsyncFunction })
+        flags & flags::ASYNC != 0 && !(self.bundler.legacy && self.gen_kind(flags).is_some()) && self.lowers(if flags & flags::GENERATOR != 0 { Feature::AsyncIteration } else { Feature::AsyncFunction })
     }
 
     pub(super) fn fn_ctx(&self, node: NodeId) -> FnCtx {
@@ -234,14 +234,14 @@ impl Scanner<'_, '_> {
             NodeKind::Object(props) if self.lowers(Feature::ObjectSpread) && !self.lowers(Feature::ObjectLiteral) && ast.list(props).iter().any(|&p| matches!(ast[p].kind, NodeKind::Spread(_))) => self.lower_object_spread(node, props),
             // A pattern with `...rest` is rewritten where its parent does it (a declaration, a parameter, a `for of`); anywhere else it is refused.
             NodeKind::VarDeclarator { target, init: Some(init) } if self.contains_object_rest(target) && self.lowers(Feature::ObjectRest) && !self.lowers(Feature::Destructuring) => self.lower_rest_declarator(node, target, init),
-            NodeKind::Labeled { body, .. } if self.fn_depth > 0 && self.lowers(Feature::AsyncIteration) && self.labeled_for_await(body).is_some_and(|i| !self.skip.contains(&i)) => {
+            NodeKind::Labeled { body, .. } if self.fn_depth > 0 && self.lowers(Feature::AsyncIteration) && !(self.bundler.legacy && self.lowers(Feature::Generator)) && self.labeled_for_await(body).is_some_and(|i| !self.skip.contains(&i)) => {
                 let inner = self.labeled_for_await(body).unwrap();
                 let NodeKind::ForOf { left, right, body } = ast[inner].kind else { return };
                 self.skip.insert(inner);
                 let label_span = self.span(node);
                 self.lower_for_await(inner, left, right, body, Some(label_span));
             }
-            NodeKind::ForOf { left, right, body } if ast[node].flags & crate::ast::flags::AWAIT != 0 && self.lowers(Feature::AsyncIteration) && !self.skip.contains(&node) => {
+            NodeKind::ForOf { left, right, body } if ast[node].flags & crate::ast::flags::AWAIT != 0 && self.lowers(Feature::AsyncIteration) && !(self.bundler.legacy && self.lowers(Feature::Generator)) && !self.skip.contains(&node) => {
                 if self.fn_depth == 0 && !self.bundler.tla_possible {
                     self.lower_error(Feature::TopLevelAwait, node);
                 } else {
