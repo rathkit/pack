@@ -112,6 +112,7 @@ fn run(source: &str, options: &Options, anchors: Option<&mut Vec<Anchor>>, barri
         }
         syntax.map(|handle| handle.join().expect("the syntax plan"))
     });
+    plan_private_names(tokens, source, &parsed.semantic, options, &mut renames);
     lap("plans done");
     let out = emit(source, tokens, &renames, &asi, &facts, options, plan.as_ref(), anchors, false);
     lap("emit");
@@ -756,6 +757,34 @@ const FIRST: &[u8] = b"etnrisouaflchpdvmgybwkxqjzETNRISOUAFLCHPDVMGYBWKXQJZ_$";
 const REST: &[u8] = b"etnrisouaflchpdvmgybwkxqjzETNRISOUAFLCHPDVMGYBWKXQJZ_$0123456789";
 
 /// The `index`th name: all one-letter names, then two letters, and so on.
+/// Names `#field` and `#method()` of classes: the same name everywhere in the text is written the same short way (most used first), which
+/// keeps what each use refers to, as every private name is looked up in the class that declares it. Left alone where the name can be seen
+/// (a direct `eval` can use it, and `keep_names` keeps what a function is called).
+fn plan_private_names(tokens: &[Token], source: &str, sem: &Semantic, options: &Options, renames: &mut Renames) {
+    if !options.identifiers || options.keep_names == Some(true) || sem.scope(sem.root_scope()).flags & scope_flags::HAS_EVAL != 0 {
+        return;
+    }
+    let mut counts: HashMap<&str, (usize, usize)> = HashMap::default();
+    let mut order: Vec<&str> = Vec::new();
+    for tok in tokens.iter().filter(|t| t.kind == Kind::PrivateName) {
+        let text = &source[tok.start as usize..tok.end as usize];
+        let entry = counts.entry(text).or_insert_with(|| {
+            order.push(text);
+            (0, order.len())
+        });
+        entry.0 += 1;
+    }
+    if order.is_empty() {
+        return;
+    }
+    order.sort_by_key(|n| (std::cmp::Reverse(counts[n].0), counts[n].1));
+    let names: HashMap<&str, String> = order.iter().enumerate().map(|(i, &n)| (n, format!("#{}", name_at(i)))).collect();
+    for tok in tokens.iter().filter(|t| t.kind == Kind::PrivateName) {
+        let text = &source[tok.start as usize..tok.end as usize];
+        renames.set(tokens, tok.start, &names[text]);
+    }
+}
+
 fn name_at(mut index: usize) -> String {
     let mut out = String::new();
     if index < FIRST.len() {
@@ -1032,6 +1061,8 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
     let b = parser::parse(&minified, ParseOptions::new(true)).map_err(|e| format!("minified: {e}"))?;
     let mut forward: HashMap<SymbolId, SymbolId> = HashMap::default();
     let mut backward: HashMap<SymbolId, SymbolId> = HashMap::default();
+    let mut private_forward: HashMap<&str, &str> = HashMap::default();
+    let mut private_backward: HashMap<&str, &str> = HashMap::default();
     let mut stack = vec![(Side::node(a.ast.root), Side::node(b.ast.root))];
     'pairs: while let Some((mut sx, sy)) = stack.pop() {
         let ny = &b.ast[sy.id];
@@ -1131,6 +1162,15 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                     }
                     _ => {}
                 },
+                // `a === null || a === void 0` as `a == null`.
+                (NodeKind::Binary { op: crate::ast::BinOp::LogOr | crate::ast::BinOp::LogAnd, .. }, NodeKind::Binary { op: crate::ast::BinOp::Eq | crate::ast::BinOp::Ne, left: lb, right: rb })
+                    if crate::compress::nullish_pair(&a.ast, &a.semantic, x).is_some() && (matches!(b.ast[*rb].kind, NodeKind::Null) || matches!(b.ast[*lb].kind, NodeKind::Null)) =>
+                {
+                    let pair = crate::compress::nullish_pair(&a.ast, &a.semantic, x).expect("a pair");
+                    let name = if matches!(b.ast[*rb].kind, NodeKind::Null) { *lb } else { *rb };
+                    stack.push((Side::node(pair.operand), Side::node(name)));
+                    continue;
+                }
                 (NodeKind::Binary { op, left, right }, NodeKind::Binary { op: ob, left: lb, right: rb }) => {
                     use crate::ast::BinOp::*;
                     let is_undefined_text = matches!(a.ast[*right].kind, NodeKind::Str(t) if a.ast.atom(t) == "undefined") && matches!(b.ast[*rb].kind, NodeKind::Str(t) if b.ast.atom(t) == "u");
@@ -1166,25 +1206,32 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                     }
                     continue;
                 }
-                // `if (c) return a; else return b;` that stands alone (the body of an `else`) written as `return c ? a : b;`.
-                (NodeKind::If { test, cons, alt: Some(alt) }, NodeKind::Return(Some(joined))) => {
-                    if let NodeKind::Conditional { test: ct, cons: cc, alt: ca_ } = &b.ast[*joined].kind {
-                        let returned = |s: NodeId| -> Option<NodeId> {
-                            match a.ast[s].kind {
-                                NodeKind::Return(Some(arg)) => Some(arg),
-                                NodeKind::Block(list) if a.ast.list(list).len() == 1 => match a.ast[a.ast.list(list)[0]].kind {
-                                    NodeKind::Return(Some(arg)) => Some(arg),
-                                    _ => None,
-                                },
-                                _ => None,
+                // `if (c) return a; else return b;` that stands alone (the body of an `else`) written as `return c ? a : b;`, and an `else if` that is
+                // joined the same way is the conditional in its place.
+                (NodeKind::If { alt: Some(_), .. }, NodeKind::Return(Some(joined))) => {
+                    fn pairs(a: &parser::Parsed, b: &parser::Parsed, s: NodeId, e: NodeId, out: &mut Vec<(NodeId, NodeId)>) -> bool {
+                        match a.ast[s].kind {
+                            NodeKind::Return(Some(arg)) => {
+                                out.push((arg, e));
+                                true
                             }
-                        };
-                        if let (Some(first), Some(second)) = (returned(*cons), returned(*alt)) {
-                            stack.push((Side::node(*test), Side::node(*ct)));
-                            stack.push((Side::node(first), Side::node(*cc)));
-                            stack.push((Side::node(second), Side::node(*ca_)));
-                            continue;
+                            NodeKind::Block(list) if a.ast.list(list).len() == 1 => pairs(a, b, a.ast.list(list)[0], e, out),
+                            NodeKind::If { test, cons, alt: Some(alt) } => match b.ast[e].kind {
+                                NodeKind::Conditional { test: ct, cons: cc, alt: ca } => {
+                                    out.push((test, ct));
+                                    pairs(a, b, cons, cc, out) && pairs(a, b, alt, ca, out)
+                                }
+                                _ => false,
+                            },
+                            _ => false,
                         }
+                    }
+                    let mut found = Vec::new();
+                    if matches!(b.ast[*joined].kind, NodeKind::Conditional { .. }) && pairs(&a, &b, x, *joined, &mut found) {
+                        for (from, to) in found {
+                            stack.push((Side::node(from), Side::node(to)));
+                        }
+                        continue;
                     }
                 }
                 // `-Infinity` as `-1/0`: the sign goes with the one.
@@ -1239,6 +1286,12 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                 let NodeKind::Num(nb) = ny.kind else { unreachable!() };
                 if na.get().to_bits() != nb.get().to_bits() {
                     return Err(format!("number {} became {}", na.get(), nb.get()));
+                }
+            }
+            NodeKind::PrivateName(_) if options.identifiers => {
+                let (ta, tb) = (&source[nx.span.start as usize..nx.span.end as usize], &minified[ny.span.start as usize..ny.span.end as usize]);
+                if private_forward.entry(ta).or_insert(tb) != &tb || private_backward.entry(tb).or_insert(ta) != &ta {
+                    return Err(format!("private name `{ta}` at {} no longer denotes the same name (now `{tb}`)", nx.span.start));
                 }
             }
             NodeKind::PropName(_) | NodeKind::PrivateName(_) | NodeKind::Str(_) | NodeKind::Num(_) | NodeKind::BigInt(_) | NodeKind::Regex | NodeKind::TemplateElement { .. } | NodeKind::Bool(_) => {
@@ -1557,7 +1610,38 @@ mod tests {
 
     #[test]
     fn typeof_undefined_is_compared_by_order() {
-        assert_eq!(syntax("x = typeof a === 'undefined'; y = typeof b != \"undefined\"; z = typeof c === 'string'"), "x=typeof a>\"u\";y=typeof b<\"u\";z=typeof c==='string'");
+        assert_eq!(syntax("x = typeof a === 'undefined'; y = typeof b != \"undefined\"; z = typeof c === 'string'"), "x=typeof a>\"u\";y=typeof b<\"u\";z=typeof c=='string'");
+    }
+
+    #[test]
+    fn strict_equality_of_two_strings_is_loose() {
+        assert_eq!(syntax("x = typeof a === 'string' || 'number' === typeof b || typeof a !== 'object' || typeof a === typeof b"), "x=typeof a=='string'||'number'==typeof b||typeof a!='object'||typeof a==typeof b");
+        // A value that is not known to be a string keeps the strict operator.
+        assert_eq!(syntax("x = a === 'string' || typeof a === b || (typeof a) === 'x'"), "x=a==='string'||typeof a===b||typeof a==='x'");
+    }
+
+    #[test]
+    fn trailing_commas_go_but_holes_stay() {
+        assert_eq!(syntax("f(a, b,); x = {a: 1, b: 2,}; y = [1, 2,]; z = [1, , ]; w = [, ]; function g(a, b,) {}"), "f(a,b);x={a:1,b:2};y=[1,2];z=[1,,];w=[,];function g(a,b){}");
+    }
+
+    #[test]
+    fn a_number_key_in_brackets_is_a_plain_key() {
+        assert_eq!(syntax("x = {[0]: 'a', [1.5]: 'b', ['s']: 'c', [k]: 'd'}"), "x={0:'a',1.5:'b',['s']:'c',[k]:'d'}");
+    }
+
+    #[test]
+    fn private_names_get_short_names() {
+        let options = Options { whitespace: true, identifiers: true, syntax: true, ..Options::default() };
+        let source = "class A { #count = 0; #items = []; static #made = 0; #bump() { this.#count++; } add(x) { this.#items.push(x); this.#bump(); return #count in this; } }";
+        verify(source, &options).unwrap_or_else(|e| panic!("{e}"));
+        let out = minify(source, &options).unwrap();
+        assert!(!out.contains("#count") && !out.contains("#items") && !out.contains("#bump") && !out.contains("#made"), "{out}");
+        // The same name is written the same way, and different names differently.
+        let kept = minify(source, &Options { keep_names: Some(true), ..options }).unwrap();
+        assert!(kept.contains("#count"), "{kept}");
+        let with_eval = minify("class A { #x = 1; get() { return eval('this.#x'); } }", &options).unwrap();
+        assert!(with_eval.contains("#x"), "{with_eval}");
     }
 
     #[test]
