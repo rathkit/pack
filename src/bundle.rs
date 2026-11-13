@@ -3824,11 +3824,42 @@ impl Bundler<'_> {
         let graph = self.graph;
         let format = self.format;
         self.emitting = chunk;
+        // A file written as CommonJS reads what it takes from the other files of a build through the object `require` gave, so a name is
+        // read when it is used (the files may import one another in a circle), as an import of an ES module would.
+        // A file that (through others) needs this one back is asked for each time it is used: while the circle is being loaded, it has
+        // not given anything yet when this file starts to run.
+        let in_circle = |dep: usize| {
+            let mut seen = vec![false; links.deps.len()];
+            let mut stack = vec![dep];
+            while let Some(c) = stack.pop() {
+                if c == chunk {
+                    return true;
+                }
+                if !std::mem::replace(&mut seen[c], true) {
+                    stack.extend(links.deps[c].iter().copied());
+                }
+            }
+            false
+        };
+        let overridden;
+        let names = if format == Format::Cjs && self.preserve {
+            let mut local = names.clone();
+            for (dep, keys) in &links.imports[chunk] {
+                let call = if in_circle(*dep) { "()" } else { "" };
+                for key in keys {
+                    local.insert(key.clone(), format!("__d{dep}{call}.{}", names[key]));
+                }
+            }
+            overridden = local;
+            &overridden
+        } else {
+            names
+        };
         let mut out = String::new();
         // A CommonJS entry written as CommonJS (or as an IIFE with a global) is its own `module.exports`, as
         // other bundlers write it, not an object with a `default` in it.
         let cjs_entry: Option<ModuleId> = match (format, self.plan.chunks[chunk].roots.as_slice()) {
-            (Format::Cjs, [root]) | (Format::Iife, [root]) if graph.entries.contains(root) && (format == Format::Cjs || self.global_name.is_some()) && matches!(self.code.get(root), Some(Code::Wrapped { .. })) => Some(*root),
+            (Format::Cjs, [root]) | (Format::Iife, [root]) if graph.entries.contains(root) && (!self.preserve || (self.plan.chunks[chunk].is_entry && links.exports[chunk].is_empty())) && (format == Format::Cjs || self.global_name.is_some()) && matches!(self.code.get(root), Some(Code::Wrapped { .. })) => Some(*root),
             _ => None,
         };
         // Where a top-level statement has ended, so the minifier can work on the parts side by side.
@@ -4006,21 +4037,6 @@ impl Bundler<'_> {
             if format == Format::Cjs {
                 for spec in &bare {
                     let _ = writeln!(out, "require({});", json_string(spec));
-                }
-            }
-            // Files of this build that this one reads from (`--preserve-modules`), in the order they have to run.
-            if format == Format::Cjs {
-                for &dep in &links.deps[chunk] {
-                    let file = json_string(&relative_specifier(&self.plan.chunks[chunk].file, &self.plan.chunks[dep].file));
-                    match links.imports[chunk].get(&dep) {
-                        Some(keys) => {
-                            let list: Vec<&str> = keys.iter().map(|k| names[k].as_str()).collect();
-                            let _ = writeln!(out, "var {{ {} }} = require({file});", list.join(", "));
-                        }
-                        None => {
-                            let _ = writeln!(out, "require({file});");
-                        }
-                    }
                 }
             }
             for key in &links.externals[chunk] {
@@ -4268,6 +4284,26 @@ impl Bundler<'_> {
             out.push_str(&functions);
             let _ = write!(out, "var {} = __esm({} {{\n{body}}});\n", names[&Key::Init(module.id)], self.arrow_head());
             cuts.push(out.len());
+        }
+        // Files of this build that this one reads from (`--preserve-modules`), in the order they have to run. They come after the functions
+        // that stand for the CommonJS modules of this file are defined and before anything runs, so files that need one another in a circle
+        // find what they ask of each other.
+        if format == Format::Cjs {
+            for &dep in &links.deps[chunk] {
+                let file = json_string(&relative_specifier(&self.plan.chunks[chunk].file, &self.plan.chunks[dep].file));
+                match links.imports[chunk].get(&dep) {
+                    Some(_) if in_circle(dep) => {
+                        let _ = writeln!(out, "var __d{dep} = () => require({file});");
+                    }
+                    Some(_) => {
+                        let _ = writeln!(out, "var __d{dep} = require({file});");
+                    }
+                    None => {
+                        let _ = writeln!(out, "require({file});");
+                    }
+                }
+                cuts.push(out.len());
+            }
         }
         if let Some(pieces) = self.ready_calls.get(&chunk) {
             let _ = writeln!(out, "await {}();", self.text_of(pieces, names));

@@ -5,6 +5,8 @@ import legacy from 'cjs-dep';
 
 export { shout, count };
 export * from './lib/math';
+export { isEven } from './lib/even';
+export { isOdd } from './lib/odd';
 export * as text from './lib/text';
 export const version: string = data.version;
 export const legacyName = legacy.name;

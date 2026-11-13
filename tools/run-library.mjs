@@ -26,7 +26,7 @@ const fresh = () => {
 const run = (cwd, args) => spawnSync(bin, args, { cwd, encoding: 'utf8' });
 const node = (cwd, code) => spawnSync(process.execPath, ['-e', code], { cwd, encoding: 'utf8' });
 const files = (dir, base = '') => readdirSync(join(dir, base), { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? files(dir, `${base}${e.name}/`) : [`${base}${e.name}`])).sort();
-const NAMES = 'PI,add,count,default,legacyName,shout,text,version';
+const NAMES = 'PI,add,count,default,isEven,isOdd,legacyName,shout,text,version';
 const entries = ['src/index.ts', 'src/only.ts', 'src/extra.ts'];
 
 // Both formats of three entries: ES modules split what the entries share, each CommonJS entry stands alone.
@@ -38,7 +38,7 @@ const entries = ['src/index.ts', 'src/only.ts', 'src/extra.ts'];
   for (const f of ['index', 'only', 'extra']) for (const e of ['mjs', 'cjs']) check(out.includes(`dist/${f}.${e}`), `dist/${f}.${e} is written`, out.join());
   check(out.some((f) => /chunk-.*\.mjs$/.test(f)), 'what the entries share is a chunk of the ES module build', out.join());
   const keys = (code) => node(dir, code).stdout.trim();
-  check(keys("import('./dist/index.mjs').then((m) => console.log(Object.keys(m)))") === `[\n  'PI',         'add',\n  'count',      'default',\n  'legacyName', 'shout',\n  'text',       'version'\n]`, 'the ES module has the exports', keys("import('./dist/index.mjs').then((m) => console.log(Object.keys(m)))"));
+  check(keys("import('./dist/index.mjs').then((m) => console.log(JSON.stringify(Object.keys(m))))") === JSON.stringify(NAMES.split(',')), 'the ES module has the exports', keys("import('./dist/index.mjs').then((m) => console.log(JSON.stringify(Object.keys(m))))"));
   check(keys("console.log(Object.keys(require('./dist/index.cjs')).join())") === NAMES, 'the CommonJS file has the same exports');
   check(keys("console.log(require('./dist/index.cjs').default('x'))") === 'HELLO X!', 'and it runs');
   check(keys("console.log(typeof require('./dist/only.cjs'))") === 'function', 'an entry with only a default export is module.exports');
@@ -58,7 +58,7 @@ const entries = ['src/index.ts', 'src/only.ts', 'src/extra.ts'];
   const r = run(dir, ['bundle', ...entries, '--format', 'esm,cjs', '--preserve-modules', '--preserve-modules-root', 'src', '--outdir', 'dist', '--sourcemap']);
   check(r.status === 0, 'a build with --preserve-modules', r.stderr);
   const out = files(dir, 'dist/').filter((f) => !f.endsWith('.map'));
-  const want = ['index', 'only', 'extra', 'lib/text', 'lib/count', 'lib/math', 'lib/data.json', '_deps/cjs-dep/index'].flatMap((f) => [`dist/${f}.mjs`, `dist/${f}.cjs`]).sort();
+  const want = ['index', 'only', 'extra', 'lib/text', 'lib/count', 'lib/math', 'lib/even', 'lib/odd', 'lib/data.json', '_deps/cjs-dep/index'].flatMap((f) => [`dist/${f}.mjs`, `dist/${f}.cjs`]).sort();
   check(out.join() === want.join(), 'a file for each module, named by where the source is', out.join('\n'));
   check(/from "\.\/lib\/text\.mjs"/.test(readFileSync(join(dir, 'dist', 'index.mjs'), 'utf8')), 'the imports name the files next to them');
   check(/require\("\.\/math\.cjs"\)/.test(readFileSync(join(dir, 'dist', 'lib', 'count.cjs'), 'utf8')), 'and so do the requires');
@@ -67,6 +67,7 @@ const entries = ['src/index.ts', 'src/only.ts', 'src/extra.ts'];
   const keys = (code) => node(dir, code).stdout.trim();
   check(keys("console.log(Object.keys(require('./dist/index.cjs')).join())") === NAMES, 'the CommonJS files have the same exports');
   check(keys("const m = require('./dist/index.cjs'); console.log(m.default('x'), m.count(2), m.version, m.legacyName, m.text.shout('a'))") === 'HELLO X! 3 9.9.9 cjs-dep A!', 'and run');
+  check(keys("const m = require('./dist/index.cjs'); console.log(m.isEven(10), m.isOdd(10))") === 'true false', 'files that need one another in a circle work');
   check(keys("import('./dist/index.mjs').then((m) => console.log(m.default('y'), m.count(2), m.version, m.legacyName))") === 'HELLO Y! 3 9.9.9 cjs-dep', 'as do the ES modules');
   check(keys("console.log(typeof require('./dist/only.cjs'))") === 'function', 'an entry that is only a default is module.exports');
   // A module no entry reaches by name still keeps all its exports.
