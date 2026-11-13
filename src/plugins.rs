@@ -39,6 +39,8 @@ pub struct HostInfo {
     /// `resolve.conditions` and `resolve.mainFields` the plugins ask for (Vite's `config` and `configEnvironment` hooks).
     pub conditions: Vec<String>,
     pub main_fields: Vec<String>,
+    /// The host was started for style sheets alone (no config): only they are sent to it, not every script.
+    pub style_only: bool,
 }
 
 /// The command line settings plugins may look at.
@@ -174,6 +176,39 @@ fn opt_str(value: Option<&str>) -> String {
     value.map_or("null".to_string(), quote)
 }
 
+/// A module id that is a style sheet, in CSS or in a language that compiles to it (`Card.vue?vue&type=style&lang.scss` too).
+fn is_style_id(id: &str) -> bool {
+    const STYLE: &[&str] = &["css", "scss", "sass", "less", "styl", "stylus", "pcss", "postcss"];
+    let (file, query) = id.split_once('?').unwrap_or((id, ""));
+    let ext = |name: &str| name.rsplit_once('.').is_some_and(|(_, e)| STYLE.contains(&e.to_ascii_lowercase().as_str()));
+    ext(file) || query.rsplit_once("lang.").is_some_and(|(_, e)| STYLE.contains(&e.to_ascii_lowercase().as_str()))
+}
+
+/// Whether a project with no config file still needs the plugin host: it has a PostCSS configuration, or a Sass, Less or Stylus
+/// compiler installed, so style sheets are compiled and processed as they are in Vite.
+pub fn needs_style_host(root: &Path) -> bool {
+    const POSTCSS: &[&str] = &[
+        "postcss.config.js", "postcss.config.cjs", "postcss.config.mjs", "postcss.config.ts", "postcss.config.cts", "postcss.config.mts", ".postcssrc", ".postcssrc.json",
+        ".postcssrc.js", ".postcssrc.cjs", ".postcssrc.mjs", ".postcssrc.ts", ".postcssrc.cts", ".postcssrc.mts",
+    ];
+    if POSTCSS.iter().any(|f| root.join(f).is_file()) {
+        return true;
+    }
+    if let Ok(text) = std::fs::read_to_string(root.join("package.json")) {
+        if text.contains("\"postcss\"") && Json::parse(&text).is_ok_and(|j| matches!(j.get("postcss"), Some(Json::Object(_)))) {
+            return true;
+        }
+    }
+    let mut dir = Some(root);
+    while let Some(d) = dir {
+        if ["sass", "sass-embedded", "less", "stylus"].iter().any(|n| d.join("node_modules").join(n).is_dir()) {
+            return true;
+        }
+        dir = d.parent();
+    }
+    false
+}
+
 fn string_list(values: &[String]) -> String {
     format!("[{}]", values.iter().map(|s| quote(s)).collect::<Vec<_>>().join(","))
 }
@@ -297,6 +332,7 @@ impl PluginHost {
         host.info.input = strings("input");
         host.info.conditions = strings("conditions");
         host.info.main_fields = strings("mainFields");
+        host.info.style_only = result.get("styleOnly").and_then(Json::as_bool).unwrap_or(false);
         host.info.federation = result.get("federation").filter(|f| !matches!(f, Json::Null)).cloned();
         if let Some(Json::Object(hooks)) = result.get("hooks") {
             host.info.hooks = hooks.iter().filter(|(_, v)| v.as_bool() == Some(true)).map(|(k, _)| k.clone()).collect();
@@ -494,7 +530,7 @@ impl PluginHost {
     }
 
     pub fn transform(&self, code: &str, id: &str, module_type: Option<&str>) -> Result<Option<Transformed>, String> {
-        if !self.has("transform") {
+        if !self.has("transform") || (self.info.style_only && !is_style_id(id)) {
             return Ok(None);
         }
         let result = self.call("transform", &format!("{{\"code\":{},\"id\":{},\"moduleType\":{}}}", quote(code), quote(id), opt_str(module_type)))?;
@@ -802,4 +838,43 @@ pub fn post_process(host: &PluginHost, files: &mut Vec<OutputFile>, chunks: &[Ch
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod style_tests {
+    use super::*;
+
+    #[test]
+    fn style_ids() {
+        for id in ["/a/b.css", "/a/b.module.scss", "/a/b.SASS", "/a/b.less", "/a/b.styl", "/a/b.pcss", "/a/App.vue?vue&type=style&index=0&lang.scss", "/a/x.css?used"] {
+            assert!(is_style_id(id), "{id}");
+        }
+        for id in ["/a/b.js", "/a/b.tsx", "/a/App.vue", "/a/App.vue?vue&type=script&lang.ts", "/a/css", "/a/b.json"] {
+            assert!(!is_style_id(id), "{id}");
+        }
+    }
+
+    #[test]
+    fn a_project_needs_the_style_host_for_a_postcss_config_or_a_compiler() {
+        let base = std::env::temp_dir().join(format!("rkp-style-host-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("plain")).unwrap();
+        assert!(!needs_style_host(&base.join("plain")));
+        std::fs::create_dir_all(base.join("cfg")).unwrap();
+        std::fs::write(base.join("cfg/postcss.config.js"), "module.exports = {}").unwrap();
+        assert!(needs_style_host(&base.join("cfg")));
+        std::fs::create_dir_all(base.join("pkg")).unwrap();
+        std::fs::write(base.join("pkg/package.json"), "{\"postcss\": {\"plugins\": {}}}").unwrap();
+        assert!(needs_style_host(&base.join("pkg")));
+        // A dependency on postcss is not a configuration.
+        std::fs::create_dir_all(base.join("dep")).unwrap();
+        std::fs::write(base.join("dep/package.json"), "{\"dependencies\": {\"postcss\": \"8\"}}").unwrap();
+        assert!(!needs_style_host(&base.join("dep")));
+        std::fs::create_dir_all(base.join("sass/node_modules/sass")).unwrap();
+        assert!(needs_style_host(&base.join("sass")));
+        // A compiler above the project counts too (a monorepo).
+        std::fs::create_dir_all(base.join("sass/app")).unwrap();
+        assert!(needs_style_host(&base.join("sass/app")));
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

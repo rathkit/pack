@@ -195,7 +195,7 @@ fn in_pieces(source: &str, layout: &Layout, ranges: &[std::ops::Range<usize>], o
             asi[i] = true;
         }
         asi[tokens.len()] = parsed.eof_asi;
-        let plan = options.syntax.then(|| crate::compress::plan(text, &parsed.ast, &parsed.semantic, tokens, &[]));
+        let plan = options.syntax.then(|| crate::compress::plan(text, &parsed.ast, &parsed.semantic, tokens, &[], options.legacy));
         let mut facts = Facts::default();
         facts.collect(&parsed.ast, &parsed.semantic, text);
         let prep = options.identifiers.then(|| facts.prepare(&parsed.ast, &parsed.semantic, &options));
@@ -239,6 +239,7 @@ fn in_pieces(source: &str, layout: &Layout, ranges: &[std::ops::Range<usize>], o
         if let (Some(prep), Some(top)) = (&unit.prep, &shared) {
             unit.facts.plan_renames(&unit.parsed.ast, &unit.parsed.semantic, tokens, unit.source, prep, &top.avoid, Some(&top.names[unit.group]), &mut renames);
         }
+        plan_private_names(tokens, unit.source, &unit.parsed.semantic, &options, &mut renames);
         let mut found = anchors.is_some().then(Vec::new);
         let out = emit(unit.source, tokens, &renames, &unit.asi, &unit.facts, &options, unit.plan.as_ref(), found.as_mut(), follows[i]);
         (out, found.unwrap_or_default())
@@ -784,15 +785,15 @@ export { counter as total, bump };
 
     #[test]
     fn pieces_write_what_one_pass_writes() {
-        compare(Options { whitespace: true, identifiers: true, syntax: false, keep_top_level: false, keep_names: None });
-        compare(Options { whitespace: true, identifiers: true, syntax: true, keep_top_level: false, keep_names: Some(true) });
-        compare(Options { whitespace: false, identifiers: true, syntax: false, keep_top_level: false, keep_names: None });
-        compare(Options { whitespace: true, identifiers: false, syntax: true, keep_top_level: false, keep_names: None });
+        compare(Options { whitespace: true, identifiers: true, syntax: false, keep_top_level: false, keep_names: None, legacy: false });
+        compare(Options { whitespace: true, identifiers: true, syntax: true, keep_top_level: false, keep_names: Some(true), legacy: false });
+        compare(Options { whitespace: false, identifiers: true, syntax: false, keep_top_level: false, keep_names: None, legacy: false });
+        compare(Options { whitespace: true, identifiers: false, syntax: true, keep_top_level: false, keep_names: None, legacy: false });
     }
 
     #[test]
     fn a_name_read_in_another_piece_is_renamed_the_same_everywhere() {
-        let options = Options { whitespace: true, identifiers: true, syntax: false, keep_top_level: false, keep_names: None };
+        let options = Options { whitespace: true, identifiers: true, syntax: false, keep_top_level: false, keep_names: None, legacy: false };
         let source = "function helper(x) { return x + 1; }\nvar r = helper(2);\nconsole.log(r, helper(3));\n";
         let layout = Layout { head: 0, tail: source.len(), cuts: cuts(source), reserved: Vec::new(), ..Layout::default() };
         let c = cuts(source);
@@ -803,7 +804,7 @@ export { counter as total, bump };
 
     #[test]
     fn a_function_named_by_an_assignment_in_another_piece_keeps_its_name() {
-        let options = Options { whitespace: true, identifiers: true, syntax: false, keep_top_level: false, keep_names: Some(true) };
+        let options = Options { whitespace: true, identifiers: true, syntax: false, keep_top_level: false, keep_names: Some(true), legacy: false };
         let source = "var loose, other;\nloose = function () { return 1; };\nother = () => loose();\nconsole.log(loose.name, other.name);\n";
         let c = cuts(source);
         let layout = Layout { head: 0, tail: source.len(), cuts: c.clone(), reserved: Vec::new(), ..Layout::default() };
@@ -815,7 +816,7 @@ export { counter as total, bump };
 
     #[test]
     fn a_top_level_undefined_sends_the_bundle_to_one_pass() {
-        let options = Options { whitespace: true, identifiers: true, syntax: true, keep_top_level: false, keep_names: None };
+        let options = Options { whitespace: true, identifiers: true, syntax: true, keep_top_level: false, keep_names: None, legacy: false };
         let source = "var undefined = 5;\nconsole.log(undefined);\n";
         let c = cuts(source);
         let layout = Layout { head: 0, tail: source.len(), cuts: c.clone(), reserved: Vec::new(), ..Layout::default() };
@@ -824,7 +825,7 @@ export { counter as total, bump };
 
     #[test]
     fn a_wrapper_is_written_around_the_pieces() {
-        let options = Options { whitespace: true, identifiers: true, syntax: false, keep_top_level: true, keep_names: None };
+        let options = Options { whitespace: true, identifiers: true, syntax: false, keep_top_level: true, keep_names: None, legacy: false };
         let source = "var Lib = (() => {\n\"use strict\";\nvar one = 1;\nvar two = one + 1;\nreturn { two };\n})();\n";
         let head = source.find("\"use").unwrap();
         let tail = source.find("})();").unwrap();
@@ -897,7 +898,7 @@ export { counter as total, bump };
 
     #[test]
     fn a_body_is_written_between_text_that_is_kept() {
-        let options = Options { whitespace: true, identifiers: true, syntax: false, keep_top_level: false, keep_names: None };
+        let options = Options { whitespace: true, identifiers: true, syntax: false, keep_top_level: false, keep_names: None, legacy: false };
         let layout = wrapped(WRAPPED);
         let out = in_bundle_pieces(WRAPPED, &layout, &options);
         // The wrapper's own name and parameters are named with the rest (`exports` is `r` inside, where `module` is `i`); the body reuses
@@ -908,7 +909,7 @@ export { counter as total, bump };
 
     #[test]
     fn the_var_chain_runs_through_the_wrapper_and_the_anchors_follow() {
-        let options = Options { whitespace: true, identifiers: true, syntax: false, keep_top_level: false, keep_names: None };
+        let options = Options { whitespace: true, identifiers: true, syntax: false, keep_top_level: false, keep_names: None, legacy: false };
         let source = "var go = 1;\nvar mod = __cjs(function (exports, module) {\nvar a = 1;\nfunction f(x) { return x + a + go; }\nexports.f = f;\n});\nvar after = mod;\nvar more = after + go;\nconsole.log(more, after);\n";
         let layout = wrapped(source);
         let mut found = Vec::new();
@@ -938,7 +939,7 @@ export { counter as total, bump };
     fn names_in_text_that_is_kept_stay_as_written() {
         // `a` is written in the kept text (a property name there, but nothing tells that from a binding), so what a piece declares as `a` keeps it,
         // while the wrapper's own name and parameters are still named with the rest.
-        let options = Options { whitespace: true, identifiers: true, syntax: false, keep_top_level: false, keep_names: None };
+        let options = Options { whitespace: true, identifiers: true, syntax: false, keep_top_level: false, keep_names: None, legacy: false };
         let source = "var mod = __cjs(function (exports, module) {\nvar a = 1;\nexports.a = a;\n}, { a: 1 });\n";
         let open_at = 0;
         let body_at = source.find("var a").unwrap();

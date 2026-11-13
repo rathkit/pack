@@ -1,0 +1,29 @@
+@value brand, gap as space from "./shared.module.css";
+@value small: (max-width: 599px);
+@value local: 10px;
+@value both: local;
+
+:export {
+  token: brand;
+  fixed: 3px;
+}
+
+.card { color: brand; margin: space; padding: both; }
+.title { composes: base other from "./shared.module.css"; color: black; }
+.nest { composes: card; }
+:global(.legacy) .card { color: red; }
+:global .plain { color: blue; }
+.card:not(.hidden):hover { color: gold; }
+:local(.explicit) { color: green; }
+.multi, .multi2 > .child { color: pink; }
+.sel[data-x=".notaclass"] { color: black; }
+.string::after { content: ".notaclass"; }
+.size { width: 1.5px; }
+@keyframes spin { from { opacity: 0; } to { opacity: 1; } }
+.spin { animation: spin 1s linear, other-global 2s; }
+@media small { .responsive { color: red; } }
+@supports (display: grid) { .grid { display: grid; } }
+@layer base { .layered { color: red; } }
+@container (min-width: 400px) { .contained { color: red; } }
+@font-face { font-family: Foo; src: url(x.woff); }
+.parent { &.joined { color: red; } .descendant & { color: blue; } }

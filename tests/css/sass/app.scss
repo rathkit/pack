@@ -1,0 +1,3 @@
+@use 'vars';
+.card { color: vars.$brand; .title { font-weight: bold; } &:hover { color: darken(vars.$brand, 10%); } }
+.pad { @include vars.pad(3); }

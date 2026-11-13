@@ -1,0 +1,13 @@
+const k = "dyn", x = 5;
+const o = { a: 1, [k]: 2, m() { return 3; }, get g() { return 4; }, set g(v) { this._g = v; }, [k + "2"]: 5, x, "q-r": 6 };
+console.log(JSON.stringify(o), o.g, o.m());
+o.g = 9; console.log(o._g);
+const sp = { ...o, z: 9, ...null, ...{ y: 1 }, [k]: "over" };
+console.log(JSON.stringify(sp));
+const withGetter = { ...{ get a() { return 1; } }, get b() { return 2; }, [k]: 3 };
+console.log(Object.getOwnPropertyDescriptor(withGetter, "a").value, Object.getOwnPropertyDescriptor(withGetter, "b").get !== undefined);
+const order = [];
+const ordered = { [(order.push(1), "a")]: order.push(2), [(order.push(3), "b")]: order.push(4) };
+console.log(order.join(), JSON.stringify(ordered));
+const { a, ...rest } = o;
+console.log(a, Object.keys(rest).length);

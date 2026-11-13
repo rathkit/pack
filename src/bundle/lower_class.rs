@@ -32,11 +32,11 @@ pub(super) enum PrivateKind {
 /// A private name of a class: where its objects are recorded, and the functions of a method or accessor.
 #[derive(Clone, Debug)]
 pub(super) struct Private {
-    brand: String,
-    kind: PrivateKind,
-    method: Option<String>,
-    getter: Option<String>,
-    setter: Option<String>,
+    pub(super) brand: String,
+    pub(super) kind: PrivateKind,
+    pub(super) method: Option<String>,
+    pub(super) getter: Option<String>,
+    pub(super) setter: Option<String>,
 }
 
 /// The private names a class declares (`None`: a nested class declares the name, so it is not the outer one here).
@@ -153,6 +153,45 @@ impl Scanner<'_, '_> {
             let t = self.temp();
             (vec![text(&format!("({t} = (")), Piece::Range(os, oe), text("))")], vec![text(&t)])
         }
+    }
+
+    /// The private names of a class that is rewritten as es5, each with its brand (a variable of the chunk) and the variables of its functions;
+    /// the scope is pushed, and popped by the caller.
+    pub(super) fn declare_privates(&mut self, member_ids: &[NodeId]) -> Vec<(String, Private)> {
+        let ast = self.ast;
+        let mut scope = PrivateScope::default();
+        for &m in member_ids {
+            match ast[m].kind {
+                NodeKind::ClassField { key, .. } if self.is_private_key(key) => {
+                    let brand = self.temp();
+                    scope.names.insert(self.private_text(key), Some(Private { brand, kind: PrivateKind::Field, method: None, getter: None, setter: None }));
+                }
+                NodeKind::ClassMethod { key, kind, .. } if self.is_private_key(key) => {
+                    let key_text = self.private_text(key);
+                    if !scope.names.contains_key(&key_text) {
+                        let brand = self.temp();
+                        let kind_of = if kind == MethodKind::Method { PrivateKind::Method } else { PrivateKind::Accessor };
+                        scope.names.insert(key_text.clone(), Some(Private { brand, kind: kind_of, method: None, getter: None, setter: None }));
+                    }
+                    let function = self.temp();
+                    if let Some(Some(info)) = scope.names.get_mut(&key_text) {
+                        match kind {
+                            MethodKind::Get => info.getter = Some(function),
+                            MethodKind::Set => info.setter = Some(function),
+                            _ => info.method = Some(function),
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let declared: Vec<(String, Private)> = scope.names.iter().filter_map(|(k, v)| v.clone().map(|p| (k.clone(), p))).collect();
+        self.private_scopes.push(scope);
+        declared
+    }
+
+    pub(super) fn private_info(&self, key: NodeId) -> Option<Private> {
+        if self.is_private_key(key) { self.resolve_private(&self.private_text(key)) } else { None }
     }
 
     fn helpers_for_private(&mut self) {

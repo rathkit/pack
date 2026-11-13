@@ -1,0 +1,21 @@
+.kx2ym_base { color: red; }
+.kx2ym_other { color: blue; }
+.dtnxh_card { color: #123456; margin: 4px; padding: 10px; }
+.dtnxh_title {  color: black; }
+.dtnxh_nest {  }
+.legacy .dtnxh_card { color: red; }
+.plain { color: blue; }
+.dtnxh_card:not(.dtnxh_hidden):hover { color: gold; }
+.dtnxh_explicit { color: green; }
+.dtnxh_multi, .dtnxh_multi2 > .dtnxh_child { color: pink; }
+.dtnxh_sel[data-x=".notaclass"] { color: black; }
+.dtnxh_string::after { content: ".notaclass"; }
+.dtnxh_size { width: 1.5px; }
+@keyframes dtnxh_spin { from { opacity: 0; } to { opacity: 1; } }
+.dtnxh_spin { animation: dtnxh_spin 1s linear, other-global 2s; }
+@media (max-width: 599px) { .dtnxh_responsive { color: red; } }
+@supports (display: grid) { .dtnxh_grid { display: grid; } }
+@layer base { .dtnxh_layered { color: red; } }
+@container (min-width: 400px) { .dtnxh_contained { color: red; } }
+@font-face { font-family: Foo; src: url(./x-tpag6syq.woff); }
+.dtnxh_parent { &.dtnxh_joined { color: red; } .dtnxh_descendant & { color: blue; } }

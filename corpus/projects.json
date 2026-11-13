@@ -40,6 +40,13 @@
         "exports": [
           "default"
         ]
+      },
+      "library": {
+        "entries": {
+          ".": "src/index.ts"
+        },
+        "root": "src",
+        "types": true
       }
     },
     {
@@ -62,6 +69,13 @@
         "exports": [
           "createStore"
         ]
+      },
+      "library": {
+        "entries": {
+          "./vanilla": "src/vanilla.ts"
+        },
+        "root": "src",
+        "types": true
       }
     },
     {
@@ -86,6 +100,12 @@
           "nanoid",
           "customAlphabet"
         ]
+      },
+      "library": {
+        "entries": {
+          ".": "index.js"
+        },
+        "root": "."
       }
     },
     {
@@ -109,6 +129,13 @@
           "produce",
           "enablePatches"
         ]
+      },
+      "library": {
+        "entries": {
+          ".": "src/immer.ts"
+        },
+        "root": "src",
+        "types": true
       }
     },
     {
@@ -136,6 +163,12 @@
           "code": "m.default(['a',{b:true,c:false}],'d')",
           "equals": "a b d"
         }
+      },
+      "library": {
+        "entries": {
+          ".": "src/index.js"
+        },
+        "root": "src"
       }
     },
     {
@@ -163,6 +196,13 @@
           "code": "m.default('2024-03-05').format('YYYY')",
           "equals": "2024"
         }
+      },
+      "library": {
+        "entries": {
+          ".": "src/index.js"
+        },
+        "root": "src",
+        "version": "latest"
       }
     },
     {
@@ -191,6 +231,13 @@
           "code": "typeof m.default.create",
           "equals": "function"
         }
+      },
+      "library": {
+        "entries": {
+          ".": "source/index.ts"
+        },
+        "root": "source",
+        "types": true
       }
     },
     {
@@ -219,6 +266,12 @@
           "code": "new m.Command('x').option('-a').parse(['n','x','-a']).opts().a",
           "equals": "true"
         }
+      },
+      "library": {
+        "entries": {
+          ".": "index.js"
+        },
+        "root": "."
       }
     },
     {
@@ -246,6 +299,12 @@
           "code": "m.default.satisfies('1.2.3','^1.0.0')",
           "equals": "true"
         }
+      },
+      "library": {
+        "entries": {
+          ".": "index.js"
+        },
+        "root": "."
       }
     },
     {
@@ -273,6 +332,12 @@
           "code": "typeof m.default.red('x')",
           "equals": "string"
         }
+      },
+      "library": {
+        "entries": {
+          ".": "index.mjs"
+        },
+        "root": "."
       }
     },
     {
@@ -300,6 +365,12 @@
           "code": "typeof m.default.createColors",
           "equals": "function"
         }
+      },
+      "library": {
+        "entries": {
+          ".": "picocolors.js"
+        },
+        "root": "."
       }
     },
     {
@@ -329,6 +400,25 @@
           "code": "m.marked('# hi').trim()",
           "equals": "<h1>hi</h1>"
         }
+      },
+      "library": {
+        "entries": {
+          ".": "src/marked.ts"
+        },
+        "root": "src",
+        "types": true,
+        "typesIgnore": [
+          "BlockKeys",
+          "HooksApi",
+          "HooksObject",
+          "InlineKeys",
+          "MaybePromise",
+          "RendererApi",
+          "RendererObject",
+          "Rules",
+          "TokenizerApi",
+          "TokenizerObject"
+        ]
       }
     },
     {
@@ -607,6 +697,13 @@
           "defu",
           "createDefu"
         ]
+      },
+      "library": {
+        "entries": {
+          ".": "src/defu.ts"
+        },
+        "root": "src",
+        "types": true
       }
     },
     {
@@ -630,6 +727,13 @@
           "joinURL",
           "parseURL"
         ]
+      },
+      "library": {
+        "entries": {
+          ".": "src/index.ts"
+        },
+        "root": "src",
+        "types": true
       }
     },
     {
@@ -653,6 +757,13 @@
           "join",
           "resolve"
         ]
+      },
+      "library": {
+        "entries": {
+          ".": "src/index.ts"
+        },
+        "root": "src",
+        "types": true
       }
     },
     {
@@ -675,6 +786,13 @@
         "exports": [
           "destr"
         ]
+      },
+      "library": {
+        "entries": {
+          ".": "src/index.ts"
+        },
+        "root": "src",
+        "types": true
       }
     },
     {
@@ -698,6 +816,13 @@
           "camelCase",
           "kebabCase"
         ]
+      },
+      "library": {
+        "entries": {
+          ".": "src/index.ts"
+        },
+        "root": "src",
+        "types": true
       }
     },
     {
@@ -721,6 +846,13 @@
           "defineCommand",
           "runMain"
         ]
+      },
+      "library": {
+        "entries": {
+          ".": "src/index.ts"
+        },
+        "root": "src",
+        "types": true
       }
     },
     {
@@ -744,6 +876,14 @@
           "consola",
           "createConsola"
         ]
+      },
+      "library": {
+        "entries": {
+          ".": "src/index.ts"
+        },
+        "root": "src",
+        "types": true,
+        "expectFail": "the published CommonJS file is the default export itself with the named exports set on it (module.exports = consola); a CommonJS file here has the named exports and a default"
       }
     },
     {
@@ -766,6 +906,16 @@
         "exports": [
           "atom",
           "createStore"
+        ]
+      },
+      "library": {
+        "entries": {
+          ".": "src/index.ts"
+        },
+        "root": "src",
+        "types": true,
+        "peers": [
+          "react"
         ]
       }
     },
@@ -790,6 +940,16 @@
           "proxy",
           "snapshot"
         ]
+      },
+      "library": {
+        "entries": {
+          ".": "src/index.ts"
+        },
+        "root": "src",
+        "types": true,
+        "peers": [
+          "react"
+        ]
       }
     },
     {
@@ -813,6 +973,12 @@
           "atom",
           "computed"
         ]
+      },
+      "library": {
+        "entries": {
+          ".": "index.js"
+        },
+        "root": "."
       }
     },
     {
@@ -836,6 +1002,14 @@
           "parse",
           "format"
         ]
+      },
+      "library": {
+        "entries": {
+          ".": "src/index.ts"
+        },
+        "root": "src",
+        "types": true,
+        "version": "4.0.0-nightly.202508271359"
       }
     },
     {
@@ -858,6 +1032,12 @@
         "exports": [
           "dequal"
         ]
+      },
+      "library": {
+        "entries": {
+          ".": "src/index.js"
+        },
+        "root": "src"
       }
     },
     {
@@ -880,6 +1060,12 @@
         "exports": [
           "default"
         ]
+      },
+      "library": {
+        "entries": {
+          ".": "index.js"
+        },
+        "root": "."
       }
     },
     {
@@ -902,6 +1088,12 @@
         "exports": [
           "default"
         ]
+      },
+      "library": {
+        "entries": {
+          ".": "index.js"
+        },
+        "root": "."
       }
     },
     {
@@ -925,6 +1117,12 @@
           "default",
           "Chalk"
         ]
+      },
+      "library": {
+        "entries": {
+          ".": "source/index.js"
+        },
+        "root": "source"
       }
     },
     {
@@ -947,6 +1145,12 @@
         "exports": [
           "default"
         ]
+      },
+      "library": {
+        "entries": {
+          ".": "index.js"
+        },
+        "root": "."
       }
     },
     {
@@ -969,6 +1173,13 @@
         "exports": [
           "cac"
         ]
+      },
+      "library": {
+        "entries": {
+          ".": "src/index.ts"
+        },
+        "root": "src",
+        "types": true
       }
     },
     {
@@ -991,6 +1202,12 @@
         "exports": [
           "default"
         ]
+      },
+      "library": {
+        "entries": {
+          ".": "index.js"
+        },
+        "root": "."
       }
     },
     {
@@ -1013,6 +1230,12 @@
         "exports": [
           "default"
         ]
+      },
+      "library": {
+        "entries": {
+          ".": "index.js"
+        },
+        "root": "."
       }
     },
     {
@@ -1036,6 +1259,12 @@
           "ascending",
           "bisect"
         ]
+      },
+      "library": {
+        "entries": {
+          ".": "src/index.js"
+        },
+        "root": "src"
       }
     },
     {
@@ -1059,6 +1288,12 @@
           "hierarchy",
           "cluster"
         ]
+      },
+      "library": {
+        "entries": {
+          ".": "src/index.js"
+        },
+        "root": "src"
       }
     },
     {
@@ -1082,6 +1317,12 @@
           "h",
           "render"
         ]
+      },
+      "library": {
+        "entries": {
+          ".": "src/index.js"
+        },
+        "root": "src"
       }
     },
     {
@@ -1104,6 +1345,12 @@
         "exports": [
           "default"
         ]
+      },
+      "library": {
+        "entries": {
+          ".": "src/index.mjs"
+        },
+        "root": "src"
       }
     },
     {
@@ -1127,6 +1374,15 @@
           "signal",
           "computed"
         ]
+      },
+      "library": {
+        "entries": {
+          ".": "packages/core/src/index.ts"
+        },
+        "root": "packages/core/src",
+        "types": true,
+        "package": "@preact/signals-core",
+        "version": "latest"
       }
     },
     {
@@ -1150,6 +1406,13 @@
           "map",
           "default"
         ]
+      },
+      "library": {
+        "entries": {
+          ".": "modules/index-all.js"
+        },
+        "root": "modules",
+        "expectFail": "the published CommonJS file also sets _._ = _, a name no ES module of the library exports"
       }
     },
     {
@@ -1172,6 +1435,12 @@
         "exports": [
           "default"
         ]
+      },
+      "library": {
+        "entries": {
+          ".": "src/uPlot.js"
+        },
+        "root": "src"
       }
     },
     {
@@ -1231,7 +1500,12 @@
       "expect": {
         "files": [
           "dist/index.html"
-        ]
+        ],
+        "css": {
+          "absent": [
+            "$"
+          ]
+        }
       }
     },
     {
@@ -1371,6 +1645,70 @@
           "dist/index.html"
         ]
       }
+    },
+    {
+      "name": "vite-playground-tailwind-v3",
+      "kind": "app",
+      "repo": "https://github.com/vitejs/vite",
+      "sha": "b3cb0575aff63004a71301a1ec798aeea2aa05d7",
+      "dir": "playground/tailwind-v3",
+      "installArgs": [
+        "--ignore-workspace"
+      ],
+      "build": [
+        "bundle",
+        "index.html",
+        "--outdir",
+        "dist",
+        "--config",
+        "vite.config.ts"
+      ],
+      "expect": {
+        "files": [
+          "dist/index.html"
+        ],
+        "css": {
+          "contains": [
+            "--tw-"
+          ],
+          "absent": [
+            "@tailwind"
+          ]
+        }
+      },
+      "addPackages": [
+        "vite@8.3.5"
+      ]
+    },
+    {
+      "name": "vite-react-ts-less",
+      "kind": "app",
+      "repo": "https://github.com/JS-banana/vite-react-ts",
+      "sha": "d38f110dbaae18e8a775df64d49aa74e6bea1bf3",
+      "build": [
+        "bundle",
+        "index.html",
+        "--outdir",
+        "dist",
+        "--config",
+        "vite.config.ts"
+      ],
+      "expect": {
+        "files": [
+          "dist/index.html"
+        ],
+        "css": {
+          "absent": [
+            "@primary",
+            "@import"
+          ]
+        }
+      },
+      "dropLockfile": true,
+      "addPackages": [
+        "history@5.3.0"
+      ],
+      "expectFail": "the app uses @vitejs/plugin-legacy, whose polyfill chunks are roadmap 2.4; its Less files compile"
     }
   ]
 }

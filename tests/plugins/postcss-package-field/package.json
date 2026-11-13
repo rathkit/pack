@@ -1,0 +1,1 @@
+{ "name": "postcss-package-field", "private": true, "postcss": { "plugins": { "postcss-banner": { "text": "from package.json" } } } }

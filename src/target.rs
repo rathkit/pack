@@ -1,9 +1,8 @@
 //! `--target`: the version of JavaScript the output may use, and which syntax newer than it has to be rewritten.
 //!
-//! A target is `es2015` to `es2025`, `esnext` (nothing is rewritten), engines with versions (`chrome80`), or a list of them. The features below are the ones that are newer than `es2015`
-//! (the lowest target: arrow functions, classes, `let` and `const`, template literals, destructuring and generators are never rewritten) and
-//! that this program knows how to rewrite, or knows it cannot, in which case a build for a target that lacks them stops with an error that
-//! names the feature. Regular expression syntax and library functions (`Array.prototype.at`) are not looked at.
+//! A target is `es5` to `es2025`, `esnext` (nothing is rewritten), engines with versions (`chrome80`, `ie11`), or a list of them. The features
+//! below are the ones that are newer than `es5` that this program knows how to rewrite, or knows it cannot, in which case a build for a target
+//! that lacks them stops with an error that names the feature. Regular expression syntax and library functions (`Array.prototype.at`) are not looked at.
 
 /// A piece of syntax newer than `es2015`, with the year of the language that has it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,6 +39,32 @@ pub enum Feature {
     ClassStaticBlock,
     /// `await` outside a function.
     TopLevelAwait,
+    /// `(a) => a`.
+    Arrow,
+    /// `class A { }`.
+    Class,
+    /// `let` and `const`.
+    LetConst,
+    /// `` `a${b}` `` and tagged templates.
+    Template,
+    /// `[a, b] = c` and `{ a } = b` in declarations, parameters and assignments.
+    Destructuring,
+    /// `function (a = 1, ...rest)`.
+    Params,
+    /// `f(...a)` and `[...a]`.
+    Spread,
+    /// `for (a of b)`.
+    ForOf,
+    /// `{ a, b() {}, [c]: 1 }`.
+    ObjectLiteral,
+    /// `function* () {}` and `yield`.
+    Generator,
+    /// `new.target`.
+    NewTarget,
+    /// `0b11` and `0o7`.
+    NumberLiteral,
+    /// `\u{1F600}` in a string.
+    UnicodeEscape,
 }
 
 impl Feature {
@@ -53,6 +78,7 @@ impl Feature {
             Feature::OptionalChain | Feature::NullishCoalescing | Feature::BigInt => 2020,
             Feature::LogicalAssignment | Feature::NumericSeparator => 2021,
             Feature::ClassField | Feature::ClassPrivate | Feature::ClassStaticBlock | Feature::TopLevelAwait => 2022,
+            Feature::Arrow | Feature::Class | Feature::LetConst | Feature::Template | Feature::Destructuring | Feature::Params | Feature::Spread | Feature::ForOf | Feature::ObjectLiteral | Feature::Generator | Feature::NewTarget | Feature::NumberLiteral | Feature::UnicodeEscape => 2015,
         }
     }
 
@@ -74,6 +100,19 @@ impl Feature {
             Feature::ClassPrivate => "a private class member (#name)",
             Feature::ClassStaticBlock => "a class static block",
             Feature::TopLevelAwait => "top-level await",
+            Feature::Arrow => "an arrow function",
+            Feature::Class => "a class",
+            Feature::LetConst => "let or const",
+            Feature::Template => "a template literal",
+            Feature::Destructuring => "destructuring",
+            Feature::Params => "a default or rest parameter",
+            Feature::Spread => "spread in an array or a call",
+            Feature::ForOf => "a for-of loop",
+            Feature::ObjectLiteral => "a shorthand property, a method or a computed key in an object literal",
+            Feature::Generator => "a generator",
+            Feature::NewTarget => "new.target",
+            Feature::NumberLiteral => "a binary or octal literal (0b11, 0o7)",
+            Feature::UnicodeEscape => "a code point escape (\\u{1F600})",
         }
     }
 }
@@ -97,9 +136,43 @@ const COMPAT: &[(Feature, &[(&str, (u16, u16))])] = &[
     (Feature::ClassPrivate, &[("chrome", (91, 0)), ("edge", (91, 0)), ("firefox", (90, 0)), ("safari", (15, 0)), ("ios", (15, 0)), ("node", (16, 4)), ("opera", (77, 0))]),
     (Feature::ClassStaticBlock, &[("chrome", (94, 0)), ("edge", (94, 0)), ("firefox", (93, 0)), ("safari", (16, 4)), ("ios", (16, 4)), ("node", (16, 11)), ("opera", (80, 0))]),
     (Feature::TopLevelAwait, &[("chrome", (89, 0)), ("edge", (89, 0)), ("firefox", (89, 0)), ("safari", (15, 0)), ("ios", (15, 0)), ("node", (14, 8)), ("opera", (75, 0))]),
+    (Feature::Arrow, &[("chrome", (45, 0)), ("edge", (12, 0)), ("firefox", (22, 0)), ("safari", (10, 0)), ("ios", (10, 0)), ("node", (4, 0)), ("opera", (32, 0))]),
+    (Feature::Class, &[("chrome", (49, 0)), ("edge", (13, 0)), ("firefox", (45, 0)), ("safari", (10, 0)), ("ios", (10, 0)), ("node", (6, 0)), ("opera", (36, 0))]),
+    (Feature::LetConst, &[("chrome", (49, 0)), ("edge", (14, 0)), ("firefox", (44, 0)), ("safari", (10, 0)), ("ios", (10, 0)), ("node", (6, 0)), ("opera", (36, 0))]),
+    (Feature::Template, &[("chrome", (41, 0)), ("edge", (12, 0)), ("firefox", (34, 0)), ("safari", (9, 0)), ("ios", (9, 0)), ("node", (4, 0)), ("opera", (28, 0))]),
+    (Feature::Destructuring, &[("chrome", (51, 0)), ("edge", (18, 0)), ("firefox", (53, 0)), ("safari", (10, 0)), ("ios", (10, 0)), ("node", (6, 5)), ("opera", (38, 0))]),
+    (Feature::Params, &[("chrome", (49, 0)), ("edge", (14, 0)), ("firefox", (53, 0)), ("safari", (10, 0)), ("ios", (10, 0)), ("node", (6, 0)), ("opera", (36, 0))]),
+    (Feature::Spread, &[("chrome", (46, 0)), ("edge", (12, 0)), ("firefox", (27, 0)), ("safari", (10, 0)), ("ios", (10, 0)), ("node", (5, 0)), ("opera", (33, 0))]),
+    (Feature::ForOf, &[("chrome", (38, 0)), ("edge", (12, 0)), ("firefox", (13, 0)), ("safari", (7, 0)), ("ios", (7, 0)), ("node", (0, 12)), ("opera", (25, 0))]),
+    (Feature::ObjectLiteral, &[("chrome", (47, 0)), ("edge", (12, 0)), ("firefox", (34, 0)), ("safari", (9, 0)), ("ios", (9, 0)), ("node", (4, 0)), ("opera", (34, 0))]),
+    (Feature::Generator, &[("chrome", (39, 0)), ("edge", (13, 0)), ("firefox", (26, 0)), ("safari", (10, 0)), ("ios", (10, 0)), ("node", (4, 0)), ("opera", (26, 0))]),
+    (Feature::NewTarget, &[("chrome", (46, 0)), ("edge", (14, 0)), ("firefox", (41, 0)), ("safari", (10, 0)), ("ios", (10, 0)), ("node", (5, 0)), ("opera", (33, 0))]),
+    (Feature::NumberLiteral, &[("chrome", (41, 0)), ("edge", (12, 0)), ("firefox", (25, 0)), ("safari", (9, 0)), ("ios", (9, 0)), ("node", (4, 0)), ("opera", (28, 0))]),
+    (Feature::UnicodeEscape, &[("chrome", (44, 0)), ("edge", (12, 0)), ("firefox", (40, 0)), ("safari", (9, 0)), ("ios", (9, 0)), ("node", (4, 0)), ("opera", (31, 0))]),
 ];
 
-const ENGINES: &[&str] = &["chrome", "edge", "firefox", "safari", "ios", "node", "opera"];
+/// The features that came with es2015.
+pub const ES2015: &[Feature] = &[
+    Feature::Arrow,
+    Feature::Class,
+    Feature::LetConst,
+    Feature::Template,
+    Feature::Destructuring,
+    Feature::Params,
+    Feature::Spread,
+    Feature::ForOf,
+    Feature::ObjectLiteral,
+    Feature::Generator,
+    Feature::NewTarget,
+    Feature::NumberLiteral,
+    Feature::UnicodeEscape,
+];
+
+/// `ie` has none of the features after `es5`, at any version (11 is its last).
+const ENGINES: &[&str] = &["chrome", "edge", "firefox", "safari", "ios", "node", "opera", "ie"];
+
+/// The language year `es5` stands for.
+const ES5: u16 = 2009;
 
 /// The version of JavaScript the output may use: a year of the language, the engines it must run in (a feature one of them lacks is
 /// rewritten), or both.
@@ -107,7 +180,7 @@ const ENGINES: &[&str] = &["chrome", "edge", "firefox", "safari", "ios", "node",
 pub struct Target {
     year: u16,
     /// The features some engine of the target lacks, one bit each.
-    lacks: u32,
+    lacks: u64,
     /// The target as it was written, for messages.
     label: &'static str,
 }
@@ -120,10 +193,10 @@ impl Target {
     /// `firefox78`, `ios14.5`, `edge90`, `opera70`), separated by commas. The output uses only what all of them have.
     pub fn parse(text: &str) -> Result<Target, String> {
         let mut year = u16::MAX;
-        let mut lacks = 0u32;
+        let mut lacks = 0u64;
         let mut seen = false;
         for item in text.split(',') {
-            let lower = item.trim().to_ascii_lowercase();
+            let lower: String = item.trim().to_ascii_lowercase().split_whitespace().collect();
             if lower.is_empty() {
                 continue;
             }
@@ -133,13 +206,14 @@ impl Target {
             }
             if let Some(rest) = lower.strip_prefix("es") {
                 let parsed = match rest {
+                    "5" => Some(ES5),
                     "6" => Some(2015),
                     other => other.parse::<u16>().ok(),
                 };
                 match parsed {
-                    Some(y @ 2015..=2025) => year = year.min(y),
-                    Some(1 | 3 | 5 | 2009 | 2011) => return Err(format!("the target {item} is not supported: es2015 is the lowest (functions, classes and let are not rewritten)")),
-                    _ => return Err(format!("'{item}' is not a target: use es2015 to es2025, esnext, or an engine with a version such as chrome80 or safari13.1")),
+                    Some(y @ (ES5 | 2015..=2025)) => year = year.min(y),
+                    Some(3 | 2011) => return Err(format!("the target {item} is not supported: es5 is the lowest")),
+                    _ => return Err(format!("'{item}' is not a target: use es5, es2015 to es2025, esnext, or an engine with a version such as chrome80 or safari13.1")),
                 }
                 continue;
             }
@@ -147,7 +221,7 @@ impl Target {
             let (engine, version) = lower.split_at(split);
             let engine = if engine == "ios_saf" || engine == "ios-saf" { "ios" } else { engine };
             if !ENGINES.contains(&engine) {
-                return Err(format!("'{item}' is not a target: use es2015 to es2025, esnext, or an engine with a version (one of {}), such as chrome80", ENGINES.join(", ")));
+                return Err(format!("'{item}' is not a target: use es5, es2015 to es2025, esnext, or an engine with a version (one of {}), such as chrome80", ENGINES.join(", ")));
             }
             let mut numbers = version.split('.');
             let major = numbers.next().and_then(|n| n.parse::<u16>().ok());
@@ -155,6 +229,10 @@ impl Target {
             let (Some(major), Some(minor)) = (major, minor) else {
                 return Err(format!("'{item}' needs a version after the engine, such as {engine}{}", if engine == "node" { "18" } else { "90" }));
             };
+            if engine == "ie" {
+                lacks |= COMPAT.iter().fold(0, |all, (feature, _)| all | 1 << (*feature as u32));
+                continue;
+            }
             for (feature, versions) in COMPAT {
                 if let Some((_, first)) = versions.iter().find(|(name, _)| *name == engine) {
                     if (major, minor) < *first {
@@ -164,7 +242,7 @@ impl Target {
             }
         }
         if !seen {
-            return Err("an empty target: use es2015 to es2025, esnext, or an engine with a version such as chrome80".to_string());
+            return Err("an empty target: use es5, es2015 to es2025, esnext, or an engine with a version such as chrome80".to_string());
         }
         let label: &'static str = Box::leak(text.trim().to_ascii_lowercase().into_boxed_str());
         Ok(Target { year, lacks, label })
@@ -173,6 +251,11 @@ impl Target {
     /// Whether the target has the feature as it is: its language year does, and so does every engine in it.
     pub fn supports(self, feature: Feature) -> bool {
         self.year >= feature.since() && self.lacks & (1 << (feature as u32)) == 0
+    }
+
+    /// Whether the target lacks any syntax that came with es2015, so the output must be written in es5 (arrow functions, `let`, classes).
+    pub fn lacks_es2015(self) -> bool {
+        ES2015.iter().any(|&f| !self.supports(f))
     }
 
     pub fn is_esnext(self) -> bool {
@@ -201,7 +284,9 @@ mod tests {
         assert!(Target::parse("es2021").unwrap().supports(Feature::LogicalAssignment));
         assert_eq!(Target::parse("ES6").unwrap().year, 2015);
         assert!(Target::parse("esnext").unwrap().is_esnext());
-        assert!(Target::parse("es5").unwrap_err().contains("lowest"));
+        let es5 = Target::parse("es5").unwrap();
+        assert!(!es5.supports(Feature::Arrow) && !es5.supports(Feature::Exponent) && !es5.is_esnext());
+        assert!(Target::parse("es3").unwrap_err().contains("lowest"));
         assert!(Target::parse("es2030").is_err());
         assert!(Target::parse("").is_err());
     }
@@ -213,6 +298,15 @@ mod tests {
         assert!(!es2019.supports(Feature::OptionalChain) && !es2019.supports(Feature::ClassField));
         assert!(Target::ESNEXT.supports(Feature::ClassStaticBlock));
         assert!(!Target::parse("es2015").unwrap().supports(Feature::Exponent));
+        assert!(Target::parse("es2015").unwrap().supports(Feature::Class));
+    }
+
+    #[test]
+    fn ie_has_nothing_newer_than_es5() {
+        let ie11 = Target::parse("ie11").unwrap();
+        assert!(!ie11.supports(Feature::Arrow) && !ie11.supports(Feature::LetConst) && !ie11.supports(Feature::Template) && !ie11.supports(Feature::Exponent));
+        assert!(!Target::parse("ie 11, chrome110").unwrap().supports(Feature::ForOf));
+        assert!(Target::parse("chrome60").unwrap().supports(Feature::Arrow) && !Target::parse("chrome44").unwrap().supports(Feature::Arrow));
     }
 
     #[test]

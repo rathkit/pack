@@ -1,0 +1,4 @@
+.base { color: red; }
+.other { color: blue; }
+@value brand: #123456;
+@value gap: 4px;

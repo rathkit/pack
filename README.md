@@ -76,22 +76,29 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   and `$NAME`, `${NAME}` and `${NAME:-default}` in a value are replaced once the files are merged (not in single quotes).
   `import.meta.env` alone is an object of all of these. `--no-env-files` reads no files; a change to a `.env` file starts a
   build again when watching.
-- `--target=es2015` ... `es2025` (or `esnext`, the default, which rewrites nothing): the version of JavaScript the output may use.
+- `--target=es5` ... `es2025` (or `esnext`, the default, which rewrites nothing): the version of JavaScript the output may use.
   A target can also name engines with versions, `--target=chrome80,safari13.1,node18` (engines: `chrome`, `edge`, `firefox`, `safari`,
-  `ios`, `node`, `opera`; years and engines mix), and then only what one of them lacks is rewritten: Chrome 80 has `?.` and `??`
+  `ios`, `node`, `opera`, `ie`; years and engines mix), and then only what one of them lacks is rewritten: Chrome 80 has `?.` and `??`
   but not `??=`, private members or top-level await. The versions come from MDN's compatibility tables.
   Syntax newer than it is rewritten, as `--target` does in esbuild: `a ** b` and `**=` (`Math.pow`), `?.`, `??`, `||=` `&&=` `??=`
   (a value used twice goes in a temporary `var` declared once at the top of the file), numeric separators, `catch` without a
   binding, a trailing comma in a call or parameter list, and object spread (`__spreadValues` and `__spreadProps`, which keep getters
   and methods) and object rest (`__objRest`) in a declaration, a function parameter (also of an arrow with an expression body), a `for of`, `catch`
   or an assignment, nested in other patterns or after computed keys (a nested pattern is read after the outer one is done), and class fields, private members (`#x`, private methods and accessors, `#x in o`) and static blocks
-  (`__publicField`, and a `WeakMap` or `WeakSet` per private name, as esbuild does), and async functions, methods and arrows (generators run by `__async`, each `await` a `yield`), `for await` loops and async generators (`__forAwait`, `__asyncGenerator`, and `yield*` through `__yieldStar`), and `super` inside an async method or arrow (read and written through accessors made where the `super` is valid). `es2015` is the lowest target. Anything the target cannot have and this
+  (`__publicField`, and a `WeakMap` or `WeakSet` per private name, as esbuild does), and async functions, methods and arrows (generators run by `__async`, each `await` a `yield`), `for await` loops and async generators (`__forAwait`, `__asyncGenerator`, and `yield*` through `__yieldStar`), and `super` inside an async method or arrow (read and written through accessors made where the `super` is valid). `es5` is the lowest target.
+  **es5 and the engines without es2015** (`--target=es5`, `ie11`, `chrome44`): arrow functions (`this` and `arguments` are kept in `_$this` and `_$args`), classes (constructor functions with `__extends`, `super(...)` through `Reflect.construct` where there is one, `super.x`, accessors, static members, fields and static blocks), `let` and `const` (as `var`; a name that two blocks of a function share is renamed, and a loop whose body has a function that captures a binding of the loop gets the body as a function called in each turn), template literals and tagged templates, destructuring and default and rest parameters in every position, spread in arrays, calls and `new`, `for of` (arrays, strings, iterables, array-likes; the iterator is not closed on `break`), shorthand properties, methods and computed keys, binary and octal literals, `\u{...}` escapes, and the helpers and wrappers of the output itself, all written in es5. generators, async functions, async generators and `for await` (a state machine, `__generator`, run by `__async` and `__asyncGenerator`; `yield` and `await` may be in most expressions and statements), private class members (`WeakMap`s, as for es2022), `new.target`, and `for of` that closes its iterator when left early are rewritten too. Stopped with a message that names it: decorators, a `yield` in a default value of a pattern, next to a spread in a call, or in an object with computed keys, a class declared inside a generator, a generator or async function in a loop whose body has a function that captures a binding of the loop, a block-level function used before its declaration (es5 does not hoist it in a block), and `for await` or `yield*` forwarding a `throw` or `return` into the iterable. Engines that have generators but not async functions (Chrome 40 to 54) get the older rewrite, which writes `function*`; library objects (`Promise`, `Symbol`, `WeakMap`) are used as the program does. The ES5 output is checked as es5 by `acorn` (CommonJS and IIFE forms; an ES module cannot be es5). Anything the target cannot have and this
   cannot rewrite stops the build with a message that names it and the target, never passes through: BigInt literals can never be rewritten, and top-level await is rewritten only when the program is one file with nothing exported (an app: the whole program becomes the body of an async function, or of a generator run by `__async` below es2017, with the imports left outside), otherwise it stops the build. Not rewritten either: decorators together with
   class fields, `super` in a private method or a static initializer, a tagged template on a private member, or a `__proto__`
   property after a spread. Regular expression syntax and library functions are not looked at. Checked by running programs as written and rewritten for every target in plain, minified,
   CommonJS and IIFE form, and by parsing each result as the language of its target (`tools/run-target.mjs`).
+  **Browserslist**: with no `--target`, the queries of the project are read, from the `BROWSERSLIST` variable, a `.browserslistrc` or `browserslist` file
+  (`[production]` sections; `BROWSERSLIST_ENV` or `NODE_ENV` pick one), or the `browserslist` key of `package.json`, looked for from the entry's folder up, and
+  `--browserslist='chrome >= 80, ie 11'` gives them on the command line. Only queries that name engines and versions are understood (`ie 11`, `chrome >= 80`,
+  `safari 13.1-14`, `not ie <= 11`; the lowest version of each engine counts). `defaults`, `> 0.5%`, `last 2 versions` and the other queries that need usage
+  or release data, which this program does not ship, stop `--browserslist` with a message and, when read from the project, give a warning and leave the output not rewritten.
+  `--target` wins over browserslist.
 - `--dts` (and `--dts-dir=DIR`, for a folder other than the output's): declaration files for the entries, written with the project's own
-  `typescript` package (run by Node; it is an error if it is not installed). With TypeScript 7, the native compiler, its command line writes them (`--dts-bundle` still needs TypeScript 5 or 6, because the merge reads the declarations with the JavaScript API that version 7 does not have; the files differ from version 5's only in quote style and a `declare` on JavaScript entries). They are what `tsc --declaration --emitDeclarationOnly`
+  `typescript` package (run by Node; it is an error if it is not installed). With TypeScript 7, the native compiler, its command line writes them, and `--dts-bundle` merges them with a reader of declaration files of our own (version 7 has no JavaScript API to read them with; the files differ from version 5's only in quote style, the order of the export list and a `declare` on JavaScript entries). Module federation's types are written the same way. They are what `tsc --declaration --emitDeclarationOnly`
   writes: one `.d.ts` for each source file the entries reach, laid out from the folder the sources share (so `src/index.ts` becomes
   `dist/index.d.ts` beside `dist/index.js`). With `--dts-bundle` (`dtsBundle: true`) each entry gets one file instead, named after it, with
   everything it reaches by relative imports merged in: two files' declarations with the same name are told apart (`Item`, `Item$1`), the
@@ -108,6 +115,16 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   starts a new build when watching); workers: `new Worker(new URL("./w.js", import.meta.url))`, `./w.js?worker`,
   `?sharedworker`, `?worker&inline` and `?worker&url`. A worker script is built on its own as an ES module (shared
   code is repeated in it) and copied beside the output; workers need an ES module environment.
+- Library mode. `--format esm,cjs` writes both in one build (`.mjs` and `.cjs`; with several entries the ES modules share chunks and each
+  CommonJS file stands alone), and an entry whose only export is `default` is `module.exports` itself in the CommonJS file (`--exports auto`,
+  the default for a list of formats; `--exports named` always writes an `exports` object). The CommonJS files say their names the way Node
+  reads them, so `import { name } from "./x.cjs"` works. `--preserve-modules` (with `--preserve-modules-root DIR`, default the folder the
+  sources share) writes a file for each module in the folders the sources are in, with every module keeping all its exports; what is bundled
+  from `node_modules` goes under `_deps/`. In CommonJS files the other files of the build are read when a name is used, so files that import one
+  another in a circle work. `--write-exports[=FILE]` sets `main`, `module`, `types` and the `exports` map (a subpath for each entry, `.` for
+  `index`, with `types`, `import` and `require` conditions) in the `package.json`, keeping its other fields. Checked on a fixture library
+  (`tools/run-library.mjs`) and on 38 corpus libraries built in both ways and compared, subpath by subpath and format by format, with the
+  release their authors publish (`tools/run-corpus.mjs`, the `library` block of `corpus/projects.json`).
 - Links imports across modules (re-exports, `export *`, namespaces, cycles) and reports a
   missing or ambiguous name as an error before anything runs.
 - Loaders (`--loader .ext=NAME`): `text`, `base64`, `dataurl`, `binary`, `file` (copied to the output as
@@ -117,6 +134,15 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   file or `from "./other.module.css"`). In a style sheet `url(/fonts/a.woff2)` is a file of the project (its folder, then `public/`), and stays as written when it is nowhere. A sheet's `@import`s are inlined in order (`@import "x" screen` wraps what
   x holds), `url()` points at the copied files, and each chunk's sheets go to a `.css` file next to its `.js`
   (with `--sourcemap`, a `.css.map` too); `--minify` also shrinks the CSS. A copied file nothing uses is not written.
+  Sass, Less and Stylus files (`.scss .sass .less .styl`) are compiled when the project has the compiler installed (`sass` or
+  `sass-embedded`, `less`, `stylus`), with no config file; `@use`/`@import` find relative files, packages in `node_modules` and the
+  config's aliases, and a `.module.scss` (or `.less`, `.sass`, `.styl`) has local class names like `.module.css`. A PostCSS
+  configuration (`postcss.config.*`, `.postcssrc*`, a `postcss` field in `package.json`, or `css.postcss` in the config) runs over
+  every style sheet after the compiler, when `postcss` is installed in the project or next to Vite or the plugins; `css.preprocessorOptions`
+  (`additionalData`, include paths) are honored. With `--no-config` none of this runs. Style sheet details: `@import` conditions
+  (`layer()`, `supports()`, media) nest as `@layer`, `@supports`, `@media` and pass on to what the sheet imports; `@charset` goes first;
+  `url()` keeps its `#fragment` and `?query` (`font.eot?#iefix`, `icons.svg#home`), may be written with CSS escapes or a leading `~`,
+  and a string in `image-set()` is a file; in `.module.css`, `@value` (also `from`), `:export` and `composes` are supported.
 - Plugins (`--config FILE`, or `rathkit.config.{mjs,js,cjs}` or a `.parcelrc` next to the project): the config
   lists plugins and a Node process runs them, so nothing is needed when there is no config. All of these work
   together in one build:
@@ -161,7 +187,7 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   - Vite's `handleHotUpdate` can stop or add reloads; modules are swapped in place by `--hmr` (see the development server). Not supported: webpack plugins that
     depend on webpack's own module and chunk graph internals beyond the above (for example `SplitChunksPlugin`
     settings are ignored), Parcel packagers and bundlers (the bundler's own are used).
-- `--watch` builds again when a file the build read changes (and plugins' `addWatchFile` files): plugins hear it
+- `--watch` builds again when a file the build read changes (and plugins' `addWatchFile` files): plugins hear it. On Linux it hears of changes through file events (inotify); elsewhere it polls the files every 80 ms.
   through `watchChange`, a changed config starts everything again, and Ctrl-C ends it cleanly. Modules whose files
   did not change are kept between builds (no reading, parsing or scanning again; without plugins).
 - `rkp serve ENTRY... [--port N] [--host H]` is a development server with the same options as `bundle`.
@@ -386,6 +412,7 @@ node tools/test-npm-wrapper.mjs                 # the npm launcher and platform 
 node tools/scan-secrets.mjs [--history]         # secrets in the files, or in every commit ever (the values are not printed)
 node tools/check-denylist.mjs [--history]     # the private word list (RATHKIT_DENYLIST) against the files, or every commit
 node tools/run-assets.mjs                     # image, font and SVG plugins (url, svgr, file-loader, copy) run for real
+node tools/run-css.mjs                        # Sass, Less, Stylus, PostCSS and CSS modules with the real compilers, no config file
 node tools/run-sourcemaps.mjs                 # stack traces through source maps vs the original positions
 node tools/check-pieces.mjs                    # minifying in pieces vs in one pass (add --packages PROJECT for every package)
 node tools/check-sourcemap.mjs OUT.js         # one bundle's map against both ends

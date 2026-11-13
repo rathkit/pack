@@ -16,6 +16,31 @@ What an alpha or beta does promise, and checks on every change (`tools/check-pro
 scripts in any package, a build that needs no network, provenance and checksums on every release. It promises nothing
 about stability.
 
+## Unreleased
+
+### Changed
+
+- Watch mode and the development server hear of a change at once on Linux (inotify, called through the C library, no dependency)
+  instead of at the next 80 ms poll and a 40 ms wait; the change is taken after a 4 ms quiet spell. A build keeps, for every module
+  whose file did not change, the places its imports were found, so a warm rebuild looks nothing up again for them. Elsewhere
+  (macOS, Windows, or when inotify has no watch left) the files are polled as before; FSEvents, kqueue and `ReadDirectoryChangesW`
+  need a run loop or overlapped I/O that cannot be had without a dependency.
+
+### Added
+
+- `--target=es5`, and engines without es2015 (`ie11`, `chrome44`): arrow functions, classes, `let` and `const`, templates, destructuring, default and
+  rest parameters, spread, `for of` (closing its iterator), new object literal forms, private members, `new.target`, generators, async functions,
+  async generators and `for await` (a state machine) and the output's own helpers are written as es5. A browserslist input: `--target` defaults to the queries of the project (`.browserslistrc`, `package.json`, `BROWSERSLIST`) or of
+  `--browserslist`, for the queries that name engines and versions.
+- Library mode: `--format esm,cjs` writes both formats in one build, `--exports auto|named` chooses how a CommonJS entry hands out its exports, `--preserve-modules`
+  (and `--preserve-modules-root`) writes one file for each module, and `--write-exports` sets `main`, `module`, `types` and `exports` in the `package.json`.
+  The corpus libraries are built in both ways and compared with the releases their authors publish.
+- `--dts-bundle` and the types of module federation work with TypeScript 7: its command line writes the declarations and a reader of our own merges them.
+
+### Fixed
+
+- `--dts-bundle` follows a re-export written with a `.ts` extension (`export { A } from './a.ts'`), which it left out.
+
 ## 0.2.0-beta.0 - 2026-11-11
 
 The first beta: measured and gated. The benchmark suite has 15 workloads with warm-rebuild, development server and type-check

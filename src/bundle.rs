@@ -20,6 +20,12 @@
 
 mod lower;
 mod lower_class;
+mod lower_es5;
+mod lower_es5_blocks;
+mod lower_es5_class;
+mod lower_es5_gen;
+mod lower_es5_stmt;
+mod es5_helpers;
 mod refresh;
 mod registry;
 mod std_decorators;
@@ -239,6 +245,25 @@ pub struct Options {
     pub legal_comments: crate::legal::LegalComments,
     /// The version of JavaScript the output may use; newer syntax is rewritten (or refused).
     pub target: crate::target::Target,
+    /// For `Cjs`: how an entry's exports are written. `Auto` makes an entry whose only export is `default` the `module.exports` itself.
+    pub cjs_exports: CjsExports,
+    /// Library output with one file for each module, written in the folders the sources are in (`--preserve-modules`). Every module of the
+    /// graph is an entry of the build (the first `preserve_entries` are the ones that were asked for); needs `outdir`.
+    pub preserve_modules: bool,
+    /// The folder the output tree starts at: the source file `root/a/b.ts` is written as `a/b.js`. Default: the folder the sources share.
+    pub preserve_root: Option<std::path::PathBuf>,
+    pub preserve_entries: usize,
+}
+
+/// How an entry written as CommonJS hands out its exports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum CjsExports {
+    /// An `exports` object with a getter for every name (`default` included), and `__esModule`.
+    #[default]
+    Named,
+    /// As `Named`, except that an entry whose only export is `default` is `module.exports = value`, which `require()` returns
+    /// as it is (what a package written as CommonJS by hand does).
+    Auto,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -255,7 +280,7 @@ pub enum SourceMapMode {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { splitting: false, format: Format::Esm, global_name: None, globals: Vec::new(), original_paths: false, browser: false, minify: crate::minify::Options::default(), sourcemap: SourceMapMode::None, sources_content: true, map_base: None, file_name: None, hot: false, hmr: false, react_refresh: false, entry_names: Vec::new(), federation: None, banner_js: None, footer_js: None, banner_css: None, footer_css: None, drop_console: false, drop_debugger: false, entry_template: None, chunk_template: None, out_extensions: Vec::new(), legal_comments: crate::legal::LegalComments::Eof, target: crate::target::Target::ESNEXT }
+        Options { splitting: false, format: Format::Esm, global_name: None, globals: Vec::new(), original_paths: false, browser: false, minify: crate::minify::Options::default(), sourcemap: SourceMapMode::None, sources_content: true, map_base: None, file_name: None, hot: false, hmr: false, react_refresh: false, entry_names: Vec::new(), federation: None, banner_js: None, footer_js: None, banner_css: None, footer_css: None, drop_console: false, drop_debugger: false, entry_template: None, chunk_template: None, out_extensions: Vec::new(), legal_comments: crate::legal::LegalComments::Eof, target: crate::target::Target::ESNEXT, cjs_exports: CjsExports::Named, preserve_modules: false, preserve_root: None, preserve_entries: 0 }
     }
 }
 
@@ -360,6 +385,13 @@ struct Helpers {
     async_fn: bool,
     for_await: bool,
     async_gen: bool,
+    /// `__ck`, `__tpl`, `__arr`: object literals, tagged templates and iterables written for an es5 target.
+    es5_object: bool,
+    es5_template: bool,
+    es5_array: bool,
+    es5_iter: bool,
+    es5_generator: bool,
+    es5_class: bool,
 }
 
 struct Bundler<'a> {
@@ -391,6 +423,15 @@ struct Bundler<'a> {
     out_extensions: Vec<(String, String)>,
     /// `--target`: syntax newer than this is rewritten.
     target: crate::target::Target,
+    /// The target lacks some syntax of es2015 (arrow functions, `let`, classes, ...), so the helpers and templates written into the
+    /// output use only es5.
+    legacy: bool,
+    cjs_exports: CjsExports,
+    preserve: bool,
+    preserve_root: Option<std::path::PathBuf>,
+    preserve_entries: usize,
+    /// The chunk being written, which a relative `import()` is written from.
+    emitting: usize,
     /// The temporaries rewritten code uses, each declared once at the top of the chunk of the module that uses it.
     temps: Vec<(ModuleId, String)>,
     temp_count: u32,
@@ -529,6 +570,12 @@ impl<'a> Bundler<'a> {
             drop_debugger: false,
             out_extensions: Vec::new(),
             target: crate::target::Target::ESNEXT,
+            legacy: false,
+            cjs_exports: CjsExports::Named,
+            preserve: false,
+            preserve_root: None,
+            preserve_entries: 0,
+            emitting: 0,
             temps: Vec::new(),
             temp_count: 0,
             entry_names: Vec::new(),
@@ -564,9 +611,14 @@ impl<'a> Bundler<'a> {
         self.drop_debugger = options.drop_debugger;
         self.out_extensions = options.out_extensions.clone();
         self.target = options.target;
+        self.legacy = options.target.lacks_es2015();
+        self.cjs_exports = options.cjs_exports;
+        self.preserve = options.preserve_modules && !options.hmr;
+        self.preserve_root = options.preserve_root.clone();
+        self.preserve_entries = options.preserve_entries;
         self.federation = options.federation.clone();
         self.format = options.format;
-        self.splitting = options.splitting && options.format == Format::Esm && !options.hmr;
+        self.splitting = (self.preserve || (options.splitting && options.format == Format::Esm)) && options.format != Format::Iife && !options.hmr;
         self.global_name = options.global_name.clone();
         self.globals = options.globals.clone();
         let graph = self.graph;
@@ -579,7 +631,7 @@ impl<'a> Bundler<'a> {
         if self.mapping {
             self.markable = graph.modules.iter().map(|m| !m.source.contains(|c| ('\u{E000}'..='\u{E003}').contains(&c))).collect();
         }
-        self.tla_possible = !self.target.supports(crate::target::Feature::TopLevelAwait) && !self.splitting && !options.hmr && (self.format == Format::Esm || (self.format == Format::Iife && self.global_name.is_none()));
+        self.tla_possible = !self.target.supports(crate::target::Feature::TopLevelAwait) && self.target.supports(crate::target::Feature::Generator) && !self.splitting && !options.hmr && (self.format == Format::Esm || (self.format == Format::Iife && self.global_name.is_none()));
         // Scan every module that will be emitted, collecting edits and the names they need.
         let included: Vec<ModuleId> = graph.modules.iter().filter(|m| self.included(m.id)).map(|m| m.id).collect();
         for id in included {
@@ -672,11 +724,11 @@ impl<'a> Bundler<'a> {
             }
         }
         let order = self.execution_order(&roots, &forced);
-        self.plan = if self.splitting { self.split_plan(&roots) } else { self.single_plan() };
+        self.plan = if self.preserve { self.preserve_plan(&roots, options) } else if self.splitting { self.split_plan(&roots) } else { self.single_plan() };
         self.federation_waits();
         let names = self.allocate_names();
         let links = self.chunk_links(&root_exports, &order);
-        if let Err(message) = self.rename_chunks(&links, options) {
+        if let Err(message) = if self.preserve { Ok(()) } else { self.rename_chunks(&links, options) } {
             return Err(vec![Diagnostic { severity: crate::graph::Severity::Error, message, file: None, pos: None }]);
         }
         let chunk_infos = self.chunk_infos(&roots, &root_exports, &links);
@@ -699,7 +751,7 @@ impl<'a> Bundler<'a> {
         // Frameworks that use decorators read class names at run time (Nest builds its module
         // tokens from them), so shortening them breaks those programs unless asked for.
         let keep_names = options.minify.keep_names.unwrap_or(graph.decorator_metadata || graph.experimental_decorators);
-        let settings = crate::minify::Options { keep_top_level: self.format == Format::Iife, keep_names: Some(keep_names), ..options.minify };
+        let settings = crate::minify::Options { keep_top_level: self.format == Format::Iife, keep_names: Some(keep_names), legacy: !self.target.supports(crate::target::Feature::Template), ..options.minify };
         let marks = std::mem::take(&mut *self.marks.lock().expect("marks"));
         // The chunks are independent from here on, so with several they are finished side by side.
         let finish = |c: usize, (raw, layout): (String, crate::minify::Layout)| self.finish_chunk(c, raw, layout, options, &settings, &marks);
@@ -788,6 +840,20 @@ impl<'a> Bundler<'a> {
             let pieces = self.binding_pieces(Some(first), &binding);
             self.ready_calls.insert(c, pieces);
         }
+    }
+
+    /// `() =>` or, for an es5 target, `function ()`: the start of a function whose body is a block.
+    fn arrow_head(&self) -> String {
+        self.arrow_head_with("")
+    }
+
+    fn arrow_head_with(&self, params: &str) -> String {
+        if self.legacy { format!("function ({params})") } else { format!("({params}) =>") }
+    }
+
+    /// `prefix` and a function with `params` that returns the expression `body`.
+    fn arrow_expr(&self, prefix: &str, params: &str, body: &str) -> String {
+        if self.legacy { format!("{prefix}function ({params}) {{ return {body}; }}") } else { format!("{prefix}({params}) => {body}") }
     }
 
     /// The target has no async functions, so `__async` runs a generator in their place.
@@ -909,7 +975,7 @@ impl<'a> Bundler<'a> {
     /// What each chunk holds and how it connects to the others.
     fn chunk_infos(&self, roots: &[ModuleId], root_exports: &[(ModuleId, Vec<(String, Vec<Piece>)>)], links: &ChunkLinks) -> Vec<ChunkInfo> {
         let graph = self.graph;
-        let entry_count = graph.entries.len();
+        let entry_count = if self.preserve { self.preserve_entries } else { graph.entries.len() };
         let order_of_root: HashMap<ModuleId, usize> = roots.iter().enumerate().map(|(i, &r)| (r, i)).collect();
         let mut infos = Vec::with_capacity(self.plan.chunks.len());
         for (c, chunk) in self.plan.chunks.iter().enumerate() {
@@ -1002,13 +1068,26 @@ impl<'a> Bundler<'a> {
                 }
                 sheets.sort_by_key(|m| position[m.index()]);
                 // `@import "x" screen` wraps what x holds.
-                let mut wrappers: HashMap<ModuleId, String> = HashMap::new();
-                for &id in &sheets {
+                // The conditions pass on to what the sheet imports in turn; a sheet imported more than once keeps the first wrapping.
+                let mut wrappers: HashMap<ModuleId, Vec<String>> = HashMap::new();
+                let mut work: Vec<ModuleId> = sheets.clone();
+                let mut visits = 0usize;
+                while let Some(id) = work.pop() {
+                    visits += 1;
+                    if visits > graph.modules.len() * 8 + 64 {
+                        break;
+                    }
                     let module = graph.module(id);
-                    let sheet = module.css.as_ref().expect("a sheet");
-                    for r in sheet.parsed.refs.iter().filter(|r| r.kind == RefKind::Import && !r.conditions.is_empty()) {
+                    let Some(sheet) = module.css.as_ref() else { continue };
+                    let own = wrappers.get(&id).cloned().unwrap_or_default();
+                    for r in sheet.parsed.refs.iter().filter(|r| r.kind == RefKind::Import) {
                         if let Some(Edge::Module(target)) = module.record.request_index(&r.specifier, RequestKind::Static).map(|i| &module.edges[i]) {
-                            wrappers.entry(*target).or_insert_with(|| r.conditions.clone());
+                            let mut chain = own.clone();
+                            chain.extend(css::import_wrappers(&r.conditions));
+                            if !chain.is_empty() && !wrappers.contains_key(target) {
+                                wrappers.insert(*target, chain);
+                                work.push(*target);
+                            }
                         }
                     }
                 }
@@ -1035,7 +1114,7 @@ impl<'a> Bundler<'a> {
                                 },
                                 (RefKind::Url, _) => Replacement::Leave,
                                 (RefKind::Compose, Some(Edge::Module(target))) => match &graph.module(*target).css {
-                                    Some(other) => Replacement::Seed(other.seed.clone()),
+                                    Some(other) => Replacement::Sheet(other.seed.clone(), other.parsed.values.clone()),
                                     None => Replacement::Leave,
                                 },
                                 (RefKind::Compose, _) => Replacement::Leave,
@@ -1052,15 +1131,14 @@ impl<'a> Bundler<'a> {
                     if text.is_empty() {
                         continue;
                     }
-                    let block = match wrappers.get(&id) {
-                        Some(c) if c.starts_with("layer(") => format!("@layer {}{{{}}}", c[6..].trim_end_matches(')'), text),
-                        Some(c) if c.starts_with("supports(") => format!("@supports {}{{{}}}", &c[8..c.rfind(')').map_or(c.len(), |p| p + 1)], text),
-                        Some(c) => format!("@media {c}{{{text}}}"),
-                        None => text.to_string(),
+                    let (opening, closing) = match wrappers.get(&id) {
+                        Some(chain) => (chain.iter().map(|w| format!("{w}{{")).collect::<String>(), "}".repeat(chain.len())),
+                        None => (String::new(), String::new()),
                     };
+                    let block = format!("{opening}{text}{closing}");
                     if mapping {
                         let lead = rendered.css.len() - rendered.css.trim_start().len();
-                        let prefix = if wrappers.contains_key(&id) { block.len() - text.len() - 1 } else { 0 };
+                        let prefix = opening.len();
                         for &(offset, source) in &rendered.anchors {
                             if offset >= lead && offset - lead <= text.len() {
                                 anchors.push((body.len() + prefix + offset - lead, id, source));
@@ -1071,6 +1149,12 @@ impl<'a> Bundler<'a> {
                     body.push('\n');
                 }
                 let mut out = String::new();
+                // `@charset` has to be the first thing in the file.
+                if let Some(charset) = hoisted.iter().find(|h| h.starts_with("@charset")) {
+                    out.push_str(charset);
+                    out.push('\n');
+                }
+                hoisted.retain(|h| !h.starts_with("@charset"));
                 if let Some(banner) = &options.banner_css {
                     out.push_str(banner);
                     out.push('\n');
@@ -1216,6 +1300,17 @@ impl<'a> Bundler<'a> {
             let code = wrap_text(code, options.banner_js.as_deref(), options.footer_js.as_deref());
             return Ok(OutputFile { name: file, code, map: None, data: None, original: None });
         }
+        // A map names the sources from the file it is next to: one in a folder of the output is deeper than the output folder.
+        let deeper;
+        let options = match (&options.map_base, file.rsplit_once('/')) {
+            (Some(base), Some((folder, _))) => {
+                let mut changed = options.clone();
+                changed.map_base = Some(base.join(folder));
+                deeper = changed;
+                &deeper
+            }
+            _ => options,
+        };
         let tagging = std::time::Instant::now();
         let (text, spans) = self.split_tags(&raw, &mut layout);
         if timing {
@@ -1255,7 +1350,7 @@ impl<'a> Bundler<'a> {
         }
         code = self.with_legal_comments(code, c, &file, options, settings);
         code = wrap_text(code, options.banner_js.as_deref(), options.footer_js.as_deref());
-        let map_name = format!("{file}.map");
+        let map_name = format!("{}.map", file.rsplit_once('/').map_or(file.as_str(), |(_, name)| name));
         let mut map_file = None;
         match options.sourcemap {
             SourceMapMode::Linked => {
@@ -1731,6 +1826,91 @@ impl<'a> Bundler<'a> {
         }
         let root_chunk = graph.entries.iter().map(|&e| (e, 0)).collect();
         ChunkPlan { chunks: vec![Chunk { file: self.single_name.clone(), modules, roots: graph.entries.clone(), base: String::new(), given: true, is_entry: true }], of_module, root_chunk }
+    }
+
+    /// `--preserve-modules`: every module is a file of its own, named by where its source is (from the folder the sources share). The
+    /// modules that are roots (the project's own) carry their exports; a file that only re-exports has a file too, with nothing but the
+    /// links to the files its names are in.
+    fn preserve_plan(&self, roots: &[ModuleId], options: &Options) -> ChunkPlan {
+        let graph = self.graph;
+        let is_script = |ext: &str| matches!(ext, "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "mts" | "cts");
+        let in_modules = |path: &std::path::Path| path.components().any(|c| c.as_os_str() == "node_modules");
+        let root_dir: std::path::PathBuf = match &self.preserve_root {
+            Some(dir) => dir.clone(),
+            None => {
+                let mut common: Option<std::path::PathBuf> = None;
+                for &r in roots {
+                    let path = &graph.module(r).path;
+                    if in_modules(path) || !path.is_absolute() {
+                        continue;
+                    }
+                    let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+                    common = Some(match common {
+                        None => dir,
+                        Some(c) => c.components().zip(dir.components()).take_while(|(a, b)| a == b).map(|(a, _)| a).collect(),
+                    });
+                }
+                common.unwrap_or_default()
+            }
+        };
+        let extension = self.out_extension(".js");
+        let mut used: HashSet<String> = HashSet::new();
+        let mut chunks: Vec<Chunk> = Vec::new();
+        let mut of_module = vec![None; graph.modules.len()];
+        let mut root_chunk = HashMap::new();
+        let name_of = |id: ModuleId, used: &mut HashSet<String>| -> String {
+            let path = &graph.module(id).path;
+            let clean = |text: &str| text.chars().map(|c| if c.is_control() || "\"#$%&*+,:;<=>?[]^`{|}\\".contains(c) { '_' } else { c }).collect::<String>();
+            let relative: String = match path.strip_prefix(&root_dir) {
+                Ok(rest) if !in_modules(path) && path.is_absolute() => rest.components().map(|c| clean(&c.as_os_str().to_string_lossy())).collect::<Vec<_>>().join("/"),
+                _ => {
+                    let parts: Vec<String> = path.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+                    match parts.iter().rposition(|p| p == "node_modules") {
+                        Some(at) => std::iter::once("_deps".to_string()).chain(parts[at + 1..].iter().map(|p| clean(p))).collect::<Vec<_>>().join("/"),
+                        None => format!("_external/{}", clean(&parts.last().cloned().unwrap_or_else(|| "module".to_string()))),
+                    }
+                }
+            };
+            let (stem, ext) = match relative.rsplit_once('.') {
+                Some((stem, ext)) if !stem.is_empty() && !stem.ends_with('/') => (stem.to_string(), ext.to_ascii_lowercase()),
+                _ => (relative.clone(), String::new()),
+            };
+            // A source that is not a script (JSON) keeps its extension in the name: `data.json.js`.
+            let base = if is_script(&ext) || ext.is_empty() { stem } else { format!("{stem}.{ext}") };
+            let mut name = format!("{base}{extension}");
+            let mut counter = 2;
+            while !used.insert(name.clone()) {
+                name = format!("{base}-{counter}{extension}");
+                counter += 1;
+            }
+            name
+        };
+        let _ = options;
+        // Roots first (the entries asked for, then the rest of the project), so their names are the plain ones.
+        let mut order: Vec<ModuleId> = roots.to_vec();
+        order.extend(graph.modules.iter().map(|m| m.id).filter(|id| !roots.contains(id)));
+        for id in order {
+            let own = self.included(id);
+            let root = roots.contains(&id);
+            if !own && !root {
+                continue;
+            }
+            let file = name_of(id, &mut used);
+            let base = file.rsplit_once('/').map_or(file.as_str(), |(_, b)| b).rsplit_once('.').map_or(file.as_str(), |(b, _)| b).to_string();
+            chunks.push(Chunk { file, modules: if own { vec![id] } else { Vec::new() }, roots: if root { vec![id] } else { Vec::new() }, base, given: true, is_entry: false });
+            let index = chunks.len() - 1;
+            if own {
+                of_module[id.index()] = Some(index);
+            }
+            if root {
+                root_chunk.insert(id, index);
+            }
+        }
+        for (index, chunk) in chunks.iter_mut().enumerate() {
+            chunk.is_entry = chunk.roots.first().is_some_and(|r| roots.iter().position(|x| x == r).is_some_and(|i| i < self.preserve_entries));
+            let _ = index;
+        }
+        ChunkPlan { chunks, of_module, root_chunk }
     }
 
     /// Groups modules by which roots can reach them: modules reachable from exactly the same
@@ -2225,7 +2405,7 @@ impl<'a> Bundler<'a> {
             self.code.insert(id, Code::Wrapped { edits: Vec::new(), json: true, require_cases: None });
             return;
         };
-        let mut scanner = Scanner { bundler: self, module, places: None, private_scopes: Vec::new(), private_refs: HashMap::new(), chain_members: HashSet::new(), call_callees: HashSet::new(), ast: &parsed.ast, semantic: &parsed.semantic, edits: Vec::new(), statement_starts: HashSet::new(), shorthand: HashSet::new(), skip: HashSet::new(), written: HashSet::new(), fn_depth: 0, async_ctx: Vec::new(), site_next: HashMap::new(), has_tla: false, needs_require: false, top_decl: None, in_wrapper: false, name_hint: None, shared_names: None };
+        let mut scanner = Scanner { bundler: self, module, places: None, private_scopes: Vec::new(), private_refs: HashMap::new(), chain_members: HashSet::new(), call_callees: HashSet::new(), ast: &parsed.ast, semantic: &parsed.semantic, edits: Vec::new(), statement_starts: HashSet::new(), shorthand: HashSet::new(), skip: HashSet::new(), written: HashSet::new(), fn_depth: 0, async_ctx: Vec::new(), site_next: HashMap::new(), has_tla: false, needs_require: false, top_decl: None, in_wrapper: false, name_hint: None, shared_names: None, es5: Default::default() };
         let code = if module.kind == ModuleKind::Esm && scanner.bundler.registry { scanner.scan_registry(id) } else if module.kind == ModuleKind::Esm { scanner.scan_esm(id) } else { scanner.scan_wrapped(id) };
         self.code.insert(id, code);
     }
@@ -2314,6 +2494,8 @@ struct Scanner<'b, 'a> {
     shared_names: Option<HashSet<SymbolId>>,
     /// An anonymous class expression and the name its surroundings give it (`const X = class {}`).
     name_hint: Option<(NodeId, String)>,
+    /// The state of the es5 rewrites (`lower_es5.rs`).
+    es5: lower_es5::State,
 }
 
 impl<'a> Scanner<'_, 'a> {
@@ -2322,16 +2504,32 @@ impl<'a> Scanner<'_, 'a> {
         (s.start, s.end)
     }
 
+    /// The target lacks syntax of es2015, which `lower_es5.rs` rewrites.
+    fn legacy_syntax(&self) -> bool {
+        self.bundler.legacy
+    }
+
     /// Everything in an ES module that stays, one statement at a time.
     fn scan_esm(&mut self, id: ModuleId) -> Code {
         let ast = self.ast;
         let shake = &self.bundler.shaken.modules[id.index()];
-        let live: Vec<(NodeId, Vec<SymbolId>)> = shake.parts.iter().zip(&shake.live).filter(|(_, l)| **l).map(|(p, _)| (p.stmt, p.declares.clone())).collect();
+        // One entry per statement that stays; for a declaration of several declarators, the ones that stay (a part each).
+        let mut live: Vec<(NodeId, Vec<SymbolId>, Option<Vec<NodeId>>)> = Vec::new();
+        for (p, _) in shake.parts.iter().zip(&shake.live).filter(|(_, l)| **l) {
+            match (p.declarator, live.last_mut()) {
+                (Some(d), Some((stmt, declares, Some(kept)))) if *stmt == p.stmt => {
+                    declares.extend(p.declares.iter().copied());
+                    kept.push(d);
+                }
+                (Some(d), _) => live.push((p.stmt, p.declares.clone(), Some(vec![d]))),
+                (None, _) => live.push((p.stmt, p.declares.clone(), None)),
+            }
+        }
         let declared: HashSet<SymbolId> = shake.parts.iter().flat_map(|p| p.declares.iter().copied()).collect();
         let root = self.semantic.root_scope();
         let hoistable = self.semantic.symbols().all(|(sid, sym)| sym.scope != root || sym.kind == SymbolKind::Import || declared.contains(&sid));
         let mut stmts = Vec::new();
-        for (stmt, declares) in live {
+        for (stmt, declares, kept) in live {
             let (decl, form_default) = match ast[stmt].kind {
                 NodeKind::ExportNamed(export) => (ast.export(export).decl.unwrap_or(stmt), false),
                 NodeKind::ExportDefault(value) => (value, true),
@@ -2422,6 +2620,7 @@ impl<'a> Scanner<'_, 'a> {
                 NodeKind::VarDecl { decls, .. } => Shape::Vars(
                     ast.list(decls)
                         .iter()
+                        .filter(|d| kept.as_ref().is_none_or(|k| k.contains(d)))
                         .filter_map(|&d| {
                             let NodeKind::VarDeclarator { target, init } = ast[d].kind else { return None };
                             Some(Declarator { target: self.span(target), init: init.map(|i| self.span(i)), object_pattern: matches!(ast[target].kind, NodeKind::ObjectPattern(_)) })
@@ -2430,7 +2629,30 @@ impl<'a> Scanner<'_, 'a> {
                 ),
                 _ => Shape::Other,
             };
-            self.walk(decl, false);
+            match (&kept, ast[decl].kind) {
+                // Declarators nothing uses are cut out, and only the ones that stay are looked at.
+                (Some(kept), NodeKind::VarDecl { decls, .. }) => {
+                    let all = ast.list(decls);
+                    for &d in all.iter().filter(|d| kept.contains(d)) {
+                        self.walk(d, false);
+                    }
+                    let last_kept = all.iter().rposition(|d| kept.contains(d));
+                    for (i, &d) in all.iter().enumerate() {
+                        if kept.contains(&d) {
+                            continue;
+                        }
+                        // Before the last one that stays: up to the start of the next declarator. After it: from the end of the one that stays, once.
+                        let (from, to) = match last_kept {
+                            Some(k) if i < k => (ast[d].span.start, ast[all[i + 1]].span.start),
+                            Some(k) if i == k + 1 => (ast[all[k]].span.end, ast[*all.last().unwrap_or(&d)].span.end),
+                            Some(_) => continue,
+                            None => continue,
+                        };
+                        self.edits.push(Edit { start: from, end: to, pieces: Vec::new(), shorthand: None, transparent: false });
+                    }
+                }
+                _ => self.walk(decl, false),
+            }
             let (start, end) = self.span(decl);
             self.add_erasures(start, end);
             let edits = std::mem::take(&mut self.edits);
@@ -2693,9 +2915,10 @@ impl<'a> Scanner<'_, 'a> {
             vec![Piece::Text("__toNs(".into()), Piece::Name(key), Piece::Text("(), 1)".into())]
         };
         if kind == RequestKind::Dynamic {
-            let mut pieces = vec![Piece::Text("Promise.resolve().then(() => ".into())];
+            let legacy = self.bundler.legacy;
+            let mut pieces = vec![Piece::Text(if legacy { "Promise.resolve().then(function () { return " } else { "Promise.resolve().then(() => " }.into())];
             pieces.extend(value);
-            pieces.push(Piece::Text(")".into()));
+            pieces.push(Piece::Text(if legacy { "; })" } else { ")" }.into()));
             Some(pieces)
         } else {
             Some(value)
@@ -2783,6 +3006,14 @@ impl<'a> Scanner<'_, 'a> {
                         }
                     }
                 } else {
+                    // A free `__dirname` in a module written with `import` (a config the bundler reads) is also its own file's folder.
+                    if self.bundler.original_paths && matches!(ast.atom(name), "__dirname" | "__filename") && self.semantic.symbol_of(node).is_none() {
+                        let path = &self.module.path;
+                        let text = if ast.atom(name) == "__filename" { path.parent().map(|_| path.as_path()) } else { path.parent() };
+                        let text = json_string(&text.unwrap_or(path).to_string_lossy());
+                        self.push(node, vec![Piece::Text(text)]);
+                        return;
+                    }
                     self.ident(node);
                 }
                 return;
@@ -2943,7 +3174,14 @@ impl<'a> Scanner<'_, 'a> {
                     NodeKind::AssignPattern { target, .. } | NodeKind::Assign { target, .. } => target,
                     _ => value,
                 };
-                self.shorthand.insert(target);
+                // A shorthand that is rewritten as `a: a` has its name written as any other.
+                let rewritten = match ast[node].kind {
+                    NodeKind::Property { .. } => self.lowers(crate::target::Feature::ObjectLiteral),
+                    _ => self.lowers(crate::target::Feature::Destructuring),
+                };
+                if !rewritten {
+                    self.shorthand.insert(target);
+                }
             }
             NodeKind::JsxElement(_) | NodeKind::JsxFragment { .. } => self.jsx_edit(node),
             NodeKind::ImportMeta if !wrapped && self.bundler.format != Format::Esm => {
@@ -2961,15 +3199,27 @@ impl<'a> Scanner<'_, 'a> {
                 }
                 self.walk_in(key, wrapped, this_bound);
                 if let Some(value) = value {
+                    if self.legacy_syntax() {
+                        self.es5_enter_this_scope();
+                    }
                     self.walk_in(value, wrapped, true);
+                    if self.legacy_syntax() {
+                        self.es5_exit();
+                    }
                 }
                 return;
             }
             NodeKind::StaticBlock(_) => {
                 let mut children = Vec::new();
                 ast.for_each_child(node, |c| children.push(c));
+                if self.legacy_syntax() {
+                    self.es5_enter_this_scope();
+                }
                 for child in children {
                     self.walk_in(child, wrapped, true);
+                }
+                if self.legacy_syntax() {
+                    self.es5_exit();
                 }
                 return;
             }
@@ -2986,12 +3236,18 @@ impl<'a> Scanner<'_, 'a> {
         if is_function {
             let ctx = self.fn_ctx(node);
             self.async_ctx.push(ctx);
+            if self.legacy_syntax() {
+                self.es5_enter(node);
+            }
         }
         for child in children {
             self.walk_in(child, wrapped, bound);
         }
         if is_function {
             self.async_ctx.pop();
+            if self.legacy_syntax() {
+                self.es5_exit();
+            }
         }
         self.fn_depth -= is_function as u32;
         if is_function {
@@ -3212,6 +3468,20 @@ fn base64(data: &[u8]) -> String {
     out
 }
 
+/// The way to write the import of the file `to` from the file `from`, both named from the output folder: `./b.js`, `../lib/c.js`.
+fn relative_specifier(from: &str, to: &str) -> String {
+    let from_dirs: Vec<&str> = from.split('/').collect::<Vec<_>>().split_last().map_or(Vec::new(), |(_, d)| d.to_vec());
+    let to_parts: Vec<&str> = to.split('/').collect();
+    let to_dirs = &to_parts[..to_parts.len() - 1];
+    let common = from_dirs.iter().zip(to_dirs).take_while(|(a, b)| a == b).count();
+    let mut out = "../".repeat(from_dirs.len() - common);
+    if out.is_empty() {
+        out.push_str("./");
+    }
+    out.push_str(&to_parts[common..].join("/"));
+    out
+}
+
 fn is_identifier_name(text: &str) -> bool {
     let mut chars = text.chars();
     chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$') && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
@@ -3318,7 +3588,7 @@ impl Bundler<'_> {
                 Piece::Range(..) => unreachable!("a source range is rendered with its module's edits"),
                 Piece::DynamicChunk(id) => {
                     let file = self.plan.root_chunk.get(id).map(|&c| self.plan.chunks[c].file.as_str()).unwrap_or("");
-                    out.push_str(&format!("import({})", json_string(&format!("./{file}"))));
+                    out.push_str(&format!("import({})", json_string(&relative_specifier(&self.plan.chunks[self.emitting].file, file))));
                 }
             }
         }
@@ -3520,12 +3790,15 @@ impl Bundler<'_> {
                 }
             }
             Form::Class { key, original, decorated } => {
-                if &names[key] != original || *decorated {
+                if !self.target.supports(crate::target::Feature::Class) {
+                    // The class became an expression (a function), which this names.
+                    text = format!("var {} = {text}", names[key]);
+                } else if &names[key] != original || *decorated {
                     text = format!("let {} = {text}", names[key]);
                 }
             }
         }
-        let renamed_class = matches!(stmt.form, Form::Class { .. }) && text.starts_with("let ");
+        let renamed_class = matches!(stmt.form, Form::Class { .. }) && (text.starts_with("let ") || text.starts_with("var "));
         if (stmt.terminate || renamed_class) && !ends_with_semicolon(&text) {
             text.push(';');
         }
@@ -3550,11 +3823,43 @@ impl Bundler<'_> {
     fn emit_chunk(&mut self, chunk: usize, order: &[Item], exports: &[(String, Vec<Piece>)], names: &HashMap<Key, String>, links: &ChunkLinks) -> (String, crate::minify::Layout) {
         let graph = self.graph;
         let format = self.format;
+        self.emitting = chunk;
+        // A file written as CommonJS reads what it takes from the other files of a build through the object `require` gave, so a name is
+        // read when it is used (the files may import one another in a circle), as an import of an ES module would.
+        // A file that (through others) needs this one back is asked for each time it is used: while the circle is being loaded, it has
+        // not given anything yet when this file starts to run.
+        let in_circle = |dep: usize| {
+            let mut seen = vec![false; links.deps.len()];
+            let mut stack = vec![dep];
+            while let Some(c) = stack.pop() {
+                if c == chunk {
+                    return true;
+                }
+                if !std::mem::replace(&mut seen[c], true) {
+                    stack.extend(links.deps[c].iter().copied());
+                }
+            }
+            false
+        };
+        let overridden;
+        let names = if format == Format::Cjs && self.preserve {
+            let mut local = names.clone();
+            for (dep, keys) in &links.imports[chunk] {
+                let call = if in_circle(*dep) { "()" } else { "" };
+                for key in keys {
+                    local.insert(key.clone(), format!("__d{dep}{call}.{}", names[key]));
+                }
+            }
+            overridden = local;
+            &overridden
+        } else {
+            names
+        };
         let mut out = String::new();
         // A CommonJS entry written as CommonJS (or as an IIFE with a global) is its own `module.exports`, as
         // other bundlers write it, not an object with a `default` in it.
         let cjs_entry: Option<ModuleId> = match (format, self.plan.chunks[chunk].roots.as_slice()) {
-            (Format::Cjs, [root]) | (Format::Iife, [root]) if graph.entries.contains(root) && (format == Format::Cjs || self.global_name.is_some()) && matches!(self.code.get(root), Some(Code::Wrapped { .. })) => Some(*root),
+            (Format::Cjs, [root]) | (Format::Iife, [root]) if graph.entries.contains(root) && (!self.preserve || (self.plan.chunks[chunk].is_entry && links.exports[chunk].is_empty())) && (format == Format::Cjs || self.global_name.is_some()) && matches!(self.code.get(root), Some(Code::Wrapped { .. })) => Some(*root),
             _ => None,
         };
         // Where a top-level statement has ended, so the minifier can work on the parts side by side.
@@ -3582,9 +3887,11 @@ impl Bundler<'_> {
             Format::Iife => {
                 match &self.global_name {
                     Some(name) => {
-                        let _ = writeln!(out, "var {name} = (() => {{");
+                        let _ = writeln!(out, "var {name} = ({} {{", self.arrow_head());
                     }
-                    None => out.push_str("(() => {\n"),
+                    None => {
+                        out.push_str(&format!("({} {{\n", self.arrow_head()));
+                    }
                 }
                 head = out.len();
                 out.push_str("\"use strict\";\n");
@@ -3619,7 +3926,7 @@ impl Bundler<'_> {
         // Other chunks of this build, in the order they have to run, then outside modules.
         if format == Format::Esm {
             for &dep in &links.deps[chunk] {
-                let file = json_string(&format!("./{}", self.plan.chunks[dep].file));
+                let file = json_string(&relative_specifier(&self.plan.chunks[chunk].file, &self.plan.chunks[dep].file));
                 match links.imports[chunk].get(&dep) {
                     Some(keys) => {
                         let list: Vec<&str> = keys.iter().map(|k| names[k].as_str()).collect();
@@ -3645,12 +3952,13 @@ impl Bundler<'_> {
                 };
             }
         }
+        let helper_start = out.len();
         let needs_cjs = self.code.values().any(|c| matches!(c, Code::Wrapped { .. }));
         if needs_cjs {
-            out.push_str(HELPER_CJS);
+            out.push_str(if self.legacy { es5_helpers::CJS } else { HELPER_CJS });
         }
         if self.helpers.esm {
-            out.push_str(HELPER_ESM);
+            out.push_str(if self.legacy { es5_helpers::ESM } else { HELPER_ESM });
         }
         if self.helpers.decorate {
             out.push_str(HELPER_DECORATE);
@@ -3662,42 +3970,69 @@ impl Bundler<'_> {
             out.push_str(HELPER_STD_DECORATORS);
         }
         if self.helpers.spread {
-            out.push_str(HELPER_SPREAD);
+            out.push_str(if self.legacy { es5_helpers::SPREAD } else { HELPER_SPREAD });
         }
         if self.helpers.class_private {
-            out.push_str(HELPER_CLASS_PRIVATE);
+            out.push_str(if self.legacy { es5_helpers::CLASS_PRIVATE } else { HELPER_CLASS_PRIVATE });
+        }
+        if self.helpers.es5_object {
+            out.push_str(es5_helpers::OBJECT);
+        }
+        if self.helpers.es5_template {
+            out.push_str(es5_helpers::TEMPLATE);
+        }
+        if self.helpers.es5_array {
+            out.push_str(es5_helpers::ARRAY);
+        }
+        if self.helpers.es5_iter || self.legacy && (self.helpers.for_await || self.helpers.async_gen) {
+            out.push_str(es5_helpers::ITER);
+        }
+        if self.helpers.es5_class {
+            out.push_str(es5_helpers::CLASS);
         }
         if self.helpers.async_fn {
-            out.push_str(HELPER_ASYNC);
+            out.push_str(if self.legacy { es5_helpers::ASYNC } else { HELPER_ASYNC });
+        }
+        if self.helpers.es5_generator {
+            out.push_str(es5_helpers::GENERATOR);
         }
         if self.helpers.for_await || self.helpers.async_gen {
-            out.push_str(HELPER_FOR_AWAIT);
+            out.push_str(if self.legacy { es5_helpers::FOR_AWAIT } else { HELPER_FOR_AWAIT });
         }
         if self.helpers.async_gen {
-            out.push_str(HELPER_ASYNC_GEN);
+            out.push_str(if self.legacy { es5_helpers::ASYNC_GEN } else { HELPER_ASYNC_GEN });
+            if self.legacy && self.target.supports(crate::target::Feature::Generator) {
+                out.push_str(es5_helpers::YIELD_STAR);
+            }
         }
         if self.code.values().any(|c| matches!(c, Code::Wrapped { require_cases: Some(_), .. })) {
             out.push_str(match format {
+                Format::Esm if self.legacy => es5_helpers::REQ,
+                Format::Cjs if self.legacy => es5_helpers::REQ_CJS,
+                Format::Iife if self.legacy => es5_helpers::REQ_IIFE,
                 Format::Esm => HELPER_REQ,
                 Format::Cjs => HELPER_REQ_CJS,
                 Format::Iife => HELPER_REQ_IIFE,
             });
         }
         if self.helpers.to_default {
-            out.push_str(HELPER_TO_DEFAULT);
+            out.push_str(if self.legacy { es5_helpers::TO_DEFAULT } else { HELPER_TO_DEFAULT });
         }
         if self.helpers.to_ns {
-            out.push_str(HELPER_TO_NS);
+            out.push_str(if self.legacy { es5_helpers::TO_NS } else { HELPER_TO_NS });
         }
         let has_ns = self.keys.iter().any(|k| matches!(k, Key::Namespace(_)));
         if has_ns {
-            out.push_str(HELPER_NS);
+            out.push_str(if self.legacy { es5_helpers::NS } else { HELPER_NS });
         }
+        let helper_end = out.len();
         // The temporaries of rewritten syntax (`--target`) that the modules of this chunk use.
         let temps: Vec<&str> = self.temps.iter().filter(|(m, _)| self.in_chunk(*m, chunk)).map(|(_, n)| n.as_str()).collect();
         if !temps.is_empty() {
             let _ = writeln!(out, "var {};", temps.join(", "));
         }
+        let mut default_only = false;
+        let mut default_value: Option<String> = None;
         if format != Format::Esm {
             if format == Format::Cjs {
                 for spec in &bare {
@@ -3721,18 +4056,32 @@ impl Bundler<'_> {
             // The entry's exports, as getters so they can be defined before the modules run.
             let target = if format == Format::Cjs { "exports" } else { "__exports" };
             // An iife with no global name has nobody to hand its exports to.
-            if !exports.is_empty() && cjs_entry.is_none() && (format != Format::Iife || self.global_name.is_some()) {
-                out.push_str(HELPER_EXPORT);
+            // `Auto`: an entry that only has a default export is the value itself, assigned when the modules have run.
+            default_only = format == Format::Cjs && self.cjs_exports == CjsExports::Auto && cjs_entry.is_none() && links.exports[chunk].is_empty() && matches!(exports, [(name, _)] if name == "default");
+            if default_only {
+                default_value = Some(self.text_of(&exports[0].1, names));
+            }
+            if (!exports.is_empty() || !links.exports[chunk].is_empty()) && cjs_entry.is_none() && !default_only && (format != Format::Iife || self.global_name.is_some()) {
+                out.push_str(if self.legacy { es5_helpers::EXPORT } else { HELPER_EXPORT });
                 if format == Format::Iife {
                     out.push_str("var __exports = {};\n");
                 }
-                let fields: Vec<String> = exports
+                let mut fields: Vec<String> = exports
                     .iter()
                     .map(|(name, pieces)| {
                         let label = if is_identifier_name(name) { name.clone() } else { json_string(name) };
-                        format!("{label}: () => {}", self.text_of(pieces, names))
+                        self.arrow_expr(&format!("{label}: "), "", &self.text_of(pieces, names))
                     })
                     .collect();
+                // What other files of the build read from this one (`--preserve-modules`) goes by the names it has in the build.
+                if format == Format::Cjs {
+                    for key in &links.exports[chunk] {
+                        let name = &names[key];
+                        if !exports.iter().any(|(public, _)| public == name) {
+                            fields.push(format!("{name}: () => {name}"));
+                        }
+                    }
+                }
                 let _ = writeln!(out, "__export({target}, {{ {} }});", fields.join(", "));
                 if format == Format::Cjs {
                     out.push_str("Object.defineProperty(exports, \"__esModule\", { value: true });\n");
@@ -3779,7 +4128,7 @@ impl Bundler<'_> {
                     None => "\n});\n".to_string(),
                     Some(cases) => {
                         // The arrow's two parameters are names of the module's scope, so they are shortened with the rest.
-                        let mut table = String::from("__req((__i, __r) => { switch (__i) { ");
+                        let mut table = format!("__req({} {{ switch (__i) {{ ", self.arrow_head_with("__i, __r"));
                         let list: Vec<String> = cases.iter().map(|(spec, pieces)| format!("case {}: return {}", json_string(spec), self.text_of(pieces, names))).collect();
                         table.push_str(&list.join("; "));
                         let url = if format != Format::Esm { "0".to_string() } else if self.original_paths { file_url(&module.path) } else { "import.meta.url".to_string() };
@@ -3818,7 +4167,7 @@ impl Bundler<'_> {
                     let _ = write!(out, "var {name} = __cjs(function (exports, module) {{\n{body}\n}});\n");
                 }
                 Some(cases) => {
-                    let mut table = String::from("__req((id, r) => { switch (id) { ");
+                    let mut table = format!("__req({} {{ switch (id) {{ ", self.arrow_head_with("id, r"));
                     for (spec, pieces) in cases {
                         let _ = write!(table, "case {}: return {}; ", json_string(spec), self.text_of(pieces, names));
                     }
@@ -3839,7 +4188,7 @@ impl Bundler<'_> {
             let mut fields = Vec::new();
             for (name, pieces) in self.ns_entries.get(id).map(|v| v.as_slice()).unwrap_or(&[]) {
                 let label = if is_identifier_name(name) { name.clone() } else { json_string(name) };
-                fields.push(format!("{label}: () => {}", self.text_of(pieces, names)));
+                fields.push(self.arrow_expr(&format!("{label}: "), "", &self.text_of(pieces, names)));
             }
             let _ = writeln!(out, "var {} = __ns({{ {} }});", names[key], fields.join(", "));
             cuts.push(out.len());
@@ -3933,8 +4282,28 @@ impl Bundler<'_> {
                 let _ = writeln!(out, "var {};", hoisted.join(", "));
             }
             out.push_str(&functions);
-            let _ = write!(out, "var {} = __esm(() => {{\n{body}}});\n", names[&Key::Init(module.id)]);
+            let _ = write!(out, "var {} = __esm({} {{\n{body}}});\n", names[&Key::Init(module.id)], self.arrow_head());
             cuts.push(out.len());
+        }
+        // Files of this build that this one reads from (`--preserve-modules`), in the order they have to run. They come after the functions
+        // that stand for the CommonJS modules of this file are defined and before anything runs, so files that need one another in a circle
+        // find what they ask of each other.
+        if format == Format::Cjs {
+            for &dep in &links.deps[chunk] {
+                let file = json_string(&relative_specifier(&self.plan.chunks[chunk].file, &self.plan.chunks[dep].file));
+                match links.imports[chunk].get(&dep) {
+                    Some(_) if in_circle(dep) => {
+                        let _ = writeln!(out, "var __d{dep} = () => require({file});");
+                    }
+                    Some(_) => {
+                        let _ = writeln!(out, "var __d{dep} = require({file});");
+                    }
+                    None => {
+                        let _ = writeln!(out, "require({file});");
+                    }
+                }
+                cuts.push(out.len());
+            }
         }
         if let Some(pieces) = self.ready_calls.get(&chunk) {
             let _ = writeln!(out, "await {}();", self.text_of(pieces, names));
@@ -3976,6 +4345,21 @@ impl Bundler<'_> {
             let _ = writeln!(out, "var {} = {};", names[key], self.text_of(pieces, names));
             cuts.push(out.len());
         }
+        if let Some(value) = default_value.filter(|_| default_only) {
+            let _ = writeln!(out, "module.exports = {value};");
+            cuts.push(out.len());
+        }
+        // Node finds the names of a CommonJS file by reading it, not by running it; this says them (as other bundlers write it), so
+        // `import { name } from "./file.cjs"` works.
+        if format == Format::Cjs && self.cjs_exports == CjsExports::Auto && cjs_entry.is_none() && !default_only {
+            let mut listed: Vec<String> = exports.iter().map(|(name, _)| name.clone()).chain(links.exports[chunk].iter().map(|k| names[k].clone())).filter(|n| is_identifier_name(n) && n != "default").collect();
+            listed.sort();
+            listed.dedup();
+            if !listed.is_empty() {
+                let _ = writeln!(out, "0 && (module.exports = {{ {} }});", listed.join(", "));
+                cuts.push(out.len());
+            }
+        }
         if self.tla_wrap {
             out.push_str(if self.lowers_async_functions() { "});\n" } else { "})();\n" });
             // The pieces the minifier would take side by side cannot be cut inside the wrapper.
@@ -4009,6 +4393,44 @@ impl Bundler<'_> {
                 }
             }
             let _ = writeln!(out, "export {{ {} }};", list.join(", "));
+        }
+        // With a file for each module, a file keeps only the helpers it uses (they are written for all, at first).
+        if self.preserve && helper_end > helper_start {
+            let region = out[helper_start..helper_end].to_string();
+            let rest_before = &out[..helper_start];
+            let rest_after = &out[helper_end..];
+            let lines: Vec<&str> = region.split_inclusive('\n').collect();
+            let name_of = |line: &str| line.strip_prefix("var ").and_then(|l| l.split([' ', '=']).next()).map(str::to_string);
+            let mut keep = vec![false; lines.len()];
+            loop {
+                let mut changed = false;
+                for (i, line) in lines.iter().enumerate() {
+                    if keep[i] {
+                        continue;
+                    }
+                    let Some(name) = name_of(line) else { keep[i] = true; changed = true; continue };
+                    let used = rest_before.contains(&name) || rest_after.contains(&name) || lines.iter().enumerate().any(|(j, other)| j != i && keep[j] && other.contains(&name));
+                    if used {
+                        keep[i] = true;
+                        changed = true;
+                    }
+                }
+                if !changed {
+                    break;
+                }
+            }
+            let kept: String = lines.iter().zip(&keep).filter(|(_, k)| **k).map(|(l, _)| *l).collect();
+            if kept.len() != region.len() {
+                let removed = region.len() - kept.len();
+                out.replace_range(helper_start..helper_end, &kept);
+                let shift = |n: &mut usize| if *n >= helper_end { *n -= removed };
+                cuts.iter_mut().for_each(shift);
+                fixed.iter_mut().for_each(|r| { shift(&mut r.start); shift(&mut r.end); });
+                bodies.iter_mut().for_each(|r| { shift(&mut r.start); shift(&mut r.end); });
+                shared_names.iter_mut().for_each(|(r, _, _)| { shift(&mut r.start); shift(&mut r.end); });
+                if let Some(t) = tail.as_mut() { shift(t); }
+                shift(&mut head);
+            }
         }
         let layout = crate::minify::Layout { head, tail: tail.unwrap_or(out.len()), cuts, reserved: if format == Format::Iife { self.global_name.iter().cloned().collect() } else { Vec::new() }, fixed, names: shared_names, bodies };
         (out, layout)
@@ -4073,9 +4495,9 @@ impl Scanner<'_, '_> {
             pieces.extend(target.iter().cloned());
             pieces.push(text(";\n"));
         }
-        pieces.push(text("(("));
+        pieces.push(text(if self.bundler.legacy { "(function (" } else { "((" }));
         pieces.extend(target.iter().cloned());
-        pieces.push(text(") => {\n"));
+        pieces.push(text(if self.bundler.legacy { ") {\n" } else { ") => {\n" }));
         let mut values: HashMap<crate::ast::Atom, EnumValue> = HashMap::new();
         let mut auto: Option<f64> = Some(0.0);
         let mut previous: Option<String> = None;

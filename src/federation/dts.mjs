@@ -242,7 +242,7 @@ function bundleDeclarations(ts, entryFile) {
   const resolveInternal = (from, spec) => {
     if (!isRelative(spec)) return null;
     if (/\.d\.[mc]?ts$/.test(spec)) return program.getSourceFile(path.resolve(path.dirname(from.fileName), spec)) ?? null;
-    const base = path.resolve(path.dirname(from.fileName), spec).replace(/\.(m|c)?js$/, '');
+    const base = path.resolve(path.dirname(from.fileName), spec).replace(/\.(m|c)?[jt]s$/, '');
     for (const candidate of [base + '.d.ts', base + '.d.mts', base + '.d.cts', path.join(base, 'index.d.ts')]) {
       const found = program.getSourceFile(candidate);
       if (found) return found;
@@ -595,10 +595,593 @@ function emitNative(native, { entries, outDir, tsConfigPath }) {
     }
     const written = result.stdout.split(/\r?\n/).filter((l) => l.startsWith('TSFILE: ')).map((l) => l.slice(8)).filter((f) => /\.d\.[mc]?ts$/.test(f)).map((f) => path.relative(out, f).split(path.sep).join('/')).sort();
     if (!written.length) return { error: 'no declarations were written' };
-    return { written, errors };
+    return { written, errors, common };
   } finally {
     fs.rmSync(work, { recursive: true, force: true });
   }
+}
+
+// ---- a reader of declaration files, for TypeScript 7 -------------------------------------------------------------------
+
+// TypeScript 7 is the native compiler and its package has no JavaScript API to read a program with. The declaration files that --dts-bundle
+// merges are what `tsc --declaration` writes, a plain and regular subset of the language, so they are read here: what `bundleDeclarations`
+// asks of the `typescript` package (statements, the names in them and which declaration each names, the exports of a file and what an import
+// or re-export stands for) is answered from a scan of the text. The answers have the shape of the TypeScript API, so the merge is the same code.
+function declarationReader() {
+  const K = { SourceFile: 1, Identifier: 2, StringLiteral: 3, ImportDeclaration: 4, ExportDeclaration: 5, ExportAssignment: 6, ImportEqualsDeclaration: 7, FunctionDeclaration: 8, ClassDeclaration: 9, InterfaceDeclaration: 10, TypeAliasDeclaration: 11, EnumDeclaration: 12, ModuleDeclaration: 13, VariableStatement: 14, VariableDeclaration: 15, VariableDeclarationList: 16, ImportClause: 17, NamespaceImport: 18, NamedImports: 19, ImportSpecifier: 20, NamedExports: 21, ExportSpecifier: 22, NamespaceExport: 23, QualifiedName: 24, ImportType: 25, LiteralType: 26, OtherStatement: 27, ExportKeyword: 28, DefaultKeyword: 29, DeclareKeyword: 30, OtherModifier: 31, TypeArguments: 32, TypeReference: 33 };
+  const SymbolFlags = { Alias: 1 << 21, ValueModule: 1 << 9 };
+  const NodeFlags = { GlobalAugmentation: 1 << 11 };
+  const keywords = new Set('string number boolean any unknown never void object symbol bigint null undefined true false this typeof keyof unique readonly infer extends implements new in is asserts out declare export default abstract static public private protected override accessor function class interface enum import var let const namespace module global as from satisfies of delete super require'.split(' '));
+  const modifierWords = new Set(['readonly', 'static', 'public', 'private', 'protected', 'abstract', 'override', 'declare', 'async', 'accessor', 'export', 'default', 'get', 'set']);
+  const isModuleKeyword = new Set(['interface', 'class', 'namespace', 'module', 'enum', 'global']);
+
+  function tokenize(text) {
+    const tokens = [];
+    const n = text.length;
+    let i = 0;
+    let braces = 0;
+    const substitutions = [];
+    const push = (type, start, end) => tokens.push({ type, start, end, value: text.slice(start, end) });
+    const template = () => {
+      while (i < n) {
+        const c = text[i];
+        if (c === '\\') i += 2;
+        else if (c === '`') { i++; return false; }
+        else if (c === '$' && text[i + 1] === '{') { i += 2; return true; }
+        else i++;
+      }
+      return false;
+    };
+    while (i < n) {
+      const c = text[i];
+      if (c === ' ' || c === '\n' || c === '\r' || c === '\t' || c === '﻿' || c === ' ' || c === ' ' || c === ' ') { i++; continue; }
+      if (c === '/' && text[i + 1] === '/') { while (i < n && text[i] !== '\n') i++; continue; }
+      if (c === '/' && text[i + 1] === '*') { const end = text.indexOf('*/', i + 2); i = end < 0 ? n : end + 2; continue; }
+      const start = i;
+      if (c === '"' || c === "'") {
+        i++;
+        while (i < n && text[i] !== c) i += text[i] === '\\' ? 2 : 1;
+        i++;
+        push('string', start, i);
+      } else if (c === '`') {
+        i++;
+        if (template()) substitutions.push(braces);
+        push('template', start, i);
+      } else if (c === '}' && substitutions.length && substitutions[substitutions.length - 1] === braces) {
+        substitutions.pop();
+        i++;
+        if (template()) substitutions.push(braces);
+        push('template', start, i);
+      } else if (/[A-Za-z_$\u0080-￿]/.test(c)) {
+        i++;
+        while (i < n && /[\w$\u0080-￿]/.test(text[i])) i++;
+        push('id', start, i);
+      } else if (/[0-9]/.test(c) || (c === '.' && /[0-9]/.test(text[i + 1] ?? ''))) {
+        i++;
+        while (i < n && /[\w.]/.test(text[i])) i++;
+        push('num', start, i);
+      } else if (c === '=' && text[i + 1] === '>') { i += 2; push('p', start, i); }
+      else if (c === '.' && text[i + 1] === '.' && text[i + 2] === '.') { i += 3; push('p', start, i); }
+      else {
+        i++;
+        if (c === '{') braces++;
+        else if (c === '}') braces--;
+        push('p', start, i);
+      }
+    }
+    return tokens;
+  }
+
+  const files = new Map();
+  const loadFile = (fileName) => {
+    const name = path.resolve(fileName);
+    if (files.has(name)) return files.get(name);
+    let text;
+    try {
+      text = fs.readFileSync(name, 'utf8');
+    } catch {
+      return null; // missing, or a folder
+    }
+    return parseFile(name, text);
+  };
+
+  const tools = (file) => ({
+    getStart() { return this.start; },
+    getEnd() { return this.end; },
+    getFullStart() { return this.fullStart ?? this.start; },
+    getSourceFile() { return file; },
+  });
+
+  function parseFile(fileName, text) {
+    const file = { kind: K.SourceFile, fileName, text, isDeclarationFile: true, statements: [], referencedFiles: [], typeReferenceDirectives: [], symbols: new Map(), exportTable: new Map(), stars: [], flags: 0, start: 0, end: text.length, fullStart: 0 };
+    files.set(fileName, file);
+    Object.assign(file, tools(file));
+    const head = text.slice(0, (text.search(/^[^\s/]|\n\s*[^\s/*]/m) + 1) || 0);
+    for (const m of text.matchAll(/^\s*\/\/\/\s*<reference\s+path="([^"]*)"\s*\/>/gm)) file.referencedFiles.push({ fileName: m[1] });
+    for (const m of text.matchAll(/^\s*\/\/\/\s*<reference\s+types="([^"]*)"\s*\/>/gm)) file.typeReferenceDirectives.push({ fileName: m[1] });
+    void head;
+    const tokens = tokenize(text);
+    const make = (kind, start, end, extra = {}) => Object.assign({ kind, start, end, parent: undefined }, tools(file), extra);
+    const ident = (tok, parent, extra = {}) => make(K.Identifier, tok.start, tok.end, { text: tok.value, parent, ...extra });
+    const stringLiteral = (tok, parent) => make(K.StringLiteral, tok.start, tok.end, { text: tok.value.slice(1, -1), parent });
+    let t = 0;
+    let previousEnd = 0;
+    while (t < tokens.length) {
+      const s = t;
+      // The words in front: modifiers, then what kind of statement it is.
+      let k = s;
+      const modifiers = [];
+      for (;;) {
+        const tok = tokens[k];
+        if (!tok || tok.type !== 'id') break;
+        const next = tokens[k + 1];
+        if (tok.value === 'export' && next && (next.value === '{' || next.value === '*' || next.value === '=' || (next.value === 'type' && (tokens[k + 2]?.value === '{' || tokens[k + 2]?.value === '*')) || next.value === 'as' || next.value === 'import')) break;
+        if (tok.value === 'export') modifiers.push(make(K.ExportKeyword, tok.start, tok.end));
+        else if (tok.value === 'default' && next && !['function', 'class', 'interface', 'abstract', 'enum'].includes(next.value)) break;
+        else if (tok.value === 'default') modifiers.push(make(K.DefaultKeyword, tok.start, tok.end));
+        else if (tok.value === 'declare') modifiers.push(make(K.DeclareKeyword, tok.start, tok.end));
+        else if ((tok.value === 'abstract' || tok.value === 'async') && next?.type === 'id') modifiers.push(make(K.OtherModifier, tok.start, tok.end));
+        else if (tok.value === 'const' && next?.value === 'enum') modifiers.push(make(K.OtherModifier, tok.start, tok.end));
+        else break;
+        k++;
+      }
+      const word = tokens[k]?.type === 'id' ? tokens[k].value : '';
+      const braceDeclaration = isModuleKeyword.has(word);
+      // Where the statement ends: a `;` outside brackets, or for a declaration with a body its closing brace.
+      let depth = 0;
+      let e = s;
+      for (let j = s; j < tokens.length; j++) {
+        e = j;
+        const tok = tokens[j];
+        if (tok.type === 'p') {
+          if (tok.value === '(' || tok.value === '[' || tok.value === '{') depth++;
+          else if (tok.value === ')' || tok.value === ']' || tok.value === '}') depth--;
+          if (tok.value === ';' && depth === 0) break;
+          if (tok.value === '}' && depth === 0 && braceDeclaration) {
+            const next = tokens[j + 1];
+            if (!(next && (['>', ',', '{', '&', '|', '[', ']', ')', '=', '.'].includes(next.value) || (next.type === 'id' && (next.value === 'extends' || next.value === 'implements'))))) {
+              if (next && next.value === ';') e = j + 1;
+              break;
+            }
+          }
+        }
+        if (j === tokens.length - 1) e = j;
+      }
+      t = e + 1;
+      if (tokens[s].value === ';' && e === s) { continue; }
+      const statement = make(K.OtherStatement, tokens[s].start, tokens[e].end, { fullStart: previousEnd, modifiers, flags: 0, _kids: [] });
+      previousEnd = statement.end;
+      statement.parent = file;
+      let nameToken = null;
+      const bindings = [];
+      const first = tokens[k];
+      if (word === 'import' && !modifiers.length) {
+        // import [type] [default][, * as ns | { a as b }] from '...'  /  import '...'  /  import a = require('...')
+        let j = k + 1;
+        if (tokens[j]?.value === 'type' && (tokens[j + 1]?.type === 'id' ? tokens[j + 1].value !== 'from' : tokens[j + 1]?.value === '{' || tokens[j + 1]?.value === '*')) j++;
+        const equals = (() => { for (let q = j; q <= e; q++) if (tokens[q].value === '=') return true; else if (tokens[q].value === 'from' || tokens[q].type === 'string') return false; return false; })();
+        if (equals) statement.kind = K.ImportEqualsDeclaration;
+        else {
+          statement.kind = K.ImportDeclaration;
+          const clause = make(K.ImportClause, tokens[j].start, tokens[e].end, { parent: statement });
+          if (tokens[j].type === 'string') {
+            statement.moduleSpecifier = stringLiteral(tokens[j], statement);
+          } else {
+            if (tokens[j].type === 'id' && tokens[j].value !== 'from') {
+              clause.name = ident(tokens[j], clause);
+              bindings.push({ local: tokens[j].value, flags: SymbolFlags.Alias, declaration: clause });
+              j++;
+              if (tokens[j]?.value === ',') j++;
+            }
+            if (tokens[j]?.value === '*') {
+              const ns = make(K.NamespaceImport, tokens[j].start, tokens[j + 2].end, { parent: clause });
+              ns.name = ident(tokens[j + 2], ns);
+              clause.namedBindings = ns;
+              bindings.push({ local: tokens[j + 2].value, flags: SymbolFlags.Alias, declaration: ns });
+              j += 3;
+            } else if (tokens[j]?.value === '{') {
+              const named = make(K.NamedImports, tokens[j].start, tokens[e].end, { parent: clause, elements: [] });
+              clause.namedBindings = named;
+              j++;
+              while (tokens[j] && tokens[j].value !== '}') {
+                if (tokens[j].value === ',') { j++; continue; }
+                if (tokens[j].value === 'type' && tokens[j + 1]?.type === 'id' && tokens[j + 1].value !== 'as') j++;
+                const spec = make(K.ImportSpecifier, tokens[j].start, tokens[j].end, { parent: named });
+                if (tokens[j + 1]?.value === 'as') {
+                  spec.propertyName = ident(tokens[j], spec);
+                  spec.name = ident(tokens[j + 2], spec);
+                  j += 3;
+                } else {
+                  spec.name = ident(tokens[j], spec);
+                  j++;
+                }
+                named.elements.push(spec);
+                bindings.push({ local: spec.name.text, flags: SymbolFlags.Alias, declaration: spec });
+              }
+              j++;
+            }
+            if (tokens[j]?.value === 'from') j++;
+            statement.moduleSpecifier = tokens[j]?.type === 'string' ? stringLiteral(tokens[j], statement) : undefined;
+          }
+          if (clause.name || clause.namedBindings) statement.importClause = clause;
+        }
+      } else if (word === 'export' && !modifiers.length && tokens[k + 1]) {
+        let j = k + 1;
+        if (tokens[j].value === 'type' && (tokens[j + 1]?.value === '{' || tokens[j + 1]?.value === '*')) j++;
+        const next = tokens[j];
+        if (next.value === '=') {
+          statement.kind = K.ExportAssignment;
+          statement.isExportEquals = true;
+        } else if (next.value === 'default') {
+          statement.kind = K.ExportAssignment;
+          statement.isExportEquals = false;
+          statement.expression = tokens[j + 1]?.type === 'id' && tokens[j + 2]?.value === ';' ? tokens[j + 1].value : null;
+        } else if (next.value === 'as') {
+          statement.kind = K.OtherStatement;
+        } else if (next.value === 'import') {
+          statement.kind = K.ImportEqualsDeclaration;
+        } else {
+          statement.kind = K.ExportDeclaration;
+          if (next.value === '*') {
+            j++;
+            if (tokens[j]?.value === 'as') {
+              const ns = make(K.NamespaceExport, tokens[j].start, tokens[j + 1].end, { parent: statement });
+              ns.name = ident(tokens[j + 1], ns);
+              statement.exportClause = ns;
+              j += 2;
+            }
+          } else {
+            const named = make(K.NamedExports, next.start, tokens[e].end, { parent: statement, elements: [] });
+            statement.exportClause = named;
+            j++;
+            while (tokens[j] && tokens[j].value !== '}') {
+              if (tokens[j].value === ',') { j++; continue; }
+              if (tokens[j].value === 'type' && tokens[j + 1]?.type === 'id' && tokens[j + 1].value !== 'as') j++;
+              const spec = make(K.ExportSpecifier, tokens[j].start, tokens[j].end, { parent: named });
+              if (tokens[j + 1]?.value === 'as') {
+                spec.propertyName = ident(tokens[j], spec);
+                spec.name = ident(tokens[j + 2], spec);
+                j += 3;
+              } else {
+                spec.name = ident(tokens[j], spec);
+                j++;
+              }
+              named.elements.push(spec);
+            }
+            j++;
+          }
+          if (tokens[j]?.value === 'from') statement.moduleSpecifier = stringLiteral(tokens[j + 1], statement);
+        }
+      } else if (word === 'default') {
+        statement.kind = K.ExportAssignment;
+        statement.isExportEquals = false;
+        statement.expression = tokens[k + 1]?.type === 'id' && tokens[k + 2]?.value === ';' ? tokens[k + 1].value : null;
+      } else if (word === 'export' && modifiers.length === 0) {
+        statement.kind = K.OtherStatement;
+      } else if (word === 'function') {
+        statement.kind = K.FunctionDeclaration;
+        nameToken = tokens[k + 1]?.type === 'id' ? tokens[k + 1] : tokens[k + 2]?.type === 'id' ? tokens[k + 2] : null;
+      } else if (word === 'class') {
+        statement.kind = K.ClassDeclaration;
+        nameToken = tokens[k + 1]?.type === 'id' && !['extends', 'implements'].includes(tokens[k + 1].value) ? tokens[k + 1] : null;
+      } else if (word === 'interface') { statement.kind = K.InterfaceDeclaration; nameToken = tokens[k + 1]; }
+      else if (word === 'type' && tokens[k + 1]?.type === 'id') { statement.kind = K.TypeAliasDeclaration; nameToken = tokens[k + 1]; }
+      else if (word === 'enum' || (word === 'const' && tokens[k + 1]?.value === 'enum')) { statement.kind = K.EnumDeclaration; nameToken = tokens[word === 'enum' ? k + 1 : k + 2]; }
+      else if (word === 'namespace' || word === 'module' || word === 'global') {
+        statement.kind = K.ModuleDeclaration;
+        if (word === 'global') { statement.flags |= NodeFlags.GlobalAugmentation; nameToken = first; }
+        else if (tokens[k + 1]?.type === 'string') statement.name = stringLiteral(tokens[k + 1], statement);
+        else nameToken = tokens[k + 1];
+      } else if (word === 'var' || word === 'let' || word === 'const') {
+        statement.kind = K.VariableStatement;
+        const list = make(K.VariableDeclarationList, tokens[k].start, tokens[e].end, { parent: statement, declarations: [] });
+        statement.declarationList = list;
+        let d = 0;
+        for (let j = k + 1; j <= e; j++) {
+          const tok = tokens[j];
+          if (tok.type === 'p' && '([{'.includes(tok.value)) d++;
+          else if (tok.type === 'p' && ')]}'.includes(tok.value)) d--;
+          if (d === 0 && tok.type === 'id' && (j === k + 1 || tokens[j - 1].value === ',') && !keywords.has(tok.value)) {
+            const declaration = make(K.VariableDeclaration, tok.start, tok.end, { parent: list });
+            declaration.name = ident(tok, declaration);
+            list.declarations.push(declaration);
+          }
+        }
+      }
+      if (nameToken && statement.kind !== K.ModuleDeclaration) statement.name = ident(nameToken, statement);
+      if (nameToken && statement.kind === K.ModuleDeclaration) statement.name = ident(nameToken, statement);
+      statement.nameToken = nameToken;
+      statement.bindings = bindings;
+      if (statement.kind >= K.FunctionDeclaration && statement.kind <= K.VariableStatement) scanBody(file, tokens, statement, s, k, e, text);
+      file.statements.push(statement);
+      statement.parent = file;
+      for (const child of statement._kids ?? []) child.parent ??= statement;
+    }
+    file._kids = file.statements;
+    index(file);
+    return file;
+  }
+
+  // The identifiers of a declaration that stand for something declared elsewhere, and the `import("...")` types, in the order they are written.
+  function scanBody(file, tokens, statement, s, k, e, text) {
+    const make = (kind, start, end, extra = {}) => Object.assign({ kind, start, end, parent: undefined }, tools(file), extra);
+    const locals = new Set();
+    const nameIndex = statement.nameToken ? tokens.indexOf(statement.nameToken) : -1;
+    // Names bound inside: type parameters, `infer`, mapped types' keys, and what a namespace declares for itself.
+    const match = new Map();
+    const open = [];
+    for (let i = k; i <= e; i++) {
+      const tok = tokens[i];
+      if (tok.type !== 'p') continue;
+      if (tok.value === '<') open.push({ ch: '<', i });
+      else if (tok.value === '>') { if (open.length && open[open.length - 1].ch === '<') match.set(open.pop().i, i); }
+      else if (tok.value === '(' || tok.value === '[' || tok.value === '{') open.push({ ch: tok.value, i });
+      else if (tok.value === ')' || tok.value === ']' || tok.value === '}') { while (open.length && open.pop().ch === '<'); }
+    }
+    for (let i = k; i <= e; i++) {
+      const tok = tokens[i];
+      if (tok.type === 'id' && tok.value === 'infer' && tokens[i + 1]?.type === 'id') locals.add(tokens[i + 1].value);
+      if (tok.value === '[' && tokens[i + 1]?.type === 'id' && tokens[i + 2]?.value === 'in') locals.add(tokens[i + 1].value);
+      if (tok.value === '<' && match.has(i)) {
+        const close = match.get(i);
+        const after = tokens[close + 1];
+        const previous = tokens[i - 1];
+        const nested = statement.kind === K.ModuleDeclaration && previous?.type === 'id' && ['interface', 'class', 'type', 'function'].includes(tokens[i - 2]?.value);
+        if ((after && after.value === '(') || i - 1 === nameIndex || nested) {
+          let depth = 0;
+          let wantsName = true;
+          for (let j = i + 1; j < close; j++) {
+            const inner = tokens[j];
+            if (inner.type === 'p' && '([{<'.includes(inner.value)) depth++;
+            else if (inner.type === 'p' && ')]}>'.includes(inner.value)) depth--;
+            if (depth === 0 && inner.value === ',') { wantsName = true; continue; }
+            if (wantsName && depth === 0 && inner.type === 'id') {
+              if (['const', 'in', 'out'].includes(inner.value) && tokens[j + 1]?.type === 'id') continue;
+              locals.add(inner.value);
+              wantsName = false;
+            }
+          }
+        }
+      }
+      if (statement.kind === K.ModuleDeclaration && tok.type === 'id' && i > nameIndex + 1) {
+        if (['interface', 'class', 'function', 'enum', 'namespace', 'module', 'var', 'let', 'const'].includes(tok.value) && tokens[i + 1]?.type === 'id') locals.add(tokens[i + 1].value);
+        if (tok.value === 'type' && tokens[i + 1]?.type === 'id' && (tokens[i + 2]?.value === '=' || tokens[i + 2]?.value === '<')) locals.add(tokens[i + 1].value);
+      }
+    }
+    statement.locals = locals;
+    // The leaves.
+    const declared = new Set();
+    if (statement.name?.kind === K.Identifier) declared.add(statement.name);
+    const nameLeaves = new Set();
+    const leaves = [];
+    const nameOfDeclarations = statement.declarationList ? statement.declarationList.declarations.map((d) => d.name) : [];
+    for (const n of nameOfDeclarations) nameLeaves.add(n.start);
+    if (statement.name?.kind === K.Identifier && statement.kind !== K.ModuleDeclaration) nameLeaves.add(statement.name.start);
+    if (statement.name?.kind === K.Identifier && statement.kind === K.ModuleDeclaration && statement.nameToken?.value !== 'global') nameLeaves.add(statement.name.start);
+    const scan = (from, to, stack, out) => {
+      for (let i = from; i <= to; i++) {
+        const tok = tokens[i];
+        if (tok.type === 'p') {
+          if (tok.value === '(' || tok.value === '[' || tok.value === '{' || tok.value === '<') stack.push(tok.value);
+          else if (tok.value === ')' || tok.value === ']' || tok.value === '}') { while (stack.length && stack.pop() === '<'); }
+          else if (tok.value === '>') { if (stack[stack.length - 1] === '<') stack.pop(); }
+          continue;
+        }
+        if (tok.type !== 'id') continue;
+        // import("...").A.B<C>
+        if (tok.value === 'import' && tokens[i + 1]?.value === '(' && tokens[i + 2]?.type === 'string' && tokens[i + 3]?.value === ')') {
+          const typeOf = tokens[i - 1]?.value === 'typeof';
+          const node = make(K.ImportType, typeOf ? tokens[i - 1].start : tok.start, tokens[i + 3].end, { _kids: [] });
+          const literal = make(K.StringLiteral, tokens[i + 2].start, tokens[i + 2].end, { text: tokens[i + 2].value.slice(1, -1) });
+          node.argument = make(K.LiteralType, literal.start, literal.end, { literal });
+          let j = i + 4;
+          let qualifier;
+          while (tokens[j]?.value === '.' && tokens[j + 1]?.type === 'id') {
+            const part = make(K.Identifier, tokens[j + 1].start, tokens[j + 1].end, { text: tokens[j + 1].value });
+            qualifier = qualifier ? make(K.QualifiedName, qualifier.start, part.end, { left: qualifier, right: part }) : part;
+            node.end = part.end;
+            j += 2;
+          }
+          if (qualifier) node.qualifier = qualifier;
+          if (tokens[j]?.value === '<' && match.has(j)) {
+            const close = match.get(j);
+            const inside = [];
+            scan(j + 1, close - 1, [...stack, '<'], inside);
+            const pseudo = make(K.TypeArguments, tokens[j].end, tokens[close].start, { _kids: inside });
+            node.typeArguments = Object.assign([pseudo], { pos: tokens[j].end });
+            node._kids = inside;
+            node.end = tokens[close].end;
+            j = close + 1;
+          }
+          out.push(node);
+          i = j - 1;
+          continue;
+        }
+        const value = tok.value;
+        const previous = tokens[i - 1];
+        const next = tokens[i + 1];
+        const top = stack[stack.length - 1];
+        if (nameLeaves.has(tok.start)) {
+          out.push(statement.name?.start === tok.start ? statement.name : nameOfDeclarations.find((n) => n.start === tok.start));
+          continue;
+        }
+        if (previous?.value === '.' && previous.type === 'p') continue;
+        if (keywords.has(value)) continue;
+        if (modifierWords.has(value) && (next?.type === 'id' || next?.type === 'string' || next?.value === '[' || next?.value === '*') && !['=', ':', '?', ',', ';', ')', '>'].includes(next?.value)) continue;
+        if (value === 'type' && next?.type === 'id') continue;
+        // A name that is a member or a parameter, not a reference.
+        const startsMember = previous && (['{', ';', ','].includes(previous.value) || (previous.type === 'id' && modifierWords.has(previous.value)) || previous.value === '(' || previous.value === '[' || previous.value === '...');
+        const optional = next?.value === '?';
+        const after = optional ? tokens[i + 2] : next;
+        if (startsMember && (top === '{' || top === '(' || top === '[')) {
+          if (after?.value === ':') continue;
+          if (top === '{' && (after?.value === '(' || after?.value === '<' || [';', ',', '}', '='].includes(after?.value ?? ''))) continue;
+        }
+        if (next?.type === 'id' && next.value === 'is' && previous?.value === ':') continue;
+        if (previous?.type === 'id' && previous.value === 'asserts') continue;
+        if (locals.has(value)) continue;
+        out.push(make(K.Identifier, tok.start, tok.end, { text: value, parent: undefined, ref: true }));
+      }
+    };
+    scan(k, e, [], leaves);
+    // A name that follows a dot is a member, and a qualified name's first part is a reference.
+    statement._kids = leaves;
+    void text;
+  }
+
+  // The names a file declares, imports and exports.
+  function index(file) {
+    const symbol = (name, flags, declaration) => {
+      const found = file.symbols.get(name);
+      if (found) { found.declarations.push(declaration); return found; }
+      const made = { name, flags, declarations: [declaration], file };
+      file.symbols.set(name, made);
+      return made;
+    };
+    file.isModule = file.statements.some((s) => [K.ImportDeclaration, K.ExportDeclaration, K.ExportAssignment, K.ImportEqualsDeclaration].includes(s.kind) || s.modifiers?.some((m) => m.kind === K.ExportKeyword));
+    for (const statement of file.statements) {
+      for (const b of statement.bindings ?? []) {
+        const made = { name: b.local, flags: b.flags, declarations: [b.declaration], file };
+        file.symbols.set(b.local, made);
+      }
+      const exported = statement.modifiers?.some((m) => m.kind === K.ExportKeyword);
+      const byDefault = statement.modifiers?.some((m) => m.kind === K.DefaultKeyword);
+      const names = [];
+      if (statement.kind === K.VariableStatement) names.push(...statement.declarationList.declarations.map((d) => d.name.text));
+      else if (statement.name?.kind === K.Identifier && !(statement.flags & NodeFlags.GlobalAugmentation) && statement.kind >= K.FunctionDeclaration && statement.kind <= K.ModuleDeclaration) names.push(statement.name.text);
+      for (const name of names) {
+        const made = symbol(name, 0, statement);
+        if (exported) {
+          const key = byDefault ? 'default' : name;
+          if (byDefault) made.exportName = 'default';
+          if (!file.exportTable.has(key)) file.exportTable.set(key, byDefault ? Object.assign(made, { name: 'default' }) : made);
+        }
+      }
+      if (byDefault && exported && !names.length && statement.kind !== K.OtherStatement) file.exportTable.set('default', { name: 'default', flags: 0, declarations: [statement], file });
+      if (statement.kind === K.ExportDeclaration) {
+        const clause = statement.exportClause;
+        if (!clause) { if (statement.moduleSpecifier) file.stars.push(statement); }
+        else if (clause.kind === K.NamespaceExport) file.exportTable.set(clause.name.text, { name: clause.name.text, flags: SymbolFlags.Alias, declarations: [clause], file });
+        else for (const spec of clause.elements) file.exportTable.set(spec.name.text, { name: spec.name.text, flags: SymbolFlags.Alias, declarations: [spec], file });
+      }
+      if (statement.kind === K.ExportAssignment && !statement.isExportEquals && statement.expression) {
+        file.exportTable.set('default', { name: 'default', flags: SymbolFlags.Alias, declarations: [statement], file });
+      }
+    }
+  }
+
+  const resolveFile = (from, spec) => {
+    if (!spec.startsWith('.') && !spec.startsWith('/')) return null;
+    if (/\.d\.[mc]?ts$/.test(spec)) return loadFile(path.resolve(path.dirname(from.fileName), spec));
+    const base = path.resolve(path.dirname(from.fileName), spec).replace(/\.(m|c)?[jt]s$/, '');
+    for (const candidate of [base + '.d.ts', base + '.d.mts', base + '.d.cts', path.join(base, 'index.d.ts')]) {
+      const found = loadFile(candidate);
+      if (found) return found;
+    }
+    return null;
+  };
+  const unknown = { name: 'unknown', flags: 0, declarations: [] };
+  const moduleSymbols = new Map();
+  const moduleSymbol = (file) => {
+    if (!file.isModule) return undefined;
+    if (!moduleSymbols.has(file)) moduleSymbols.set(file, { name: `"${file.fileName}"`, flags: SymbolFlags.ValueModule, declarations: [file], file });
+    return moduleSymbols.get(file);
+  };
+  const exportsOf = (file, seen = new Set()) => {
+    if (seen.has(file)) return new Map();
+    seen.add(file);
+    const table = new Map(file.exportTable);
+    for (const star of file.stars) {
+      const target = resolveFile(file, star.moduleSpecifier.text);
+      if (!target) continue;
+      for (const [name, symbol] of exportsOf(target, seen)) if (name !== 'default' && !table.has(name)) table.set(name, symbol);
+    }
+    return table;
+  };
+  const aliased = (alias) => {
+    const declaration = alias.declarations[0];
+    const file = alias.file;
+    const inFile = (statementFile, spec, name) => {
+      const target = resolveFile(statementFile, spec);
+      if (!target) return unknown;
+      return exportsOf(target).get(name) ?? unknown;
+    };
+    switch (declaration.kind) {
+      case K.ImportSpecifier: return inFile(file, declaration.parent.parent.parent.moduleSpecifier.text, (declaration.propertyName ?? declaration.name).text);
+      case K.ImportClause: return inFile(file, declaration.parent.moduleSpecifier.text, 'default');
+      case K.NamespaceImport: { const target = resolveFile(file, declaration.parent.parent.moduleSpecifier.text); return target ? moduleSymbol(target) ?? unknown : unknown; }
+      case K.NamespaceExport: { const target = resolveFile(file, declaration.parent.moduleSpecifier.text); return target ? moduleSymbol(target) ?? unknown : unknown; }
+      case K.ExportSpecifier: {
+        const statement = declaration.parent.parent;
+        const name = (declaration.propertyName ?? declaration.name).text;
+        if (statement.moduleSpecifier) return inFile(file, statement.moduleSpecifier.text, name);
+        return file.symbols.get(name) ?? unknown;
+      }
+      case K.ExportAssignment: return file.symbols.get(declaration.expression) ?? unknown;
+      default: return unknown;
+    }
+  };
+  const checker = {
+    getSymbolAtLocation(node) {
+      if (node.kind === K.SourceFile) return moduleSymbol(node);
+      if (node.kind !== K.Identifier) return undefined;
+      const file = node.getSourceFile();
+      return file.symbols.get(node.text);
+    },
+    getExportsOfModule(symbol) {
+      const file = symbol.declarations[0];
+      return [...exportsOf(file).values()];
+    },
+    getAliasedSymbol: aliased,
+  };
+  const isKind = (kind) => (node) => node?.kind === kind;
+  const ts = {
+    SyntaxKind: K,
+    SymbolFlags,
+    NodeFlags,
+    ScriptTarget: { ESNext: 99 },
+    ModuleKind: { ESNext: 99 },
+    ModuleResolutionKind: { Bundler: 100 },
+    createProgram(roots) {
+      for (const root of roots) loadFile(root);
+      return { getTypeChecker: () => checker, getSourceFile: (name) => loadFile(name) };
+    },
+    forEachChild(node, callback) {
+      for (const child of node._kids ?? []) { const result = callback(child); if (result) return result; }
+      return undefined;
+    },
+    getModifiers: (node) => node.modifiers,
+    canHaveModifiers: (node) => Array.isArray(node.modifiers),
+    isSourceFile: isKind(K.SourceFile),
+    isIdentifier: isKind(K.Identifier),
+    isStringLiteral: isKind(K.StringLiteral),
+    isImportDeclaration: isKind(K.ImportDeclaration),
+    isExportDeclaration: isKind(K.ExportDeclaration),
+    isExportAssignment: isKind(K.ExportAssignment),
+    isImportEqualsDeclaration: isKind(K.ImportEqualsDeclaration),
+    isFunctionDeclaration: isKind(K.FunctionDeclaration),
+    isClassDeclaration: isKind(K.ClassDeclaration),
+    isInterfaceDeclaration: isKind(K.InterfaceDeclaration),
+    isTypeAliasDeclaration: isKind(K.TypeAliasDeclaration),
+    isEnumDeclaration: isKind(K.EnumDeclaration),
+    isModuleDeclaration: isKind(K.ModuleDeclaration),
+    isVariableStatement: isKind(K.VariableStatement),
+    isImportSpecifier: isKind(K.ImportSpecifier),
+    isImportClause: isKind(K.ImportClause),
+    isNamespaceImport: isKind(K.NamespaceImport),
+    isExportSpecifier: isKind(K.ExportSpecifier),
+    isQualifiedName: isKind(K.QualifiedName),
+    isImportTypeNode: isKind(K.ImportType),
+    isLiteralTypeNode: isKind(K.LiteralType),
+    isPropertyAccessExpression: () => false,
+    isPropertySignature: () => false,
+    isMethodSignature: () => false,
+    isPropertyDeclaration: () => false,
+    isMethodDeclaration: () => false,
+    isParameter: () => false,
+    isEnumMember: () => false,
+  };
+  return ts;
 }
 
 // ---- writing declarations for entry points (--dts) --------------------------------------------------
@@ -607,43 +1190,60 @@ function emitNative(native, { entries, outDir, tsConfigPath }) {
 // from the folder the sources have in common. Files in node_modules are not described.
 function emit({ entries, outDir, tsConfigPath, bundle = false }) {
   const ts = loadTypeScript();
+  let native = null;
   if (!ts) {
-    const native = nativeTypeScript();
+    native = nativeTypeScript();
     if (!native) return { error: typescriptProblem };
-    if (bundle) return { error: `--dts-bundle merges declarations with the JavaScript API of typescript, which version ${native.version} does not have; install typescript 5 or 6 for it (--dts and --dts-dir work with ${native.version})` };
-    return emitNative(native, { entries, outDir, tsConfigPath });
+    if (!bundle) return emitNative(native, { entries, outDir, tsConfigPath });
   }
-  const options = compilerOptions(ts, tsConfigPath);
   const out = path.resolve(cwd, outDir);
-  // To bundle, the declarations of every file are written to a folder of ours first, and one file for each entry goes to `out`.
+  // To bundle, the declarations of every file are written to a folder of ours first, and one file for each entry goes to `out`. With
+  // TypeScript 7 its command line writes them, and the merge reads them with the reader of declaration files above.
   const target = bundle ? fs.mkdtempSync(path.join(os.tmpdir(), 'rathkit-dts-bundle-')) : out;
-  const program = ts.createProgram(entries, { ...options, declaration: true, emitDeclarationOnly: true, noEmit: false, outDir: target, declarationDir: undefined, declarationMap: false, sourceMap: false, composite: false, incremental: false, noEmitOnError: false, skipLibCheck: true, allowJs: true });
   let written = [];
-  const result = program.emit(undefined, (file, text) => {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, text);
-    written.push(path.relative(target, file).split(path.sep).join('/'));
-  });
-  const errors = ts.getPreEmitDiagnostics(program).filter((d) => d.category === ts.DiagnosticCategory.Error);
-  for (const d of errors.slice(0, 20)) {
-    const where = d.file ? `${path.relative(cwd, d.file.fileName)}:${d.file.getLineAndCharacterOfPosition(d.start).line + 1}: ` : '';
-    note(`${where}${ts.flattenDiagnosticMessageText(d.messageText, '\n').split('\n')[0]}`);
-  }
-  if (result.emitSkipped && !written.length) {
-    if (bundle) fs.rmSync(target, { recursive: true, force: true });
-    return { error: 'no declarations were written' };
-  }
-  if (bundle) {
-    try {
+  let errors = 0;
+  let common;
+  if (native) {
+    const done = emitNative(native, { entries, outDir: target, tsConfigPath });
+    if (done.error) {
+      fs.rmSync(target, { recursive: true, force: true });
+      return done;
+    }
+    errors = done.errors;
+    common = done.common;
+  } else {
+    const options = compilerOptions(ts, tsConfigPath);
+    const program = ts.createProgram(entries, { ...options, declaration: true, emitDeclarationOnly: true, noEmit: false, outDir: target, declarationDir: undefined, declarationMap: false, sourceMap: false, composite: false, incremental: false, noEmitOnError: false, skipLibCheck: true, allowJs: true });
+    const result = program.emit(undefined, (file, text) => {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, text);
+      written.push(path.relative(target, file).split(path.sep).join('/'));
+    });
+    const problems = ts.getPreEmitDiagnostics(program).filter((d) => d.category === ts.DiagnosticCategory.Error);
+    errors = problems.length;
+    for (const d of problems.slice(0, 20)) {
+      const where = d.file ? `${path.relative(cwd, d.file.fileName)}:${d.file.getLineAndCharacterOfPosition(d.start).line + 1}: ` : '';
+      note(`${where}${ts.flattenDiagnosticMessageText(d.messageText, '\n').split('\n')[0]}`);
+    }
+    if (result.emitSkipped && !written.length) {
+      if (bundle) fs.rmSync(target, { recursive: true, force: true });
+      return { error: 'no declarations were written' };
+    }
+    if (bundle) {
       // Where the files were put follows the folder the sources have in common.
       const sources = program.getSourceFiles().filter((f) => !f.isDeclarationFile && !program.isSourceFileFromExternalLibrary(f)).map((f) => path.dirname(f.fileName));
-      const common = sources.reduce((a, b) => {
+      common = sources.reduce((a, b) => {
         let dir = a;
         while (!(b + path.sep).startsWith(dir + path.sep) && dir !== path.dirname(dir)) dir = path.dirname(dir);
         return dir;
       }, sources[0] ?? cwd);
+    }
+  }
+  if (bundle) {
+    try {
       const names = new Set();
       const bundled = [];
+      const reader = ts ?? declarationReader();
       fs.mkdirSync(out, { recursive: true });
       for (const entry of entries) {
         const base = path.join(target, path.relative(common, entry).replace(/\.(tsx?|jsx?|mjs|cjs|mts|cts)$/, ''));
@@ -655,7 +1255,7 @@ function emit({ entries, outDir, tsConfigPath, bundle = false }) {
         }
         if (names.has(name)) return { error: `two entries would both be written as ${name}; give them different names` };
         names.add(name);
-        fs.writeFileSync(path.join(out, name), bundleDeclarations(ts, emitted));
+        fs.writeFileSync(path.join(out, name), bundleDeclarations(reader, emitted));
         bundled.push(name);
       }
       written = bundled;
@@ -666,16 +1266,18 @@ function emit({ entries, outDir, tsConfigPath, bundle = false }) {
     }
   }
   written.sort();
-  return { written, errors: errors.length };
+  return { written, errors };
 }
 
 async function generate({ name, exposes, outDir, tsConfigPath, typesFolder = '@mf-types', compiledTypesFolder = 'compiled-types', additionalFiles = [], generateApi = true, compilerInstance = 'tsc', extractThirdParty = false, extractRemoteTypes = false, hostTypesFolder = '@mf-types', afterGenerate = '' }) {
   const ts = loadTypeScript();
-  if (!ts) {
+  // TypeScript 7 has no JavaScript API; its command line writes the same declarations.
+  const native = ts ? null : nativeTypeScript();
+  if (!ts && !native) {
     note(`types were not written for the exposed modules: ${typescriptProblem}`);
     return { written: false };
   }
-  const options = compilerOptions(ts, tsConfigPath);
+  const options = ts ? compilerOptions(ts, tsConfigPath) : {};
   const files = exposes.map((e) => e.file);
   const rootFiles = [...files, ...additionalFiles];
   const rootDir = rootFiles.reduce((common, file) => {
@@ -688,7 +1290,21 @@ async function generate({ name, exposes, outDir, tsConfigPath, typesFolder = '@m
   const program_options = { declaration: true, emitDeclarationOnly: true, noEmit: false, outDir: compiled, rootDir, declarationMap: false, sourceMap: false, composite: false, incremental: false, noEmitOnError: false, skipLibCheck: true, allowJs: true };
   let diagnostics = [];
   let external = 0;
-  if (compilerInstance.trim() === 'tsc' || !compilerInstance.trim()) {
+  if (native && (compilerInstance.trim() === 'tsc' || !compilerInstance.trim())) {
+    const defaults = path.join(work, 'defaults.json');
+    fs.writeFileSync(defaults, JSON.stringify({ compilerOptions: { target: 'es2020', module: 'esnext', moduleResolution: 'bundler', jsx: 'react-jsx', esModuleInterop: true, allowJs: true, skipLibCheck: true } }));
+    const project = findConfigFile(tsConfigPath);
+    const tsconfig = path.join(work, 'tsconfig.mf.json');
+    fs.writeFileSync(tsconfig, JSON.stringify({ extends: project ? [defaults, project] : [defaults], compilerOptions: { ...program_options, noEmit: false }, files: rootFiles, include: [] }));
+    const result = spawnSync(process.execPath, [native.bin, '--project', tsconfig, '--pretty', 'false'], { cwd, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+    if (result.error) throw new Error(`the TypeScript compiler could not be run: ${result.error.message}`);
+    external = (`${result.stdout}${result.stderr}`.match(/error TS\d+/g) ?? []).length;
+    if (!fs.existsSync(compiled)) {
+      note(`no types were written: the TypeScript ${native.version} compiler wrote none${result.stdout ? ': ' + result.stdout.split('\n')[0] : ''}`);
+      fs.rmSync(work, { recursive: true, force: true });
+      return { written: false };
+    }
+  } else if (compilerInstance.trim() === 'tsc' || !compilerInstance.trim()) {
     const program = ts.createProgram(rootFiles, { ...options, ...program_options });
     const result = program.emit();
     diagnostics = ts.getPreEmitDiagnostics(program).filter((d) => d.category === ts.DiagnosticCategory.Error);
@@ -698,7 +1314,7 @@ async function generate({ name, exposes, outDir, tsConfigPath, typesFolder = '@m
       return { written: false };
     }
   } else {
-    const configPath = findConfig(ts, tsConfigPath);
+    const configPath = ts ? findConfig(ts, tsConfigPath) : findConfigFile(tsConfigPath);
     const tsconfig = path.join(work, 'tsconfig.mf.json');
     fs.writeFileSync(tsconfig, JSON.stringify({ ...(configPath ? { extends: configPath } : {}), compilerOptions: program_options, files: rootFiles, include: [] }));
     const result = runCompiler(compilerInstance, tsconfig);

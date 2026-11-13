@@ -72,6 +72,16 @@ jobs:
       # the gate needs no ruleset change. Update the baseline with `node tools/check-baseline.mjs --update` when the change is wanted.
       - if: matrix.baseline
         run: node tools/check-baseline.mjs
+      # The optional checker (roadmap 2.12) is its own crate of the workspace: its tests, and a build of rkp with and without it that must
+      # give the same size. One leg runs the build comparison (it builds rkp twice).
+      - run: cargo test --release -p rathkit-check
+      - if: matrix.baseline
+        run: node tools/check-rkp-size.mjs
+      # The checker against TypeScript's own diagnostics: no false positive on the repository's files and on mutated copies of them.
+      - if: matrix.baseline
+        run: |
+          cargo build --release -p rathkit-check
+          node tools/diff-check.mjs --check target/release/rkp-check --ts "$TS_MODULE" --seeds tests --mutants 20
       # A step that runs out of time ends with its log kept (a job that runs out of time loses it), and cargo names a test that runs over 60 seconds.
       - run: cargo test --release
         timeout-minutes: 20
@@ -80,10 +90,12 @@ jobs:
       - run: node tools/run-loaders.mjs
       - run: node tools/run-plugins.mjs
       - run: node tools/run-assets.mjs
+      - run: node tools/run-css.mjs
       - run: node tools/run-target.mjs
       - run: node tools/test-npm-wrapper.mjs
       - run: node tools/check-promises.mjs
       - run: node tools/run-split.mjs
+      - run: node tools/run-library.mjs
       - run: node tools/run-sourcemaps.mjs
       - run: node tools/run-watch.mjs
       - run: node tools/run-serve.mjs
@@ -207,10 +219,12 @@ jobs:
       - run: node tools/run-loaders.mjs
       - run: node tools/run-plugins.mjs
       - run: node tools/run-assets.mjs
+      - run: node tools/run-css.mjs
       - run: node tools/run-target.mjs
       - run: node tools/test-npm-wrapper.mjs
       - run: node tools/check-promises.mjs
       - run: node tools/run-split.mjs
+      - run: node tools/run-library.mjs
       - run: node tools/run-sourcemaps.mjs
       - run: node tools/run-watch.mjs
       - run: node tools/run-serve.mjs

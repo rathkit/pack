@@ -44,6 +44,8 @@ pub struct Options {
     /// name an anonymous function or class (`const f = () => {}`).
     /// `None` leaves the choice to the caller.
     pub keep_names: Option<bool>,
+    /// The output is es5: syntax of es2015 (template literals) is not written.
+    pub legacy: bool,
 }
 
 impl Options {
@@ -98,7 +100,7 @@ fn run(source: &str, options: &Options, anchors: Option<&mut Vec<Anchor>>, barri
     // Which tokens the syntax rewrites change does not depend on the names, so the two plans
     // are made side by side.
     let plan = std::thread::scope(|scope| {
-        let syntax = options.syntax.then(|| scope.spawn(|| crate::compress::plan(source, &parsed.ast, &parsed.semantic, tokens, barriers)));
+        let syntax = options.syntax.then(|| scope.spawn(|| crate::compress::plan(source, &parsed.ast, &parsed.semantic, tokens, barriers, options.legacy)));
         if options.any() {
             facts.collect(&parsed.ast, &parsed.semantic, source);
             lap("collect facts");
@@ -112,6 +114,7 @@ fn run(source: &str, options: &Options, anchors: Option<&mut Vec<Anchor>>, barri
         }
         syntax.map(|handle| handle.join().expect("the syntax plan"))
     });
+    plan_private_names(tokens, source, &parsed.semantic, options, &mut renames);
     lap("plans done");
     let out = emit(source, tokens, &renames, &asi, &facts, options, plan.as_ref(), anchors, false);
     lap("emit");
@@ -756,6 +759,34 @@ const FIRST: &[u8] = b"etnrisouaflchpdvmgybwkxqjzETNRISOUAFLCHPDVMGYBWKXQJZ_$";
 const REST: &[u8] = b"etnrisouaflchpdvmgybwkxqjzETNRISOUAFLCHPDVMGYBWKXQJZ_$0123456789";
 
 /// The `index`th name: all one-letter names, then two letters, and so on.
+/// Names `#field` and `#method()` of classes: the same name everywhere in the text is written the same short way (most used first), which
+/// keeps what each use refers to, as every private name is looked up in the class that declares it. Left alone where the name can be seen
+/// (a direct `eval` can use it, and `keep_names` keeps what a function is called).
+fn plan_private_names(tokens: &[Token], source: &str, sem: &Semantic, options: &Options, renames: &mut Renames) {
+    if !options.identifiers || options.keep_names == Some(true) || sem.scope(sem.root_scope()).flags & scope_flags::HAS_EVAL != 0 {
+        return;
+    }
+    let mut counts: HashMap<&str, (usize, usize)> = HashMap::default();
+    let mut order: Vec<&str> = Vec::new();
+    for tok in tokens.iter().filter(|t| t.kind == Kind::PrivateName) {
+        let text = &source[tok.start as usize..tok.end as usize];
+        let entry = counts.entry(text).or_insert_with(|| {
+            order.push(text);
+            (0, order.len())
+        });
+        entry.0 += 1;
+    }
+    if order.is_empty() {
+        return;
+    }
+    order.sort_by_key(|n| (std::cmp::Reverse(counts[n].0), counts[n].1));
+    let names: HashMap<&str, String> = order.iter().enumerate().map(|(i, &n)| (n, format!("#{}", name_at(i)))).collect();
+    for tok in tokens.iter().filter(|t| t.kind == Kind::PrivateName) {
+        let text = &source[tok.start as usize..tok.end as usize];
+        renames.set(tokens, tok.start, &names[text]);
+    }
+}
+
 fn name_at(mut index: usize) -> String {
     let mut out = String::new();
     if index < FIRST.len() {
@@ -980,6 +1011,39 @@ fn is_void_zero(ast: &Ast, n: NodeId) -> bool {
 }
 
 /// The children of `side` in source order; with `syntax`, runs of declarations of one kind in
+/// `if (a) return; b(); c();` written as the expression statement `a||(b(),c())`: the pairs of nodes that must match, if it is that.
+fn guard_pairs(a: &parser::Parsed, b: &parser::Parsed, test: NodeId, cons: NodeId, rest: &[NodeId], ey: NodeId) -> Option<Vec<(NodeId, NodeId)>> {
+    use crate::ast::BinOp::{LogAnd, LogOr};
+    let plain = |s: NodeId| matches!(a.ast[s].kind, NodeKind::Return(None) | NodeKind::Continue(None));
+    let jump = match a.ast[cons].kind {
+        NodeKind::Block(list) => matches!(a.ast.list(list), [only] if plain(*only)),
+        _ => plain(cons),
+    };
+    let NodeKind::Binary { op: op @ (LogOr | LogAnd), left, right } = b.ast[ey].kind else { return None };
+    if !jump || rest.is_empty() || rest.iter().any(|&r| !matches!(a.ast[r].kind, NodeKind::ExprStmt(_)) || a.ast[r].has(flags::DIRECTIVE)) {
+        return None;
+    }
+    let mut from = Vec::new();
+    for &r in rest {
+        if let NodeKind::ExprStmt(e) = a.ast[r].kind {
+            flatten_sequence(&a.ast, e, &mut from);
+        }
+    }
+    let mut to = Vec::new();
+    flatten_sequence(&b.ast, right, &mut to);
+    let condition = match (op, &a.ast[test].kind) {
+        (LogAnd, NodeKind::Unary { op: crate::ast::UnaryOp::Not, arg }) => *arg,
+        (LogOr, _) => test,
+        _ => return None,
+    };
+    if from.len() != to.len() {
+        return None;
+    }
+    let mut pairs = vec![(condition, left)];
+    pairs.extend(from.into_iter().zip(to));
+    Some(pairs)
+}
+
 /// a statement list count as one declaration (the minifier joins them).
 fn children(parsed: &parser::Parsed, side: &Side, syntax: bool, original: bool) -> Vec<Side> {
     let ast = &parsed.ast;
@@ -988,6 +1052,11 @@ fn children(parsed: &parser::Parsed, side: &Side, syntax: bool, original: bool) 
     }
     let mut kids = Vec::new();
     ast.for_each_child(side.id, |c| kids.push(c));
+    if let (true, true, NodeKind::Switch { cases, .. }) = (syntax, original, ast[side.id].kind) {
+        // `case 1: default:` is `default:`.
+        let gone = crate::compress::redundant_cases(ast, cases);
+        kids.retain(|k| !gone.contains(k));
+    }
     let is_list = matches!(ast[side.id].kind, NodeKind::Program(_) | NodeKind::Block(_) | NodeKind::StaticBlock(_) | NodeKind::Case { .. });
     if !(syntax && is_list) {
         return kids.into_iter().map(Side::node).collect();
@@ -1032,6 +1101,8 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
     let b = parser::parse(&minified, ParseOptions::new(true)).map_err(|e| format!("minified: {e}"))?;
     let mut forward: HashMap<SymbolId, SymbolId> = HashMap::default();
     let mut backward: HashMap<SymbolId, SymbolId> = HashMap::default();
+    let mut private_forward: HashMap<&str, &str> = HashMap::default();
+    let mut private_backward: HashMap<&str, &str> = HashMap::default();
     let mut stack = vec![(Side::node(a.ast.root), Side::node(b.ast.root))];
     'pairs: while let Some((mut sx, sy)) = stack.pop() {
         let ny = &b.ast[sy.id];
@@ -1121,6 +1192,55 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                             flatten_sequence(&b.ast, branch, &mut to);
                             (from.len() == to.len()).then(|| from.into_iter().zip(to).collect())
                         };
+                        // An `else if` written as the last branch of the conditional: `a?b:c?d:e`.
+                        fn chain(a: &parser::Parsed, b: &parser::Parsed, s: NodeId, e: NodeId, out: &mut Vec<(NodeId, NodeId)>) -> bool {
+                            let single = |s: NodeId| -> Option<NodeId> {
+                                match a.ast[s].kind {
+                                    NodeKind::ExprStmt(x) => Some(x),
+                                    NodeKind::Block(list) if a.ast.list(list).len() == 1 => match a.ast[a.ast.list(list)[0]].kind {
+                                        NodeKind::ExprStmt(x) => Some(x),
+                                        _ => None,
+                                    },
+                                    _ => None,
+                                }
+                            };
+                            let body = |s: NodeId, e: NodeId, out: &mut Vec<(NodeId, NodeId)>| -> bool {
+                                if let Some(x) = single(s) {
+                                    out.push((x, e));
+                                    true
+                                } else if matches!(a.ast[s].kind, NodeKind::If { .. }) {
+                                    chain(a, b, s, e, out)
+                                } else {
+                                    false
+                                }
+                            };
+                            match (&a.ast[s].kind, &b.ast[e].kind) {
+                                (NodeKind::If { test, cons, alt: Some(alt) }, NodeKind::Conditional { test: ct, cons: cc, alt: ca }) => {
+                                    out.push((*test, *ct));
+                                    body(*cons, *cc, out) && body(*alt, *ca, out)
+                                }
+                                (NodeKind::If { test, cons, alt: None }, NodeKind::Binary { op: crate::ast::BinOp::LogAnd, left, right }) => {
+                                    out.push((*test, *left));
+                                    body(*cons, *right, out)
+                                }
+                                (NodeKind::If { test, cons, alt: None }, NodeKind::Binary { op: crate::ast::BinOp::LogOr, left, right }) => {
+                                    let NodeKind::Unary { op: crate::ast::UnaryOp::Not, arg } = a.ast[*test].kind else { return false };
+                                    out.push((arg, *left));
+                                    body(*cons, *right, out)
+                                }
+                                _ => false,
+                            }
+                        }
+                        let mut chained = Vec::new();
+                        if matches!(a.ast[*alt].kind, NodeKind::If { .. }) && chain(&a, &b, *alt, *ca_, &mut chained) {
+                            if let Some(c) = parts(*cons, *cc) {
+                                stack.push((Side::node(*test), Side::node(*ct)));
+                                for (x, y) in c.into_iter().chain(chained) {
+                                    stack.push((Side::node(x), Side::node(y)));
+                                }
+                                continue;
+                            }
+                        }
                         if let (Some(c), Some(e)) = (parts(*cons, *cc), parts(*alt, *ca_)) {
                             stack.push((Side::node(*test), Side::node(*ct)));
                             for (x, y) in c.into_iter().chain(e) {
@@ -1131,6 +1251,15 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                     }
                     _ => {}
                 },
+                // `a === null || a === void 0` as `a == null`.
+                (NodeKind::Binary { op: crate::ast::BinOp::LogOr | crate::ast::BinOp::LogAnd, .. }, NodeKind::Binary { op: crate::ast::BinOp::Eq | crate::ast::BinOp::Ne, left: lb, right: rb })
+                    if crate::compress::nullish_pair(&a.ast, &a.semantic, x).is_some() && (matches!(b.ast[*rb].kind, NodeKind::Null) || matches!(b.ast[*lb].kind, NodeKind::Null)) =>
+                {
+                    let pair = crate::compress::nullish_pair(&a.ast, &a.semantic, x).expect("a pair");
+                    let name = if matches!(b.ast[*rb].kind, NodeKind::Null) { *lb } else { *rb };
+                    stack.push((Side::node(pair.operand), Side::node(name)));
+                    continue;
+                }
                 (NodeKind::Binary { op, left, right }, NodeKind::Binary { op: ob, left: lb, right: rb }) => {
                     use crate::ast::BinOp::*;
                     let is_undefined_text = matches!(a.ast[*right].kind, NodeKind::Str(t) if a.ast.atom(t) == "undefined") && matches!(b.ast[*rb].kind, NodeKind::Str(t) if b.ast.atom(t) == "u");
@@ -1140,6 +1269,20 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                     }
                 }
                 // `{ a(); b(); }` as `a(), b();`, and `{ a(); return b; }` as `return a(), b;` (`throw` too): the statements are the parts of a sequence.
+                (NodeKind::Block(list), NodeKind::ExprStmt(ey))
+                    if matches!(a.ast.list(*list).first().map(|&f| &a.ast[f].kind), Some(NodeKind::If { alt: None, .. })) && {
+                        let items = a.ast.list(*list);
+                        matches!(a.ast[items[0]].kind, NodeKind::If { test, cons, .. } if guard_pairs(&a, &b, test, cons, &items[1..], *ey).is_some())
+                    } =>
+                {
+                    let items = a.ast.list(*list);
+                    if let NodeKind::If { test, cons, .. } = a.ast[items[0]].kind {
+                        for (p, q) in guard_pairs(&a, &b, test, cons, &items[1..], *ey).expect("a guard") {
+                            stack.push((Side::node(p), Side::node(q)));
+                        }
+                    }
+                    continue;
+                }
                 (NodeKind::Block(list), NodeKind::ExprStmt(_) | NodeKind::Return(Some(_)) | NodeKind::Throw(_)) if a.ast.list(*list).len() > 1 => {
                     let joined = match ny.kind {
                         NodeKind::ExprStmt(e) | NodeKind::Return(Some(e)) | NodeKind::Throw(e) => e,
@@ -1166,25 +1309,32 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                     }
                     continue;
                 }
-                // `if (c) return a; else return b;` that stands alone (the body of an `else`) written as `return c ? a : b;`.
-                (NodeKind::If { test, cons, alt: Some(alt) }, NodeKind::Return(Some(joined))) => {
-                    if let NodeKind::Conditional { test: ct, cons: cc, alt: ca_ } = &b.ast[*joined].kind {
-                        let returned = |s: NodeId| -> Option<NodeId> {
-                            match a.ast[s].kind {
-                                NodeKind::Return(Some(arg)) => Some(arg),
-                                NodeKind::Block(list) if a.ast.list(list).len() == 1 => match a.ast[a.ast.list(list)[0]].kind {
-                                    NodeKind::Return(Some(arg)) => Some(arg),
-                                    _ => None,
-                                },
-                                _ => None,
+                // `if (c) return a; else return b;` that stands alone (the body of an `else`) written as `return c ? a : b;`, and an `else if` that is
+                // joined the same way is the conditional in its place.
+                (NodeKind::If { alt: Some(_), .. }, NodeKind::Return(Some(joined))) => {
+                    fn pairs(a: &parser::Parsed, b: &parser::Parsed, s: NodeId, e: NodeId, out: &mut Vec<(NodeId, NodeId)>) -> bool {
+                        match a.ast[s].kind {
+                            NodeKind::Return(Some(arg)) => {
+                                out.push((arg, e));
+                                true
                             }
-                        };
-                        if let (Some(first), Some(second)) = (returned(*cons), returned(*alt)) {
-                            stack.push((Side::node(*test), Side::node(*ct)));
-                            stack.push((Side::node(first), Side::node(*cc)));
-                            stack.push((Side::node(second), Side::node(*ca_)));
-                            continue;
+                            NodeKind::Block(list) if a.ast.list(list).len() == 1 => pairs(a, b, a.ast.list(list)[0], e, out),
+                            NodeKind::If { test, cons, alt: Some(alt) } => match b.ast[e].kind {
+                                NodeKind::Conditional { test: ct, cons: cc, alt: ca } => {
+                                    out.push((test, ct));
+                                    pairs(a, b, cons, cc, out) && pairs(a, b, alt, ca, out)
+                                }
+                                _ => false,
+                            },
+                            _ => false,
                         }
+                    }
+                    let mut found = Vec::new();
+                    if matches!(b.ast[*joined].kind, NodeKind::Conditional { .. }) && pairs(&a, &b, x, *joined, &mut found) {
+                        for (from, to) in found {
+                            stack.push((Side::node(from), Side::node(to)));
+                        }
+                        continue;
                     }
                 }
                 // `-Infinity` as `-1/0`: the sign goes with the one.
@@ -1239,6 +1389,12 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                 let NodeKind::Num(nb) = ny.kind else { unreachable!() };
                 if na.get().to_bits() != nb.get().to_bits() {
                     return Err(format!("number {} became {}", na.get(), nb.get()));
+                }
+            }
+            NodeKind::PrivateName(_) if options.identifiers => {
+                let (ta, tb) = (&source[nx.span.start as usize..nx.span.end as usize], &minified[ny.span.start as usize..ny.span.end as usize]);
+                if private_forward.entry(ta).or_insert(tb) != &tb || private_backward.entry(tb).or_insert(ta) != &ta {
+                    return Err(format!("private name `{ta}` at {} no longer denotes the same name (now `{tb}`)", nx.span.start));
                 }
             }
             NodeKind::PropName(_) | NodeKind::PrivateName(_) | NodeKind::Str(_) | NodeKind::Num(_) | NodeKind::BigInt(_) | NodeKind::Regex | NodeKind::TemplateElement { .. } | NodeKind::Bool(_) => {
@@ -1310,6 +1466,20 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                 let Some(other) = cb.get(j) else {
                     return Err(format!("{:?} at {} has more children than the result", nx.kind, nx.span.start));
                 };
+                // `if (a) return; b(); c();` at the end of a body written as `a||(b(),c());`, and `continue` the same way.
+                if in_list && item.declarators.is_none() {
+                    if let (NodeKind::If { test, cons, alt: None }, NodeKind::ExprStmt(ey)) = (&a.ast[item.id].kind, &b.ast[other.id].kind) {
+                        let rest: Vec<NodeId> = ca[i..].iter().filter(|r| r.declarators.is_none()).map(|r| r.id).collect();
+                        if rest.len() == ca.len() - i {
+                            if let Some(pairs) = guard_pairs(&a, &b, *test, *cons, &rest, *ey) {
+                                aligned.extend(pairs.into_iter().map(|(x, y)| (Side::node(x), Side::node(y))));
+                                i = ca.len();
+                                j += 1;
+                                continue;
+                            }
+                        }
+                    }
+                }
                 // `if (c) return a; return b;` and `if (c) return a; else return b;` written as `return c ? a : b;`.
                 if in_list && item.declarators.is_none() {
                     if let (NodeKind::If { test, cons, alt }, NodeKind::Return(Some(joined))) = (&a.ast[item.id].kind, &b.ast[other.id].kind) {
@@ -1324,6 +1494,59 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                                     _ => None,
                                 }
                             };
+                            // `if (a) return 1; else if (b) return 2; return 3;`: the `else if` chain goes on in the branch, the return after it ends it.
+                            if let Some(alt_if) = alt.filter(|x| matches!(a.ast[*x].kind, NodeKind::If { .. })) {
+                                fn walk(a: &parser::Parsed, b: &parser::Parsed, s: NodeId, e: NodeId, out: &mut Vec<(Side, Side)>) -> Option<Option<NodeId>> {
+                                    let ret = |s: NodeId| -> Option<NodeId> {
+                                        match a.ast[s].kind {
+                                            NodeKind::Return(Some(arg)) => Some(arg),
+                                            NodeKind::Block(list) if a.ast.list(list).len() == 1 => match a.ast[a.ast.list(list)[0]].kind {
+                                                NodeKind::Return(Some(arg)) => Some(arg),
+                                                _ => None,
+                                            },
+                                            _ => None,
+                                        }
+                                    };
+                                    let NodeKind::If { test, cons, alt } = a.ast[s].kind else { return None };
+                                    let NodeKind::Conditional { test: ct, cons: cc, alt: ca } = b.ast[e].kind else { return None };
+                                    out.push((Side::node(test), Side::node(ct)));
+                                    out.push((Side::node(ret(cons)?), Side::node(cc)));
+                                    match alt {
+                                        None => Some(Some(ca)),
+                                        Some(alt) if matches!(a.ast[alt].kind, NodeKind::If { .. }) => walk(a, b, alt, ca, out),
+                                        Some(alt) => {
+                                            out.push((Side::node(ret(alt)?), Side::node(ca)));
+                                            Some(None)
+                                        }
+                                    }
+                                }
+                                let mut pairs = Vec::new();
+                                if let Some(first) = returned(*cons) {
+                                    pairs.push((Side::node(*test), Side::node(*ct)));
+                                    pairs.push((Side::node(first), Side::node(*cc)));
+                                    let rest = walk(&a, &b, alt_if, *ca_, &mut pairs);
+                                    let extra = match rest {
+                                        Some(None) => Some(0),
+                                        Some(Some(target)) => match ca.get(i) {
+                                            Some(next) if next.declarators.is_none() => match a.ast[next.id].kind {
+                                                NodeKind::Return(Some(arg)) => {
+                                                    pairs.push((Side::node(arg), Side::node(target)));
+                                                    Some(1)
+                                                }
+                                                _ => None,
+                                            },
+                                            _ => None,
+                                        },
+                                        None => None,
+                                    };
+                                    if let Some(extra) = extra {
+                                        aligned.extend(pairs);
+                                        i += extra;
+                                        j += 1;
+                                        continue;
+                                    }
+                                }
+                            }
                             let second = match alt {
                                 Some(alt) => returned(*alt).map(|arg| (arg, 0)),
                                 None => ca.get(i).and_then(|next| match a.ast[next.id].kind {
@@ -1397,8 +1620,8 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    const ALL: Options = Options { whitespace: true, identifiers: true, syntax: false, keep_top_level: false, keep_names: None };
-    const SYNTAX: Options = Options { whitespace: true, identifiers: true, syntax: true, keep_top_level: false, keep_names: None };
+    const ALL: Options = Options { whitespace: true, identifiers: true, syntax: false, keep_top_level: false, keep_names: None, legacy: false };
+    const SYNTAX: Options = Options { whitespace: true, identifiers: true, syntax: true, keep_top_level: false, keep_names: None, legacy: false };
 
     fn min(source: &str) -> String {
         verify(source, &ALL).unwrap_or_else(|e| panic!("{e}\n{source}"));
@@ -1545,7 +1768,40 @@ mod tests {
         assert_eq!(syntax("if (a) { b() } else { c() }"), "a?b():c()");
         // No shorter, or not the same: left alone.
         assert_eq!(syntax("if (a || b) c(); if (a) b = 1; if (a) b(), c()"), "if(a||b)c();if(a)b=1;if(a)b(),c()");
-        assert_eq!(syntax("if (a) b(); else if (c) d()"), "if(a)b();else c&&d()");
+        assert_eq!(syntax("if (a) b(); else if (c) d()"), "a?b():c&&d()");
+    }
+
+    #[test]
+    fn else_if_chains_are_one_expression() {
+        assert_eq!(syntax("function f(a, b) { if (a) x(); else if (b) y(); else z(); }"), "function f(a,b){a?x():b?y():z()}");
+        assert_eq!(syntax("function f(a, b) { if (a) x(); else if (b) y(); }"), "function f(a,b){a?x():b&&y()}");
+        assert_eq!(syntax("function f(a, b) { if (a) return 1; else if (b) return 2; else return 3; }"), "function f(a,b){return a?1:b?2:3}");
+        assert_eq!(syntax("function f(a, b) { if (a) return 1; else if (b) return 2; return 3; }"), "function f(a,b){return a?1:b?2:3}");
+    }
+
+    #[test]
+    fn cases_that_fall_into_default_go() {
+        assert_eq!(syntax("function f(x) { switch (x) { case 'a': case 'b': default: return 1; case 'c': return 2 } }"), "function f(x){switch(x){default:return 1;case'c':return 2}}");
+        // Not when something stands between, or the case has code, or is not a plain literal, or default comes first.
+        assert_eq!(syntax("function f(x) { switch (x) { case 'a': g(); case 'b': default: return 1 } }"), "function f(x){switch(x){case'a':g();default:return 1}}");
+        assert_eq!(syntax("function f(x) { switch (x) { case y: default: return 1 } }"), "function f(x){switch(x){case y:default:return 1}}");
+        assert_eq!(syntax("function f(x) { switch (x) { default: case 'a': return 1 } }"), "function f(x){switch(x){default:case'a':return 1}}");
+    }
+
+    #[test]
+    fn a_guard_at_the_end_of_a_body_is_a_condition() {
+        assert_eq!(syntax("function f(a, b) { if (a) return; b(); c(); }"), "function f(a,b){a||(b(),c())}");
+        assert_eq!(syntax("function f(a, b) { if (!a) return; b(); }"), "function f(a,b){a&&b()}");
+        assert_eq!(syntax("function f(a, b) { x(); if (a === 1) return; b = 2; }"), "function f(a,b){x();a===1||(b=2)}");
+        assert_eq!(syntax("function f(a, b) { for (const x of a) { if (x.skip) continue; b(x); } }"), "function f(a,b){for(let x of a)x.skip||b(x)}");
+        assert_eq!(syntax("function f(a, b) { for (const x of a) { if (!x) continue; b(x); b(x + 1); } }"), "function f(a,b){for(let x of a)x&&(b(x),b(x+1));}");
+        assert_eq!(syntax("function f(a, b) { for (const x of a) { g(x); if (!x) continue; b(x); } }"), "function f(a,b){for(let x of a){g(x);x&&b(x)}}");
+        // Not when something other than expressions follows, with a value, with a label, or where `return` would not be the end.
+        assert_eq!(syntax("function f(a, b) { if (a) return; let c = 1; b(c); }"), "function f(a,b){if(a)return;let c=1;b(c)}");
+        assert_eq!(syntax("function f(a, b) { if (a) return 1; b(); }"), "function f(a,b){if(a)return 1;b()}");
+        assert_eq!(syntax("function f(a, b) { for (const x of a) { if (x) return; b(x); } }"), "function f(a,b){for(let x of a){if(x)return;b(x)}}");
+        assert_eq!(syntax("function f(a, b) { l: for (const x of a) { if (x) continue l; b(x); } }"), "function f(a,b){l:for(let x of a){if(x)continue l;b(x)}}");
+        assert_eq!(syntax("function f(a, b) { if (a ?? b) return; b(); }"), "function f(a,b){if(a??b)return;b()}");
     }
 
     #[test]
@@ -1557,7 +1813,38 @@ mod tests {
 
     #[test]
     fn typeof_undefined_is_compared_by_order() {
-        assert_eq!(syntax("x = typeof a === 'undefined'; y = typeof b != \"undefined\"; z = typeof c === 'string'"), "x=typeof a>\"u\";y=typeof b<\"u\";z=typeof c==='string'");
+        assert_eq!(syntax("x = typeof a === 'undefined'; y = typeof b != \"undefined\"; z = typeof c === 'string'"), "x=typeof a>\"u\";y=typeof b<\"u\";z=typeof c=='string'");
+    }
+
+    #[test]
+    fn strict_equality_of_two_strings_is_loose() {
+        assert_eq!(syntax("x = typeof a === 'string' || 'number' === typeof b || typeof a !== 'object' || typeof a === typeof b"), "x=typeof a=='string'||'number'==typeof b||typeof a!='object'||typeof a==typeof b");
+        // A value that is not known to be a string keeps the strict operator.
+        assert_eq!(syntax("x = a === 'string' || typeof a === b || (typeof a) === 'x'"), "x=a==='string'||typeof a===b||typeof a==='x'");
+    }
+
+    #[test]
+    fn trailing_commas_go_but_holes_stay() {
+        assert_eq!(syntax("f(a, b,); x = {a: 1, b: 2,}; y = [1, 2,]; z = [1, , ]; w = [, ]; function g(a, b,) {}"), "f(a,b);x={a:1,b:2};y=[1,2];z=[1,,];w=[,];function g(a,b){}");
+    }
+
+    #[test]
+    fn a_number_key_in_brackets_is_a_plain_key() {
+        assert_eq!(syntax("x = {[0]: 'a', [1.5]: 'b', ['s']: 'c', [k]: 'd'}"), "x={0:'a',1.5:'b',['s']:'c',[k]:'d'}");
+    }
+
+    #[test]
+    fn private_names_get_short_names() {
+        let options = Options { whitespace: true, identifiers: true, syntax: true, ..Options::default() };
+        let source = "class A { #count = 0; #items = []; static #made = 0; #bump() { this.#count++; } add(x) { this.#items.push(x); this.#bump(); return #count in this; } }";
+        verify(source, &options).unwrap_or_else(|e| panic!("{e}"));
+        let out = minify(source, &options).unwrap();
+        assert!(!out.contains("#count") && !out.contains("#items") && !out.contains("#bump") && !out.contains("#made"), "{out}");
+        // The same name is written the same way, and different names differently.
+        let kept = minify(source, &Options { keep_names: Some(true), ..options }).unwrap();
+        assert!(kept.contains("#count"), "{kept}");
+        let with_eval = minify("class A { #x = 1; get() { return eval('this.#x'); } }", &options).unwrap();
+        assert!(with_eval.contains("#x"), "{with_eval}");
     }
 
     #[test]

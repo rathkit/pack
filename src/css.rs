@@ -25,6 +25,8 @@ pub struct Ref {
     pub specifier: String,
     /// For an import: what follows the specifier (`screen`, `layer(a)`, `supports(...)`).
     pub conditions: String,
+    /// For a `url()`: the query and fragment that go back after the address of the bundled file (`?#iefix`, `#icon`).
+    pub suffix: String,
 }
 
 #[derive(Debug)]
@@ -44,11 +46,19 @@ enum Piece {
     Composes(Vec<(usize, usize)>),
     /// `composes: a b from "file"`: the words, and the reference to the file.
     ComposesFrom(Vec<(usize, usize)>, usize),
+    /// A use of a name `@value` defines.
+    Value(usize, usize),
+    /// `@value a, b as c from "file"`: (name there, name here) for each, and the reference to the file; the rule is left out.
+    ValueFrom(Vec<(String, String)>, usize),
+    /// `:export { a: b }`: the pairs, and the rule is left out.
+    Export(Vec<(String, String)>),
 }
 
 pub struct Parsed {
     pieces: Vec<Piece>,
     pub refs: Vec<Ref>,
+    /// What the sheet's own `@value` rules define (a later one may use an earlier one), as `(name, value)`.
+    pub values: Vec<(String, String)>,
 }
 
 fn is_ident_char(c: char) -> bool {
@@ -69,11 +79,137 @@ fn is_loadable(spec: &str) -> bool {
     !(scheme.contains(':') && !scheme.starts_with('.'))
 }
 
+/// CSS escapes undone: `a\.png` is `a.png`, `\41 b` is `Ab`.
+fn unescape(text: &str) -> String {
+    if !text.contains('\\') {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek().copied() {
+            Some(h) if h.is_ascii_hexdigit() => {
+                let mut code = 0u32;
+                let mut n = 0;
+                while n < 6 {
+                    match chars.peek().and_then(|d| d.to_digit(16)) {
+                        Some(d) => {
+                            code = code * 16 + d;
+                            chars.next();
+                            n += 1;
+                        }
+                        None => break,
+                    }
+                }
+                if chars.peek().is_some_and(|w| w.is_ascii_whitespace()) {
+                    chars.next();
+                }
+                out.push(char::from_u32(code).filter(|&c| c != '\0').unwrap_or('\u{fffd}'));
+            }
+            Some('\n') => {
+                chars.next();
+            }
+            Some(other) => {
+                out.push(other);
+                chars.next();
+            }
+            None => {}
+        }
+    }
+    out
+}
+
+/// What a `url()` asks for, as `(specifier, suffix)`: the file is looked for without its `#fragment` and `?query`, which go back after the
+/// address of the bundled file (`font.eot?#iefix`, `icons.svg#home`). A query that picks a loader (`?raw`, `?url`, `?inline`) belongs to the
+/// specifier. A leading `~` (the old way to say "a package") is dropped, and a bare `x` is `./x`.
+fn url_target(spec: &str) -> Option<(String, String)> {
+    let (rest, fragment) = match spec.find('#') {
+        Some(p) => (&spec[..p], &spec[p..]),
+        None => (spec, ""),
+    };
+    let (path, query) = match rest.find('?') {
+        Some(p) => (&rest[..p], &rest[p..]),
+        None => (rest, ""),
+    };
+    if path.trim().is_empty() {
+        return None;
+    }
+    let loader_query = query.len() > 1 && query[1..].split('&').any(|part| matches!(part.split('=').next(), Some("raw" | "url" | "inline")));
+    let (path, suffix) = if loader_query { (format!("{path}{query}"), fragment.to_string()) } else { (path.to_string(), format!("{query}{fragment}")) };
+    let specifier = if let Some(package) = path.strip_prefix('~').filter(|p| !p.starts_with('/')) {
+        package.to_string()
+    } else if path.starts_with("./") || path.starts_with("../") || path.starts_with('/') {
+        path
+    } else {
+        format!("./{path}")
+    };
+    Some((specifier, suffix))
+}
+
+/// The wrappers an `@import`'s conditions stand for, outermost first: `layer(base) supports(display: grid) screen` is
+/// `@layer base`, `@supports (display: grid)` and `@media screen`.
+pub fn import_wrappers(conditions: &str) -> Vec<String> {
+    let mut rest = conditions.trim();
+    let mut out = Vec::new();
+    let balanced = |text: &str| -> Option<usize> {
+        // `text` starts after the `(`: where its `)` is.
+        let mut depth = 1;
+        for (i, c) in text.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    };
+    if starts_word(rest, "layer") {
+        let after = &rest[5..];
+        if let Some(inner) = after.strip_prefix('(') {
+            if let Some(close) = balanced(inner) {
+                out.push(format!("@layer {}", inner[..close].trim()));
+                rest = inner[close + 1..].trim_start();
+            }
+        } else {
+            out.push("@layer".to_string());
+            rest = after.trim_start();
+        }
+    }
+    if rest.len() >= 9 && rest[..9].eq_ignore_ascii_case("supports(") {
+        let inner = &rest[9..];
+        if let Some(close) = balanced(inner) {
+            let condition = inner[..close].trim();
+            let lower = condition.to_ascii_lowercase();
+            let is_condition = condition.starts_with('(') || (lower.starts_with("not") && condition[3..].starts_with(|c: char| c.is_whitespace() || c == '(')) || ["selector(", "font-tech(", "font-format("].iter().any(|f| lower.starts_with(f));
+            out.push(if is_condition { format!("@supports {condition}") } else { format!("@supports ({condition})") });
+            rest = inner[close + 1..].trim_start();
+        }
+    }
+    if !rest.is_empty() {
+        out.push(format!("@media {rest}"));
+    }
+    out
+}
+
 /// Splits `text`. With `local`, class names, ids and keyframe names in selectors are marked.
 pub fn parse(text: &str, local: bool) -> Result<Parsed, String> {
     let bytes = text.as_bytes();
     let mut pieces: Vec<Piece> = Vec::new();
     let mut refs: Vec<Ref> = Vec::new();
+    // `@value` names: the ones this sheet defines with what they stand for, and every name a use may be of (those imported too).
+    let mut values: Vec<(String, String)> = Vec::new();
+    let mut value_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // The paren depth of an open `image-set(`, where a bare string is a `url()`.
+    let mut image_set: Option<usize> = None;
     let mut raw_from = 0;
     let mut i = 0;
     // What a selector would change, found since the last `;`, `{` or `}`; it counts only if a
@@ -126,13 +262,31 @@ pub fn parse(text: &str, local: bool) -> Result<Parsed, String> {
                     }
                     j += 1;
                 }
+                let j = j.min(bytes.len());
+                // `image-set("a.png" 1x)`: a string there is a file, as `url("a.png")` would be.
+                if image_set == Some(parens) {
+                    let decoded = unescape(&text[i + 1..j]);
+                    if let Some((specifier, suffix)) = url_target(&decoded).filter(|_| is_loadable(&decoded)) {
+                        flush!(i + 1);
+                        refs.push(Ref { kind: RefKind::Url, specifier, conditions: String::new(), suffix });
+                        pieces.push(Piece::Ref(refs.len() - 1, i + 1, j));
+                        raw_from = j;
+                    }
+                }
                 i = (j + 1).min(bytes.len());
             }
             b'(' => {
                 parens += 1;
+                let before = text[..i].to_ascii_lowercase();
+                if before.ends_with("image-set") && image_set.is_none() {
+                    image_set = Some(parens);
+                }
                 i += 1;
             }
             b')' => {
+                if image_set == Some(parens) {
+                    image_set = None;
+                }
                 if wrappers.last().is_some_and(|w| w.0 == parens) {
                     wrappers.pop();
                     pending.push(Piece::Drop(i, i + 1));
@@ -146,14 +300,78 @@ pub fn parse(text: &str, local: bool) -> Result<Parsed, String> {
                     j += 1;
                 }
                 let name = text[i + 1..j].to_ascii_lowercase();
-                if name == "import" {
+                if name == "charset" {
+                    // The one `@charset` goes first in the output, where the browser looks for it.
+                    let end = find_rule_end(text, j).unwrap_or(bytes.len());
+                    let stop = (end + 1).min(bytes.len());
+                    flush!(i);
+                    pieces.push(Piece::Hoist(i, stop));
+                    raw_from = stop;
+                    i = stop;
+                    statement_start = i;
+                } else if local && name == "value" {
+                    let end = value_end(text, j);
+                    let body = text[j..end].trim();
+                    let stop = if end < bytes.len() && bytes[end] == b';' { end + 1 } else { end };
+                    flush!(i);
+                    if let Some((names, file)) = body.rsplit_once(" from ").map(|(n, f)| (n, f.trim().trim_matches(|c| c == '"' || c == '\''))) {
+                        let pairs: Vec<(String, String)> = names
+                            .split(',')
+                            .filter_map(|n| {
+                                let n = n.trim();
+                                let (there, here) = n.split_once(" as ").map_or((n, n), |(a, b)| (a.trim(), b.trim()));
+                                (!there.is_empty()).then(|| (there.to_string(), here.to_string()))
+                            })
+                            .collect();
+                        for (_, here) in &pairs {
+                            value_names.insert(here.clone());
+                        }
+                        refs.push(Ref { kind: RefKind::Compose, specifier: file.to_string(), conditions: String::new(), suffix: String::new() });
+                        pieces.push(Piece::ValueFrom(pairs, refs.len() - 1));
+                    } else if let Some((name, value)) = body.split_once(':') {
+                        let name = name.trim().to_string();
+                        // A value may use the ones defined before it.
+                        let mut resolved = String::new();
+                        let mut last = 0;
+                        let v = value.trim();
+                        let vb = v.as_bytes();
+                        let mut k = 0;
+                        while k < vb.len() {
+                            if is_ident_start(vb[k] as char) && (k == 0 || !is_ident_char(vb[k - 1] as char)) {
+                                let mut e = k;
+                                while e < vb.len() && is_ident_char(vb[e] as char) {
+                                    e += 1;
+                                }
+                                if let Some((_, known)) = values.iter().rev().find(|(n, _)| n == &v[k..e]) {
+                                    resolved.push_str(&v[last..k]);
+                                    resolved.push_str(known);
+                                    last = e;
+                                }
+                                k = e;
+                            } else {
+                                k += 1;
+                            }
+                        }
+                        resolved.push_str(&v[last..]);
+                        value_names.insert(name.clone());
+                        values.push((name, resolved));
+                    }
+                    pieces.push(Piece::Drop(i, stop));
+                    raw_from = stop;
+                    i = stop;
+                    statement_start = i;
+                } else if name == "import" {
                     let (spec, after) = import_target(text, j)?;
+                    let spec = match spec.strip_prefix('~') {
+                        Some(package) if !package.starts_with('/') => package.to_string(),
+                        _ => spec,
+                    };
                     let end = find_rule_end(text, after).ok_or_else(|| format!("@import at {i} has no end"))?;
                     let conditions = text[after..end].trim().to_string();
                     let stop = (end + 1).min(bytes.len());
                     flush!(i);
                     if is_loadable(&spec) {
-                        refs.push(Ref { kind: RefKind::Import, specifier: spec, conditions });
+                        refs.push(Ref { kind: RefKind::Import, specifier: spec, conditions, suffix: String::new() });
                         pieces.push(Piece::Ref(refs.len() - 1, i, stop));
                     } else {
                         pieces.push(Piece::Hoist(i, stop));
@@ -196,15 +414,18 @@ pub fn parse(text: &str, local: bool) -> Result<Parsed, String> {
                 } else {
                     let mut k = j;
                     while k < bytes.len() && bytes[k] != b')' {
+                        if bytes[k] == b'\\' {
+                            k += 1;
+                        }
                         k += 1;
                     }
+                    let k = k.min(bytes.len());
                     (j, j + text[j..k].trim_end().len(), k)
                 };
-                let spec = &text[start..end];
-                if is_loadable(spec) {
-                    let specifier = if spec.starts_with("./") || spec.starts_with("../") || spec.starts_with('/') { spec.to_string() } else { format!("./{spec}") };
+                let decoded = unescape(&text[start..end]);
+                if let Some((specifier, suffix)) = url_target(&decoded).filter(|_| is_loadable(&decoded)) {
                     flush!(start);
-                    refs.push(Ref { kind: RefKind::Url, specifier, conditions: String::new() });
+                    refs.push(Ref { kind: RefKind::Url, specifier, conditions: String::new(), suffix });
                     pieces.push(Piece::Ref(refs.len() - 1, start, end));
                     raw_from = end;
                 }
@@ -239,6 +460,23 @@ pub fn parse(text: &str, local: bool) -> Result<Parsed, String> {
             b',' => {
                 global_bare = false;
                 i += 1;
+            }
+            b':' if local && depth == 0 && starts_word(&text[i + 1..], "export") && text[statement_start..i].trim().is_empty() && text[i + 7..].trim_start().starts_with('{') => {
+                // ICSS `:export { name: value }`: the pairs are exported with the class names, and the rule is not written.
+                let open = i + 7 + text[i + 7..].find('{').unwrap_or(0);
+                let close = text[open..].find('}').map_or(bytes.len(), |p| open + p);
+                let pairs: Vec<(String, String)> = text[open + 1..close]
+                    .split(';')
+                    .filter_map(|decl| decl.split_once(':').map(|(k, v)| (k.trim().to_string(), v.trim().to_string())))
+                    .filter(|(k, _)| !k.is_empty())
+                    .collect();
+                let stop = (close + 1).min(bytes.len());
+                flush!(i);
+                pieces.push(Piece::Export(pairs));
+                pieces.push(Piece::Drop(i, stop));
+                raw_from = stop;
+                i = stop;
+                statement_start = i;
             }
             b':' if local && (starts_word(&text[i + 1..], "global") || starts_word(&text[i + 1..], "local")) => {
                 let global = starts_word(&text[i + 1..], "global");
@@ -275,7 +513,7 @@ pub fn parse(text: &str, local: bool) -> Result<Parsed, String> {
                 }
                 i = j;
             }
-            _ if local && depth > 0 && is_ident_start(c as char) && (i == 0 || !is_ident_char(bytes[i - 1] as char)) => {
+            _ if local && is_ident_start(c as char) && (i == 0 || !is_ident_char(bytes[i - 1] as char)) && (depth > 0 || !value_names.is_empty()) => {
                 let mut j = i;
                 while j < bytes.len() && is_ident_char(bytes[j] as char) {
                     j += 1;
@@ -284,7 +522,14 @@ pub fn parse(text: &str, local: bool) -> Result<Parsed, String> {
                 let word = text[i..j].to_ascii_lowercase();
                 let at_start = text[statement_start..i].trim().is_empty();
                 let after = text[j..].trim_start();
-                if at_start && after.starts_with(':') && (word == "animation" || word == "animation-name") {
+                if value_names.contains(&text[i..j]) && !(at_start && after.starts_with(':')) && !(depth > 0 && text[statement_start..i].trim_end().ends_with(['.', '#'])) {
+                    flush!(i);
+                    pieces.push(Piece::Value(i, j));
+                    raw_from = j;
+                    i = j;
+                } else if depth == 0 {
+                    i = j;
+                } else if at_start && after.starts_with(':') && (word == "animation" || word == "animation-name") {
                     // Names in the value are keyframes if the sheet defines them.
                     let colon = j + text[j..].find(':').unwrap_or(0);
                     let end = value_end(text, colon + 1);
@@ -339,7 +584,7 @@ pub fn parse(text: &str, local: bool) -> Result<Parsed, String> {
                     flush!(i);
                     match from_file {
                         Some(specifier) => {
-                            refs.push(Ref { kind: RefKind::Compose, specifier, conditions: String::new() });
+                            refs.push(Ref { kind: RefKind::Compose, specifier, conditions: String::new(), suffix: String::new() });
                             pieces.push(Piece::ComposesFrom(words, refs.len() - 1));
                         }
                         None => pieces.push(Piece::Composes(words)),
@@ -355,7 +600,7 @@ pub fn parse(text: &str, local: bool) -> Result<Parsed, String> {
         }
     }
     flush!(bytes.len());
-    Ok(Parsed { pieces, refs })
+    Ok(Parsed { pieces, refs, values })
 }
 
 /// A comment between selector parts: nothing to do, the pieces still wait for their `{`.
@@ -448,6 +693,8 @@ pub enum Replacement {
     Keep,
     /// For a `composes ... from`: the seed of the other sheet's local names.
     Seed(String),
+    /// The same, and what the other sheet's `@value` rules define (for `@value a from "./other.css"`).
+    Sheet(String, Vec<(String, String)>),
 }
 
 pub struct Rendered {
@@ -491,6 +738,22 @@ pub fn render_mapped(text: &str, parsed: &Parsed, replacements: &[Replacement], 
             keyframes.insert(raw.to_string(), n);
         }
     }
+    // What `@value` names stand for: this sheet's own, and those imported from another.
+    let mut value_map: HashMap<String, String> = parsed.values.iter().cloned().collect();
+    let mut value_exports: Vec<(String, String)> = parsed.values.clone();
+    for piece in &parsed.pieces {
+        if let Piece::ValueFrom(pairs, index) = piece {
+            if let Replacement::Sheet(_, theirs) = &replacements[*index] {
+                for (there, here) in pairs {
+                    if let Some((_, v)) = theirs.iter().find(|(n, _)| n == there) {
+                        value_map.insert(here.clone(), v.clone());
+                        value_exports.push((here.clone(), v.clone()));
+                    }
+                }
+            }
+        }
+    }
+    let mut export_pairs: Vec<(String, String)> = Vec::new();
     // Owners of `composes`: the classes of the rule it is in, in order of appearance.
     let mut rule_stack: Vec<Vec<String>> = vec![Vec::new()];
     let mut extra: HashMap<String, Vec<String>> = HashMap::new();
@@ -562,8 +825,23 @@ pub fn render_mapped(text: &str, parsed: &Parsed, replacements: &[Replacement], 
                 // A dropped import is gone; a `url()` left alone keeps its text.
                 Replacement::Leave if parsed.refs[*index].kind == RefKind::Url => out.push_str(&text[*s..*e]),
                 Replacement::Leave => {}
+                Replacement::Text(t) if parsed.refs[*index].kind == RefKind::Url => {
+                    // Written inside `url(...)`, perhaps without quotes: the characters that would end it are escaped.
+                    for ch in t.chars() {
+                        match ch {
+                            ' ' => out.push_str("%20"),
+                            '"' => out.push_str("%22"),
+                            '\'' => out.push_str("%27"),
+                            '(' => out.push_str("%28"),
+                            ')' => out.push_str("%29"),
+                            '\\' => out.push_str("%5C"),
+                            _ => out.push(ch),
+                        }
+                    }
+                    out.push_str(&parsed.refs[*index].suffix);
+                }
                 Replacement::Text(t) => out.push_str(t),
-                Replacement::Seed(_) => {}
+                Replacement::Seed(_) | Replacement::Sheet(..) => {}
                 Replacement::Keep => {
                     let r = &parsed.refs[*index];
                     let cond = if r.conditions.is_empty() { String::new() } else { format!(" {}", r.conditions) };
@@ -593,11 +871,13 @@ pub fn render_mapped(text: &str, parsed: &Parsed, replacements: &[Replacement], 
                 let raw = &text[*s..*e];
                 out.push_str(keyframes.get(raw).map(String::as_str).unwrap_or(raw));
             }
-            Piece::Drop(..) => {}
+            Piece::Drop(..) | Piece::ValueFrom(..) => {}
+            Piece::Value(s, e) => out.push_str(value_map.get(&text[*s..*e]).map_or(&text[*s..*e], String::as_str)),
+            Piece::Export(pairs) => export_pairs.extend(pairs.iter().map(|(k, v)| (k.clone(), v.split(' ').map(|word| value_map.get(word).map_or(word, String::as_str)).collect::<Vec<_>>().join(" ")))),
             Piece::Hoist(s, e) => hoisted.push(text[*s..*e].trim().to_string()),
             Piece::ComposesFrom(composed, index) => {
                 let seed = match &replacements[*index] {
-                    Replacement::Seed(seed) => Some(seed.as_str()),
+                    Replacement::Seed(seed) | Replacement::Sheet(seed, _) => Some(seed.as_str()),
                     _ => None,
                 };
                 let owners = rule_stack.last().cloned().unwrap_or_default();
@@ -633,6 +913,12 @@ pub fn render_mapped(text: &str, parsed: &Parsed, replacements: &[Replacement], 
             }
         }
         exports.push((raw, value));
+    }
+    for (name, value) in value_exports.into_iter().chain(export_pairs) {
+        match exports.iter_mut().find(|(n, _)| *n == name) {
+            Some(slot) => slot.1 = value,
+            None => exports.push((name, value)),
+        }
     }
     let (css, anchors) = if minify {
         let offsets: Vec<usize> = anchors.iter().map(|a| a.0).collect();
@@ -841,5 +1127,80 @@ mod tests {
         assert_eq!(minify_text("/* c */ a  >  b ,\n c {\n  color: red ;\n  margin: 0 auto;\n}\n/*! keep */ d{x:url( a b.png )}"), "a>b,c{color:red;margin:0 auto}/*! keep */ d{x:url(a b.png)}");
         assert_eq!(minify_text("a::before{content:\"a  b\"}"), "a::before{content:\"a  b\"}");
         assert_eq!(minify_text("é { x: 1 ; }"), "é{x:1}");
+    }
+
+    #[test]
+    fn import_conditions_become_nested_wrappers() {
+        assert_eq!(import_wrappers("screen and (min-width: 1px)"), vec!["@media screen and (min-width: 1px)"]);
+        assert_eq!(import_wrappers("layer(base) supports(display: grid) print"), vec!["@layer base", "@supports (display: grid)", "@media print"]);
+        assert_eq!(import_wrappers("layer"), vec!["@layer"]);
+        assert_eq!(import_wrappers("layer print"), vec!["@layer", "@media print"]);
+        assert_eq!(import_wrappers("supports(not (display: grid))"), vec!["@supports not (display: grid)"]);
+        assert_eq!(import_wrappers("supports(selector(a > b)) screen"), vec!["@supports selector(a > b)", "@media screen"]);
+        assert!(import_wrappers("").is_empty());
+    }
+
+    #[test]
+    fn a_url_keeps_its_fragment_and_query_for_after_the_file_name() {
+        assert_eq!(url_target("img/a.png"), Some(("./img/a.png".into(), String::new())));
+        assert_eq!(url_target("icons.svg#home"), Some(("./icons.svg".into(), "#home".into())));
+        assert_eq!(url_target("font.eot?#iefix"), Some(("./font.eot".into(), "?#iefix".into())));
+        assert_eq!(url_target("../a.png?v=3#x"), Some(("../a.png".into(), "?v=3#x".into())));
+        assert_eq!(url_target("a.svg?raw#x"), Some(("./a.svg?raw".into(), "#x".into())));
+        assert_eq!(url_target("~pkg/a.png"), Some(("pkg/a.png".into(), String::new())));
+        assert_eq!(url_target("/fonts/a.woff2"), Some(("/fonts/a.woff2".into(), String::new())));
+        assert_eq!(url_target("#grad"), None);
+    }
+
+    #[test]
+    fn css_escapes_are_undone() {
+        assert_eq!(unescape("a\\.png"), "a.png");
+        assert_eq!(unescape("\\41 b"), "Ab");
+        assert_eq!(unescape("plain"), "plain");
+    }
+
+    #[test]
+    fn urls_are_found_in_every_form() {
+        let text = "a { b: url(x.png#f); c: url( \"y z.png\" ); d: image-set(\"i.png\" 1x, url(j.png) 2x); e: url(a\\.png); f: url(data:x); g: url(#h); k: \"url(no.png)\" } @import \"~pkg/s.css\";";
+        let parsed = parse(text, false).unwrap();
+        let found: Vec<(&str, &str)> = parsed.refs.iter().map(|r| (r.specifier.as_str(), r.suffix.as_str())).collect();
+        assert_eq!(found, vec![("./x.png", "#f"), ("./y z.png", ""), ("./i.png", ""), ("./j.png", ""), ("./a.png", ""), ("pkg/s.css", "")]);
+    }
+
+    #[test]
+    fn a_rewritten_url_is_escaped_and_keeps_its_suffix() {
+        let text = "a { b: url(x.png#f); c: url(\"y.png\") }";
+        let parsed = parse(text, false).unwrap();
+        let r = render(text, &parsed, &[Replacement::Text("./x (1).png".into()), Replacement::Text("./y.png".into())], None, false);
+        assert_eq!(r.css, "a { b: url(./x%20%281%29.png#f); c: url(\"./y.png\") }");
+    }
+
+    #[test]
+    fn charset_goes_to_the_hoisted_list() {
+        let text = "@charset \"utf-8\";\na { b: 1 }";
+        let r = render(text, &parse(text, false).unwrap(), &[], None, false);
+        assert_eq!(r.hoisted, vec!["@charset \"utf-8\";".to_string()]);
+        assert_eq!(r.css.trim(), "a { b: 1 }");
+    }
+
+    #[test]
+    fn values_and_export_are_exported_and_substituted() {
+        let r = modules("@value main: #123; @value both: main 1px; :export { fixed: 3px; token: main }\n.a { color: main; border: both } @media (min-width: main) { .b { x: 1 } }");
+        assert_eq!(r.css.trim(), ".h_a { color: #123; border: #123 1px } @media (min-width: #123) { .h_b { x: 1 } }");
+        let get = |k: &str| r.exports.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
+        assert_eq!(get("main"), Some("#123"));
+        assert_eq!(get("both"), Some("#123 1px"));
+        assert_eq!(get("fixed"), Some("3px"));
+        assert_eq!(get("token"), Some("#123"));
+    }
+
+    #[test]
+    fn a_value_imported_from_another_sheet_is_taken_from_its_definitions() {
+        let text = "@value a, b as c from \"./o.css\";\n.x { color: a; margin: c }";
+        let parsed = parse(text, true).unwrap();
+        assert_eq!(parsed.refs.len(), 1);
+        let theirs = vec![("a".to_string(), "red".to_string()), ("b".to_string(), "2px".to_string())];
+        let r = render(text, &parsed, &[Replacement::Sheet("q".into(), theirs)], Some("h"), false);
+        assert_eq!(r.css.trim(), ".h_x { color: red; margin: 2px }");
     }
 }

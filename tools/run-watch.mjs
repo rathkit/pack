@@ -106,3 +106,57 @@ try {
 } catch (error) {
   if (process.platform !== 'win32') throw error;
 }
+
+// Without plugins a module that did not change is kept between builds (not read or parsed again), and with file events (Linux) so is
+// where its imports were found; a file made or removed beside it still changes what `./a` means, and an editor's save by rename is seen.
+{
+  const { renameSync, unlinkSync } = await import('node:fs');
+  const plain = mkdtempSync(join(tmpdir(), 'watch-plain-'));
+  const put = (name, text) => writeFileSync(join(plain, name), text);
+  const target = join(plain, 'out.mjs');
+  put('a.js', 'export const a = "from-js";\n');
+  put('dep.js', 'export const v = "v1";\n');
+  put('main.js', 'import { a } from "./a";\nimport { v } from "./dep.js";\nconsole.log(a, v);\n');
+  const watcher = spawn(bin, ['bundle', 'main.js', '--outfile', target, '--watch'], { cwd: plain, stdio: ['ignore', 'ignore', 'pipe'] });
+  let log2 = '';
+  watcher.stderr.on('data', (d) => (log2 += d));
+  const seen = async (what, check) => {
+    const start = Date.now();
+    while (Date.now() - start < 15000) {
+      try {
+        if (check(readFileSync(target, 'utf8'))) return;
+      } catch {}
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    throw new Error(`timed out waiting for ${what}\n${log2}`);
+  };
+  let problem = null;
+  try {
+    await seen('the first build', (t) => t.includes('from-js') && t.includes('v1'));
+    // A save by writing a new file and renaming it over the old one.
+    put('dep.tmp', 'export const v = "v2";\n');
+    renameSync(join(plain, 'dep.tmp'), join(plain, 'dep.js'));
+    await seen('a rebuild after a rename save', (t) => t.includes('v2'));
+    // `./a` now finds a.ts first; main.js did not change, and the next build is for another file.
+    put('a.ts', 'export const a: string = "from-ts";\n');
+    put('dep.js', 'export const v = "v3-changed";\n');
+    await seen('the new file taking the import', (t) => t.includes('from-ts') && t.includes('v3-changed'));
+    unlinkSync(join(plain, 'a.ts'));
+    put('dep.js', 'export const v = "v4-changed-again";\n');
+    await seen('the removed file giving the import back', (t) => t.includes('from-js') && t.includes('v4-changed-again') && !t.includes('from-ts'));
+  } catch (error) {
+    problem = error;
+  }
+  watcher.kill('SIGKILL');
+  await new Promise((r) => watcher.on('exit', r));
+  if (problem) {
+    console.log(`FAIL watch without plugins: ${problem.message}`);
+    process.exit(1);
+  }
+  console.log('watch without plugins: rename saves, and files made or removed beside kept modules, are seen');
+  try {
+    rmSync(plain, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+  } catch (error) {
+    if (process.platform !== 'win32') throw error;
+  }
+}

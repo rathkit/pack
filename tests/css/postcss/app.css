@@ -1,0 +1,1 @@
+.a { user-select: none; color: green; &:hover { color: blue; } & .b { color: red; } }

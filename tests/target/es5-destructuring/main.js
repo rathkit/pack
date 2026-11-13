@@ -1,0 +1,25 @@
+const { p, q = 10, ...rest } = { p: 1, r: 3, s: 4 };
+console.log(p, q, rest);
+let [m, , n = 7, ...others] = [1, 2, undefined, 4, 5];
+console.log(m, n, others);
+let aa, bb;
+[aa, bb] = [10, 20]; [aa, bb] = [bb, aa];
+console.log(aa, bb);
+({ p: aa, q: bb = 3 } = { p: "P" });
+console.log(aa, bb);
+const holder = {};
+[holder.x, holder["y"]] = [1, 2];
+({ a: holder.z } = { a: 3 });
+console.log(holder);
+const { a: { b: deep }, c: [first, second] } = { a: { b: "deep" }, c: ["f", "s"] };
+console.log(deep, first, second);
+try { throw { message: "boom" }; } catch ({ message }) { console.log(message); }
+const key = "dynamic";
+const { [key]: dyn, ...others2 } = { dynamic: 1, other: 2 };
+console.log(dyn, others2);
+const [x, y] = new Set(["s1", "s2"]);
+const [c1, c2] = "hi";
+console.log(x, y, c1, c2);
+console.log(([a, b]) => a + b, 0) || console.log((([a, b]) => a + b)([1, 2]));
+const r = ({ v = 1 } = {}) => v;
+console.log(r(), r({ v: 2 }));

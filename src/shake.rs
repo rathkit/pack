@@ -38,6 +38,8 @@ pub struct Part {
     /// For `export default <expression>`: the expression, which is what a
     /// [`Binding::DefaultValue`] names.
     pub default_value: Option<NodeId>,
+    /// For one declarator of a `var`/`let`/`const` that has several: that declarator. The part is the declarator, `stmt` the whole declaration.
+    pub declarator: Option<NodeId>,
 }
 
 /// A module-level name a statement refers to.
@@ -306,6 +308,73 @@ impl Shaker<'_> {
     }
 }
 
+/// Every module-level name the subtree at `root_node` refers to, however deeply nested.
+fn collect_uses(ast: &crate::ast::Ast, semantic: &crate::semantic::Semantic, root: crate::semantic::ScopeId, defines: Option<&crate::define::Defines>, enums: Option<(&EnumTable, &Linked)>, id: ModuleId, root_node: NodeId, stack: &mut Vec<NodeId>) -> Vec<Use> {
+    use crate::ast::NodeKind;
+let mut uses = Vec::new();
+    stack.push(root_node);
+    let mut written = std::collections::HashSet::new();
+    while let Some(node) = stack.pop() {
+        match ast[node].kind {
+            NodeKind::Assign { target, .. } => {
+                written.insert(target);
+            }
+            NodeKind::Update { arg, .. } | NodeKind::Unary { op: crate::ast::UnaryOp::Delete, arg } => {
+                written.insert(arg);
+            }
+            _ => {}
+        }
+        match ast[node].kind {
+            NodeKind::Ident(_) => {
+                if let Some(symbol) = semantic.symbol_of(node) {
+                    if semantic.symbol(symbol).scope == root {
+                        uses.push(Use::Symbol(symbol));
+                    }
+                }
+                continue;
+            }
+            NodeKind::Member { object, prop } => {
+                let name = match ast[prop].kind {
+                    NodeKind::PropName(name) if !ast[node].has(crate::ast::flags::COMPUTED) => Some(name),
+                    NodeKind::Str(name) if ast[node].has(crate::ast::flags::COMPUTED) => Some(name),
+                    _ => None,
+                };
+                if let (NodeKind::Ident(_), Some(name)) = (ast[object].kind, name) {
+                    if let Some(symbol) = semantic.symbol_of(object) {
+                        if semantic.symbol(symbol).scope == root {
+                            if let Some((table, linked)) = enums {
+                                if !written.contains(&node) && table.member(linked, id, symbol, ast.atom(name)).is_some() {
+                                    continue;
+                                }
+                            }
+                            if ast[node].has(crate::ast::flags::COMPUTED) {
+                                uses.push(Use::Symbol(symbol));
+                                continue;
+                            }
+                            uses.push(Use::Member(symbol, ast.atom(name).to_string()));
+                            continue;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        // Names only a branch that never runs mentions are not used.
+        let dead = defines.and_then(|d| d.dead_branch(ast, semantic, node)).map(|d| d.node);
+        ast.for_each_child(node, |child| {
+            if Some(child) != dead {
+                stack.push(child)
+            }
+        });
+    }
+    uses.sort_by_key(|u| match u {
+        Use::Symbol(s) => (s.index(), String::new()),
+        Use::Member(s, n) => (s.index(), n.clone()),
+    });
+    uses.dedup();
+    uses
+}
+
 /// Splits an ES module's top level into parts. Other kinds of module have none.
 fn build_parts(graph: &Graph, id: ModuleId, enums: Option<(&EnumTable, &Linked)>) -> ModuleShake {
     let module = graph.module(id);
@@ -350,69 +419,26 @@ fn build_parts(graph: &Graph, id: ModuleId, enums: Option<(&EnumTable, &Linked)>
             }
             _ => {}
         }
-        // Collect every module-level name the statement refers to, however deeply nested.
-        let mut uses = Vec::new();
-        stack.push(stmt);
-        let mut written = std::collections::HashSet::new();
-        while let Some(node) = stack.pop() {
-            match ast[node].kind {
-                NodeKind::Assign { target, .. } => {
-                    written.insert(target);
+        let uses_of = |root_node: NodeId, stack: &mut Vec<NodeId>| collect_uses(ast, semantic, root, defines, enums, id, root_node, stack);
+        // A `var`/`let`/`const` of several declarators is one part for each, so that an unused one can go while the others stay.
+        if let NodeKind::VarDecl { decls, .. } = ast[declaration].kind {
+            let list = ast.list(decls);
+            if list.len() > 1 {
+                for &d in list {
+                    let NodeKind::VarDeclarator { target, init } = ast[d].kind else { continue };
+                    let mut idents = Vec::new();
+                    crate::semantic::binding_idents(ast, target, &mut idents);
+                    let declares: Vec<SymbolId> = idents.into_iter().filter_map(|i| semantic.symbol_of(i)).collect();
+                    // Destructuring reads properties and runs iterators, so only plain names are free of effects.
+                    let effects = !(matches!(ast[target].kind, NodeKind::BindingIdent(_)) && init.is_none_or(|i| purity.expr_is_pure(i)));
+                    let uses = uses_of(d, &mut stack);
+                    parts.push(Part { stmt, declares, uses, effects, default_value: None, declarator: Some(d) });
                 }
-                NodeKind::Update { arg, .. } | NodeKind::Unary { op: crate::ast::UnaryOp::Delete, arg } => {
-                    written.insert(arg);
-                }
-                _ => {}
+                continue;
             }
-            match ast[node].kind {
-                NodeKind::Ident(_) => {
-                    if let Some(symbol) = semantic.symbol_of(node) {
-                        if semantic.symbol(symbol).scope == root {
-                            uses.push(Use::Symbol(symbol));
-                        }
-                    }
-                    continue;
-                }
-                NodeKind::Member { object, prop } => {
-                    let name = match ast[prop].kind {
-                        NodeKind::PropName(name) if !ast[node].has(crate::ast::flags::COMPUTED) => Some(name),
-                        NodeKind::Str(name) if ast[node].has(crate::ast::flags::COMPUTED) => Some(name),
-                        _ => None,
-                    };
-                    if let (NodeKind::Ident(_), Some(name)) = (ast[object].kind, name) {
-                        if let Some(symbol) = semantic.symbol_of(object) {
-                            if semantic.symbol(symbol).scope == root {
-                                if let Some((table, linked)) = enums {
-                                    if !written.contains(&node) && table.member(linked, id, symbol, ast.atom(name)).is_some() {
-                                        continue;
-                                    }
-                                }
-                                if ast[node].has(crate::ast::flags::COMPUTED) {
-                                    uses.push(Use::Symbol(symbol));
-                                    continue;
-                                }
-                                uses.push(Use::Member(symbol, ast.atom(name).to_string()));
-                                continue;
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-            // Names only a branch that never runs mentions are not used.
-            let dead = defines.and_then(|d| d.dead_branch(ast, semantic, node)).map(|d| d.node);
-            ast.for_each_child(node, |child| {
-                if Some(child) != dead {
-                    stack.push(child)
-                }
-            });
         }
-        uses.sort_by_key(|u| match u {
-            Use::Symbol(s) => (s.index(), String::new()),
-            Use::Member(s, n) => (s.index(), n.clone()),
-        });
-        uses.dedup();
-        parts.push(Part { stmt, declares, uses, effects: !purity.statement_is_pure(stmt), default_value });
+        let uses = uses_of(stmt, &mut stack);
+        parts.push(Part { stmt, declares, uses, effects: !purity.statement_is_pure(stmt), default_value, declarator: None });
     }
     let live = vec![false; parts.len()];
     ModuleShake { included: false, parts, live, demanded: Default::default(), demand_known: false }

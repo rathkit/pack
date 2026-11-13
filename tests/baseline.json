@@ -13,30 +13,30 @@
       "rssKb": 10632
     },
     "react/min": {
-      "bytes": 233382,
-      "gzip": 69950,
+      "bytes": 232899,
+      "gzip": 69905,
       "rssKb": 16260
     },
     "react/min-map": {
-      "bytes": 233426,
-      "gzip": 69982,
-      "map": 874269,
+      "bytes": 232943,
+      "gzip": 69937,
+      "map": 873706,
       "rssKb": 18584
     },
     "rxjs/plain": {
-      "bytes": 61348,
-      "gzip": 11357,
+      "bytes": 60793,
+      "gzip": 11173,
       "rssKb": 9616
     },
     "rxjs/min": {
-      "bytes": 25312,
-      "gzip": 7564,
+      "bytes": 24639,
+      "gzip": 7415,
       "rssKb": 10264
     },
     "rxjs/min-map": {
-      "bytes": 25355,
-      "gzip": 7605,
-      "map": 232153,
+      "bytes": 24682,
+      "gzip": 7453,
+      "map": 228414,
       "rssKb": 11524
     },
     "lodash/plain": {
@@ -45,30 +45,30 @@
       "rssKb": 15112
     },
     "lodash/min": {
-      "bytes": 77489,
-      "gzip": 27362,
+      "bytes": 77424,
+      "gzip": 27353,
       "rssKb": 18036
     },
     "lodash/min-map": {
-      "bytes": 77534,
-      "gzip": 27392,
-      "map": 803817,
+      "bytes": 77469,
+      "gzip": 27383,
+      "map": 777247,
       "rssKb": 23032
     },
     "three/plain": {
-      "bytes": 899765,
-      "gzip": 168063,
+      "bytes": 899735,
+      "gzip": 168055,
       "rssKb": 21356
     },
     "three/min": {
-      "bytes": 527716,
-      "gzip": 130634,
+      "bytes": 527098,
+      "gzip": 130560,
       "rssKb": 32444
     },
     "three/min-map": {
-      "bytes": 527760,
-      "gzip": 130667,
-      "map": 2795346,
+      "bytes": 527142,
+      "gzip": 130594,
+      "map": 2794503,
       "rssKb": 39084
     },
     "ts5/plain": {
@@ -77,14 +77,14 @@
       "rssKb": 78336
     },
     "ts5/min": {
-      "bytes": 3560768,
-      "gzip": 996192,
+      "bytes": 3556538,
+      "gzip": 995792,
       "rssKb": 170116
     },
     "ts5/min-map": {
-      "bytes": 3560810,
-      "gzip": 996219,
-      "map": 13932890,
+      "bytes": 3556580,
+      "gzip": 995819,
+      "map": 13928385,
       "rssKb": 204712
     }
   }

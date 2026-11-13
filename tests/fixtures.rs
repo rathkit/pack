@@ -693,10 +693,16 @@ fn what_a_target_cannot_have_stops_the_build_and_is_named() {
     let split = Command::new(env!("CARGO_BIN_EXE_rkp")).current_dir(&dir).args(["bundle", "main.js", "--outdir", "out", "--splitting", "--target", "es2021"]).output().expect("rkp starts");
     assert_eq!(split.status.code(), Some(1), "{}", String::from_utf8_lossy(&split.stderr));
     assert!(String::from_utf8_lossy(&split.stderr).contains("the output is split"), "{}", String::from_utf8_lossy(&split.stderr));
-    for bad in ["es5", "chrome", "netscape4", "es2099"] {
+    for bad in ["es3", "chrome", "netscape4", "es2099"] {
         let (code, stderr) = rkp("export const x = 1;", bad);
         assert_eq!(code, Some(2), "{bad}: {stderr}");
     }
+    // es5 is a target: what it cannot have (generators) is named.
+    assert_eq!(rkp("export const x = (a) => a;", "es5").0, Some(0));
+    assert_eq!(rkp("export function* g() { yield 1; }", "es5").0, Some(0));
+    let (code, stderr) = rkp("{ f(); function f() {} }", "es5");
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("is used before its declaration in the block"), "{stderr}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
