@@ -16,6 +16,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { checkPage, findBrowser } from './lib/browser-check.mjs';
+import { libraryCheck } from './lib/library-check.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
@@ -114,6 +115,11 @@ async function one(p) {
       if (!r.ok) return { ...step('smoke', r), ms };
       if (r.out.split('\n').pop() !== smoke.equals) return { ok: false, step: 'smoke', detail: `${smoke.code} gave ${r.out.split('\n').pop()}, expected ${smoke.equals}`, ms };
     }
+  }
+  // `library`: built in both formats and compared with the package as published (tools/lib/library-check.mjs).
+  if (p.library) {
+    const checked = libraryCheck(p, where, rkp, dir);
+    if (!checked.ok) return { ...checked, ms };
   }
   return { ok: true, ms };
 }
