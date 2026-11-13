@@ -1372,6 +1372,14 @@ async function init(params) {
   wp.config = config;
   let list = [];
   for (const raw of flatten(await Promise.all(flatten(config.plugins ?? [])))) list.push(...(await normalizePlugin(raw)));
+  // @vitejs/plugin-legacy builds a second, SystemJS bundle in a second Rollup pass and then looks up that bundle's polyfill chunks when it writes the
+  // page; Pack builds one pass, so its plugins would fail the page with "No corresponding legacy polyfill chunk". They are left out, `import.meta.env.LEGACY`
+  // is false (the modern bundle), and old browsers are served by `--target es5` or a browserslist query, which lower the syntax in the one bundle.
+  if (list.some((p) => /^vite:legacy-/.test(p?.name ?? ''))) {
+    list = list.filter((p) => !/^vite:legacy-/.test(p?.name ?? ''));
+    configOptions.define = { 'import.meta.env.LEGACY': 'false', ...configOptions.define };
+    process.stderr.write('warning: @vitejs/plugin-legacy builds no separate nomodule bundle or polyfill chunks with Pack; the plugin is skipped. Use --target es5 (or a browserslist query) to lower the syntax of the one bundle.\n');
+  }
   list = orderPlugins(list);
   // Vite config hooks may add definitions, aliases, and the conditions and package.json fields modules are resolved by. A hook is a function, or
   // an object with a `handler` (and an `order`).

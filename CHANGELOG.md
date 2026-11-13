@@ -39,6 +39,7 @@ about stability.
 
 ### Fixed
 
+- `@vitejs/plugin-legacy` no longer fails the page with "No corresponding legacy polyfill chunk": it builds a second SystemJS bundle in a second Rollup pass, which Pack does not run, so its plugins are skipped with a warning, `import.meta.env.LEGACY` is `false`, and `--target es5` (or a browserslist query) lowers the syntax of the one bundle.
 - `--dts-bundle` follows a re-export written with a `.ts` extension (`export { A } from './a.ts'`), which it left out.
 
 ## 0.2.0-beta.0 - 2026-11-11
