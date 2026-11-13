@@ -72,7 +72,7 @@ pub(crate) fn const_is_let(ast: &Ast, sem: &Semantic, decl: NodeId) -> bool {
 }
 
 pub(crate) fn plan(source: &str, ast: &Ast, sem: &Semantic, tokens: &[Token], barriers: &[u32]) -> Plan {
-    let mut ctx = Ctx { source, ast, sem, tokens, barriers, parent: vec![None; ast.node_count() + 1], actions: vec![Action::Keep; tokens.len()], locked: vec![false; tokens.len()], dead: Vec::new(), kept_semi: Vec::new(), texts: Vec::new(), text_index: Default::default() };
+    let mut ctx = Ctx { source, ast, sem, tokens, barriers, parent: vec![None; ast.node_count() + 1], actions: vec![Action::Keep; tokens.len()], locked: vec![false; tokens.len()], dead: Vec::new(), kept_semi: Vec::new(), done: Default::default(), texts: Vec::new(), text_index: Default::default() };
     let mut order = Vec::new();
     let mut stack = vec![ast.root];
     while let Some(n) = stack.pop() {
@@ -143,6 +143,8 @@ struct Ctx<'a> {
     /// Token ranges `[from, to)` that are left out whatever else was decided.
     dead: Vec<(usize, usize)>,
     kept_semi: Vec<usize>,
+    /// `if` statements already turned into expressions, as the `else` of another.
+    done: crate::fxhash::FastSet<NodeId>,
     texts: Vec<String>,
     text_index: crate::fxhash::FastMap<String, u32>,
 }
@@ -295,6 +297,15 @@ impl Ctx<'_> {
                     self.set(k + 1, Action::Skip);
                 }
             }
+            NodeKind::Switch { cases, .. } => {
+                for c in redundant_cases(ast, cases) {
+                    let from = self.first_tok(ast[c].span.start);
+                    let to = self.last_tok(ast[c].span.end) + 1;
+                    if self.kw(from, Kw::Case) && self.is(to - 1, Punct::Colon) {
+                        self.dead.push((from, to));
+                    }
+                }
+            }
             NodeKind::New { callee, args } if ast.list(args).is_empty() => self.new_without_parens(n, callee),
             NodeKind::VarDecl { kind: VarKind::Const, .. } if const_is_let(ast, self.sem, n) => {
                 let i = self.first_tok(node.span.start);
@@ -310,7 +321,7 @@ impl Ctx<'_> {
                 }
                 if let Some(value) = self.constant(test) {
                     self.dead_if(n, value, cons, alt);
-                } else {
+                } else if !self.done.contains(&n) {
                     self.if_to_expression(n, test, cons, alt);
                 }
             }
@@ -333,6 +344,9 @@ impl Ctx<'_> {
             NodeKind::Program(list) | NodeKind::Block(list) | NodeKind::StaticBlock(list) => {
                 self.merge_declarations(ast.list(list));
                 self.merge_returns(ast.list(list));
+                if matches!(node.kind, NodeKind::Block(_)) {
+                    self.tail_guard(n, ast.list(list));
+                }
             }
             NodeKind::Case { body, .. } => {
                 self.merge_declarations(ast.list(body));
@@ -491,19 +505,19 @@ impl Ctx<'_> {
     }
 
     /// `if (a) b();` is `a&&b();`, `if (!a) b();` is `a||b();` and `if (a) b(); else c();` is `a?b():c();`.
-    fn if_to_expression(&mut self, n: NodeId, test: NodeId, cons: NodeId, alt: Option<NodeId>) {
+    fn if_to_expression(&mut self, n: NodeId, test: NodeId, cons: NodeId, alt: Option<NodeId>) -> bool {
         let ast = self.ast;
         let Some(ce) = self.sole_expression(cons) else {
             if let Some(alt) = alt {
                 self.if_else_sequences(n, test, cons, alt);
             }
-            return;
+            return false;
         };
         let if_tok = self.first_tok(ast[n].span.start);
         let open = if_tok + 1;
         let close = self.first_tok(ast[cons].span.start).wrapping_sub(1);
         if !self.kw(if_tok, Kw::If) || !self.is(open, Punct::LParen) || !self.is(close, Punct::RParen) || self.starts_statement_badly(test) {
-            return;
+            return false;
         }
         let keeps_parens = ast[test].has(flags::PARENTHESIZED);
         let test_precedence = self.precedence(test);
@@ -519,19 +533,38 @@ impl Ctx<'_> {
                         self.force(open, Action::Skip);
                         self.force(bang, Action::Skip);
                         self.force_text(close, "||");
+                        return true;
                     }
                 } else if test_precedence >= 6 && !keeps_parens && ce_precedence >= 7 {
                     self.force(if_tok, Action::Skip);
                     self.force(open, Action::Skip);
                     self.force_text(close, "&&");
+                    return true;
                 }
+                false
             }
             Some(alt) => {
-                let Some(ae) = self.sole_expression(alt) else { return self.if_else_sequences(n, test, cons, alt) };
-                let Some(cons_semi) = self.sole_statement_semi(cons) else { return };
+                // An `else if` that is an expression of its own is what the conditional's last branch is: `a?b:c?d:e`.
+                let mut chained = false;
+                if let NodeKind::If { test: t2, cons: c2, alt: a2 } = ast[alt].kind {
+                    if self.constant(t2).is_none() && !self.done.contains(&alt) {
+                        self.done.insert(alt);
+                        self.unbrace(c2);
+                        if let Some(a2) = a2 {
+                            self.unbrace(a2);
+                        }
+                        chained = self.if_to_expression(alt, t2, c2, a2);
+                    }
+                }
+                let ae = if chained { None } else { self.sole_expression(alt) };
+                if !chained && ae.is_none() {
+                    self.if_else_sequences(n, test, cons, alt);
+                    return false;
+                }
+                let Some(cons_semi) = self.sole_statement_semi(cons) else { return false };
                 let else_tok = self.last_tok(ast[cons].span.end) + 1;
-                if !self.kw(else_tok, Kw::Else) || self.precedence(ce) < 2 || self.precedence(ae) < 2 {
-                    return;
+                if !self.kw(else_tok, Kw::Else) || self.precedence(ce) < 2 || ae.is_some_and(|ae| self.precedence(ae) < 2) {
+                    return false;
                 }
                 self.force(if_tok, Action::Skip);
                 if keeps_parens || test_precedence <= 3 {
@@ -542,6 +575,7 @@ impl Ctx<'_> {
                 }
                 self.force_text(cons_semi, ":");
                 self.force(else_tok, Action::Skip);
+                true
             }
         }
     }
@@ -663,7 +697,7 @@ impl Ctx<'_> {
             Some(alt) => match self.sole_return(alt) {
                 Some((r, b)) => (r, b, Some(self.last_tok(ast[cons].span.end) + 1)),
                 // An `else if` that stands for a return of its own.
-                None if matches!(ast[alt].kind, NodeKind::If { .. }) && self.join_returns(alt, None, joined) => (alt, alt, Some(self.last_tok(ast[cons].span.end) + 1)),
+                None if matches!(ast[alt].kind, NodeKind::If { .. }) && self.join_returns(alt, next, joined) => (alt, alt, Some(self.last_tok(ast[cons].span.end) + 1)),
                 None => return false,
             },
             None => match next.map(|next| (next, ast[next].kind)) {
@@ -755,6 +789,109 @@ impl Ctx<'_> {
         }
         self.force_text(first + 1, text);
         self.dead.push(dead);
+    }
+
+    /// The end of a function body or a loop body: `if (a) return; b(); c();` is `a||(b(),c());` (`continue` in a loop the same way), and `if (!a) return;`
+    /// is `a&&`. What follows the `if` is only expression statements, so nothing is left to skip.
+    fn tail_guard(&mut self, block: NodeId, list: &[NodeId]) {
+        let ast = self.ast;
+        let Some(parent) = self.parent[block.index()] else { return };
+        let (in_function, in_loop) = match ast[parent].kind {
+            NodeKind::Function { body, .. } => (body == block && !ast[parent].has(flags::EXPR_BODY), false),
+            NodeKind::For { body, .. } | NodeKind::ForIn { body, .. } | NodeKind::ForOf { body, .. } | NodeKind::While { body, .. } | NodeKind::DoWhile { body, .. } => (false, body == block),
+            _ => (false, false),
+        };
+        if !in_function && !in_loop {
+            return;
+        }
+        let is_expression = |s: NodeId| matches!(ast[s].kind, NodeKind::ExprStmt(_)) && !ast[s].has(flags::DIRECTIVE);
+        let Some(k) = list.iter().rposition(|&s| !is_expression(s)) else { return };
+        let rest = &list[k + 1..];
+        let NodeKind::If { test, cons, alt: None } = ast[list[k]].kind else { return };
+        if rest.is_empty() || self.constant(test).is_some() {
+            return;
+        }
+        self.unbrace(cons);
+        let Some(jump) = self.sole_jump(cons, in_function) else { return };
+        let if_tok = self.first_tok(ast[list[k]].span.start);
+        let open = if_tok + 1;
+        let close = self.first_tok(ast[cons].span.start).wrapping_sub(1);
+        let jump_tok = self.first_tok(ast[jump].span.start);
+        let Some(jump_semi) = self.semi_of(jump) else { return };
+        if !self.kw(if_tok, Kw::If) || !self.is(open, Punct::LParen) || !self.is(close, Punct::RParen) || self.starts_statement_badly(test) || self.actions[jump_semi] != Action::Keep {
+            return;
+        }
+        // Every statement after it ends with a `;` that is written.
+        let mut semis = Vec::with_capacity(rest.len());
+        for &r in rest {
+            match self.semi_of(r) {
+                Some(semi) if self.actions[semi] == Action::Keep => semis.push(semi),
+                _ => return,
+            }
+        }
+        let keeps_parens = ast[test].has(flags::PARENTHESIZED);
+        let negated = match (ast[test].kind, keeps_parens) {
+            (NodeKind::Unary { op: crate::ast::UnaryOp::Not, arg }, false) => {
+                let nullish = matches!(ast[arg].kind, NodeKind::Binary { op: crate::ast::BinOp::Nullish, .. }) && !ast[arg].has(flags::PARENTHESIZED);
+                let bang = self.first_tok(ast[test].span.start);
+                if self.precedence(arg) >= 6 && !nullish && !self.starts_statement_badly(arg) && self.is(bang, Punct::Bang) { Some(bang) } else { None }
+            }
+            _ => None,
+        };
+        // `a||rest` needs `a` to bind at least as tight as `||` (and not be `??`); `a&&rest` needs it tighter.
+        if negated.is_none() && (keeps_parens || self.precedence(test) < 5 || self.precedence(test) == 4) {
+            return;
+        }
+        let connector = if negated.is_some() { "&&" } else { "||" };
+        let [first, ..] = rest else { return };
+        let single_ok = rest.len() == 1 && match ast[*first].kind {
+            NodeKind::ExprStmt(e) => self.precedence(e) >= if negated.is_some() { 7 } else { 6 },
+            _ => false,
+        };
+        // The jump and its `;` are not written; the `if` becomes the condition.
+        self.force(if_tok, Action::Skip);
+        self.force(open, Action::Skip);
+        if let Some(bang) = negated {
+            self.force(bang, Action::Skip);
+        }
+        self.force(jump_tok, Action::Skip);
+        self.force(jump_semi, Action::Skip);
+        // A loop body of nothing else loses its braces (`for (...) a || b;`).
+        let unbraced = in_loop && k == 0 && {
+            let (o, c) = (self.first_tok(ast[block].span.start), self.last_tok(ast[block].span.end));
+            self.is(o, Punct::LBrace) && self.is(c, Punct::RBrace) && self.actions[o] == Action::Keep && self.actions[c] == Action::Keep && {
+                self.force(o, Action::Skip);
+                self.force(c, Action::Skip);
+                true
+            }
+        };
+        if single_ok {
+            self.force_text(close, connector);
+            return;
+        }
+        self.force_text(close, &format!("{connector}("));
+        let last = semis.len() - 1;
+        for (i, &semi) in semis.iter().enumerate() {
+            if i < last {
+                self.force_text(semi, ",");
+            } else {
+                self.force_text(semi, if unbraced { ");" } else { ")" });
+            }
+        }
+    }
+
+    /// The `return;` (or `continue;`, in a loop) that is all of `s`, looking through a block whose braces went.
+    fn sole_jump(&self, s: NodeId, in_function: bool) -> Option<NodeId> {
+        match self.ast[s].kind {
+            NodeKind::Return(None) if in_function => Some(s),
+            NodeKind::Continue(None) if !in_function => Some(s),
+            NodeKind::Block(list) => {
+                let [only] = self.ast.list(list) else { return None };
+                let open = self.first_tok(self.ast[s].span.start);
+                if self.actions.get(open) == Some(&Action::Skip) { self.sole_jump(*only, in_function) } else { None }
+            }
+            _ => None,
+        }
     }
 
     /// `typeof x === "string"` is `typeof x == "string"`: both sides are strings, so `==` and `===` agree and the operator is a byte shorter.
@@ -1397,6 +1534,27 @@ impl Ctx<'_> {
 
 /// Whether running `root` could declare a `var` visible outside it, which removing the code
 /// would change.
+/// The `case` clauses of a `switch` that can go: a literal in front of nothing that falls through into `default`, as `default` is what runs for it anyway.
+pub(crate) fn redundant_cases(ast: &Ast, cases: crate::ast::List) -> Vec<NodeId> {
+    let list = ast.list(cases);
+    let mut out = Vec::new();
+    for (i, &c) in list.iter().enumerate() {
+        let NodeKind::Case { test: Some(t), body } = ast[c].kind else { continue };
+        if !ast.list(body).is_empty() || !matches!(ast[t].kind, NodeKind::Str(_) | NodeKind::Num(_) | NodeKind::Bool(_) | NodeKind::Null) {
+            continue;
+        }
+        // Only empty clauses stand between it and `default`.
+        let mut k = i + 1;
+        while k < list.len() && matches!(ast[list[k]].kind, NodeKind::Case { test: Some(_), body } if ast.list(body).is_empty()) {
+            k += 1;
+        }
+        if k < list.len() && matches!(ast[list[k]].kind, NodeKind::Case { test: None, .. }) {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// `a === null || a === void 0` (either order, `undefined` too) or `a !== null && a !== void 0`, where `a` is a name: the check of `a` for both.
 pub(crate) struct NullishPair {
     /// The name that is checked, on the first side.
