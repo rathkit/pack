@@ -1,0 +1,3 @@
+$brand: #f00;
+@mixin pad($n) { padding: $n * 4px; }
+@function double($x) { @return $x * 2; }

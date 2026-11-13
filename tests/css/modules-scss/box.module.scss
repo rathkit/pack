@@ -1,0 +1,3 @@
+$pad: 4px;
+.box { padding: $pad; &:hover { color: blue; } .inner { margin: 0; } }
+.title { composes: shared from './_mix.module.scss'; font-size: 2 * $pad; }

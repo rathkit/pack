@@ -968,10 +968,93 @@ const definitionsOf = (definitions, prefix = '') =>
   );
 
 /**
- * Less, Sass and Stylus files, as Vite handles them: when the project has the compiler installed (`less`, `sass-embedded` or `sass`,
- * `stylus`), a file with that extension is compiled to CSS and then read as a style sheet. Returns null when the project has none.
+ * Looks for a PostCSS configuration the way `postcss-load-config` does (which is what Vite uses): from the project's folder up, stopping
+ * at the first folder that is the top of a repository or workspace. Returns `{ file, config }` or null.
  */
-const preprocessorPlugin = (projectRoot) => {
+const findPostcssConfig = async (projectRoot) => {
+  const names = ['package.json', '.postcssrc', '.postcssrc.json', '.postcssrc.js', '.postcssrc.cjs', '.postcssrc.mjs', '.postcssrc.ts', '.postcssrc.cts', '.postcssrc.mts', 'postcss.config.js', 'postcss.config.cjs', 'postcss.config.mjs', 'postcss.config.ts', 'postcss.config.cts', 'postcss.config.mts'];
+  for (let dir = projectRoot; ; dir = path.dirname(dir)) {
+    for (const name of names) {
+      const file = path.join(dir, name);
+      if (!fs.existsSync(file) || !fs.statSync(file).isFile()) continue;
+      if (name === 'package.json') {
+        let field;
+        try {
+          field = JSON.parse(fs.readFileSync(file, 'utf8')).postcss;
+        } catch {}
+        if (field && typeof field === 'object') return { file, config: field };
+        continue;
+      }
+      if (name === '.postcssrc' || name.endsWith('.json')) {
+        try {
+          return { file, config: JSON.parse(fs.readFileSync(file, 'utf8')) };
+        } catch (error) {
+          // `.postcssrc` without an extension may be YAML, which is not read here
+          throw new Error(`Cannot read ${file} as JSON: ${error.message}`);
+        }
+      }
+      try {
+        const mod = await import(`${pathToFileURL(file).href}?t=${Date.now()}`);
+        return { file, config: mod.default ?? mod };
+      } catch (error) {
+        throw new Error(`Cannot load ${file}: ${error.message}`);
+      }
+    }
+    if (['.git', 'pnpm-workspace.yaml', 'lerna.json'].some((marker) => fs.existsSync(path.join(dir, marker))) || path.dirname(dir) === dir || dir === os.homedir()) return null;
+  }
+};
+
+/** Builds the PostCSS plugin list and options from a configuration (a function of the context, or an object), as `postcss-load-config` does. */
+const loadPostcssPlugins = async (found, ctx) => {
+  const req = nodeModule.createRequire(found.file);
+  const load = async (name) => {
+    const url = req.resolve(name);
+    const mod = await import(pathToFileURL(url).href);
+    return mod.default ?? mod;
+  };
+  let config = found.config;
+  if (typeof config === 'function') config = await config(ctx);
+  else config = { ...config, ...ctx };
+  config ??= {};
+  let list = [];
+  if (Array.isArray(config.plugins)) list = config.plugins.filter(Boolean);
+  else {
+    list = await Promise.all(
+      Object.entries(config.plugins ?? {})
+        .filter(([, options]) => options !== false)
+        .map(async ([name, options]) => {
+          try {
+            const plugin = await load(name);
+            return options === null || options === undefined || Object.keys(options).length === 0 ? plugin : plugin(options);
+          } catch (error) {
+            throw new Error(`Loading PostCSS plugin ${name} failed: ${error.message}\n\n(@${found.file})`);
+          }
+        }),
+    );
+  }
+  list = list.map((plugin, i) => {
+    if (plugin?.default) plugin = plugin.default;
+    if (plugin?.postcss === true) plugin = plugin();
+    else if (plugin?.postcss) plugin = plugin.postcss;
+    if (!(typeof plugin === 'function' || (typeof plugin === 'object' && (plugin?.postcssPlugin || Array.isArray(plugin?.plugins))))) throw new TypeError(`Invalid PostCSS plugin found at plugins[${i}]\n\n(@${found.file})`);
+    return plugin;
+  });
+  const options = { ...config };
+  delete options.plugins;
+  for (const key of ['parser', 'syntax', 'stringifier']) {
+    if (typeof options[key] === 'string') options[key] = await load(options[key]);
+  }
+  return { plugins: list, options };
+};
+
+/**
+ * Style sheets, as Vite handles them. Less, Sass and Stylus files are compiled to CSS when the project has the compiler installed (`less`,
+ * `sass-embedded` or `sass`, `stylus`); then PostCSS runs over every style sheet when the project has a PostCSS configuration (a config file, a
+ * `postcss` field in `package.json`, or `css.postcss` in the config) and `postcss` is installed. `css.preprocessorOptions` of the config
+ * (`additionalData`, include paths) are honored. Returns null when there is nothing to do. `compiling` is false when the project lists a plugin
+ * of its own for these languages.
+ */
+const stylePlugin = async (projectRoot, cssConfig = {}, mode = 'production', compiling = true) => {
   const req = nodeModule.createRequire(path.join(projectRoot, 'noop.js'));
   const load = (names) => {
     for (const name of names) {
@@ -986,19 +1069,87 @@ const preprocessorPlugin = (projectRoot) => {
     sass: { test: /\.(scss|sass)$/, names: ['sass-embedded', 'sass'] },
     stylus: { test: /\.(styl|stylus)$/, names: ['stylus'] },
   };
-  const available = Object.fromEntries(Object.entries(compilers).map(([k, v]) => [k, load(v.names)]).filter(([, m]) => m));
-  if (!Object.keys(available).length) return null;
+  const available = compiling ? Object.fromEntries(Object.entries(compilers).map(([k, v]) => [k, load(v.names)]).filter(([, m]) => m)) : {};
+  // PostCSS: the inline configuration of the config file, or a file found from the project's folder.
+  let postcssSetup = null;
+  let postcssModule = null;
+  {
+    const inline = cssConfig?.postcss;
+    let found = null;
+    if (inline && typeof inline === 'object') found = { file: path.join(projectRoot, 'rathkit.config.mjs'), config: inline };
+    else found = await findPostcssConfig(typeof inline === 'string' ? path.resolve(projectRoot, inline) : projectRoot);
+    if (found) {
+      postcssModule = load(['postcss']);
+      // Not a dependency of the project itself: Vite and the plugins depend on it, so it is looked for where they are installed.
+      if (!postcssModule) {
+        const fromConfig = found.config && typeof found.config === 'object' && !Array.isArray(found.config.plugins) ? Object.keys(found.config.plugins ?? {}) : [];
+        const creq = nodeModule.createRequire(found.file);
+        for (const holder of ['vite', ...fromConfig]) {
+          try {
+            postcssModule = nodeModule.createRequire(creq.resolve(holder))('postcss');
+            break;
+          } catch {}
+        }
+      }
+      if (!postcssModule) log('warn', `${path.relative(projectRoot, found.file) || found.file} configures PostCSS, but the package postcss is not installed in this project, so style sheets are not processed by it`);
+      else {
+        postcssModule = postcssModule.default ?? postcssModule;
+        const ctx = { cwd: projectRoot, env: process.env.NODE_ENV || (mode === 'development' ? 'development' : 'production') };
+        postcssSetup = await loadPostcssPlugins(found, ctx);
+        if (!postcssSetup.plugins.length && !postcssSetup.options.parser) postcssSetup = null;
+      }
+    }
+  }
+  if (!Object.keys(available).length && !postcssSetup) return null;
+  const preprocessorOptions = cssConfig?.preprocessorOptions ?? {};
+  const optionsFor = (kind) => (kind === 'sass' ? { ...(preprocessorOptions.sass ?? {}), ...(preprocessorOptions.scss ?? {}) } : (preprocessorOptions[kind] ?? (kind === 'stylus' ? preprocessorOptions.styl : undefined) ?? {}));
+  const withData = async (code, file, options) => {
+    const data = options.additionalData;
+    if (!data) return code;
+    if (typeof data === 'function') {
+      const out = await data(code, file);
+      return typeof out === 'string' ? out : out.content;
+    }
+    return `${data}${code}`;
+  };
+  const rest = (options) => {
+    const { additionalData, api, ...others } = options;
+    return others;
+  };
   const compile = {
-    async less(code, file) {
-      const out = await (available.less.default ?? available.less).render(code, { filename: file, paths: [path.dirname(file)] });
+    async less(code, file, named, resolve) {
+      const options = optionsFor('less');
+      const less = available.less.default ?? available.less;
+      const { paths = [], plugins = [], ...others } = rest(options);
+      // An `@import` is looked for with the bundler's resolver first, as Vite does, so aliases (`~/styles/vars.less`, `@/theme`) and packages work.
+      const aliases = {
+        install(lessInstance, pluginManager) {
+          class AliasManager extends lessInstance.FileManager {
+            supports() {
+              return true;
+            }
+            async loadFile(filename, currentDirectory, loadOptions, environment) {
+              const importer = path.join(currentDirectory || path.dirname(file), 'import.less');
+              for (const candidate of path.extname(filename) ? [filename] : [`${filename}.less`, filename]) {
+                const found = await resolve(candidate, importer);
+                if (found && fs.existsSync(found)) return super.loadFile(found, currentDirectory, loadOptions, environment);
+              }
+              return super.loadFile(filename, currentDirectory, loadOptions, environment);
+            }
+          }
+          pluginManager.addFileManager(new AliasManager());
+        },
+      };
+      const out = await less.render(await withData(code, file, options), { ...others, plugins: [aliases, ...plugins], filename: file, paths: [path.dirname(file), ...paths] });
       return { css: out.css, deps: out.imports };
     },
-    async sass(code, file, named = file) {
+    async sass(code, file, named = file, resolve) {
+      const options = optionsFor('sass');
       const sass = available.sass;
       // A name that is not a relative path is looked for in the `node_modules` folders above the file (a leading `~` is the old way to say so),
       // as Vite does: `@use 'element-plus/theme-chalk/src/index.scss'`. Sass adds the extension and the partial's underscore itself.
       const packages = {
-        findFileUrl(url) {
+        async findFileUrl(url) {
           if (/^(\.|\/|[a-z][a-z0-9+.-]*:)/i.test(url) && !url.startsWith('~')) return null;
           const name = url.replace(/^~/, '');
           const parts = name.split('/');
@@ -1006,34 +1157,68 @@ const preprocessorPlugin = (projectRoot) => {
           for (let dir = path.dirname(file); ; dir = path.dirname(dir)) {
             const base = path.join(dir, 'node_modules');
             if (fs.existsSync(path.join(base, first))) return pathToFileURL(path.join(base, name));
-            if (path.dirname(dir) === dir) return null;
+            if (path.dirname(dir) === dir) break;
           }
+          // Not in a package: an alias of the config (`@use '@/styles/vars'`).
+          for (const candidate of [url, name]) {
+            const found = await resolve(candidate, file);
+            if (found && path.isAbsolute(found) && fs.existsSync(found)) return pathToFileURL(found);
+          }
+          return null;
         },
       };
-      const out = await sass.compileStringAsync(code, { url: pathToFileURL(file), syntax: named.endsWith('.sass') ? 'indented' : 'scss', loadPaths: [path.dirname(file)], importers: [packages] });
+      const { loadPaths = [], includePaths = [], importers = [], ...others } = rest(options);
+      const out = await sass.compileStringAsync(await withData(code, file, options), { ...others, url: pathToFileURL(file), syntax: named.endsWith('.sass') ? 'indented' : 'scss', loadPaths: [path.dirname(file), ...loadPaths, ...includePaths], importers: [packages, ...importers] });
       return { css: out.css, deps: (out.loadedUrls ?? []).filter((u) => u.protocol === 'file:').map(fileURLToPath) };
     },
     async stylus(code, file) {
+      const options = optionsFor('stylus');
       const stylus = available.stylus.default ?? available.stylus;
-      const style = stylus(code).set('filename', file);
+      const style = stylus(await withData(code, file, options)).set('filename', file);
+      for (const [key, value] of Object.entries(rest(options))) {
+        if (key === 'define') for (const [k, v] of Object.entries(value)) style.define(k, v);
+        else if (key === 'use') for (const fn of toArray(value)) style.use(fn);
+        else style.set(key, value);
+      }
       const css = await new Promise((resolve, reject) => style.render((error, text) => (error ? reject(error) : resolve(text))));
       return { css, deps: style.deps() };
     },
   };
   return {
-    name: 'rathkit:css-preprocessors',
+    name: 'rathkit:style-sheets',
     async transform(code, id) {
       const file = id.split('?')[0];
       // The style block of a component (`App.vue?vue&type=style&index=0&lang.scss`) names its language at the end of the query.
-      const lang = /[?&]lang\.(\w+)$/.exec(id);
+      const lang = /[?&]lang\.([\w.]+)$/.exec(id);
       const named = lang ? `${file}.${lang[1]}` : file;
-      for (const [kind, { test }] of Object.entries(compilers)) {
-        if (!available[kind] || !test.test(named)) continue;
-        const { css, deps } = await compile[kind](code, file, named);
+      const kind = Object.entries(compilers).find(([k, { test }]) => available[k] && test.test(named))?.[0] ?? null;
+      const isStyle = kind || /\.(css|pcss|postcss)$/i.test(named);
+      if (!isStyle) return null;
+      if (!kind && !postcssSetup) return null;
+      let text = code;
+      if (kind) {
+        const resolve = async (source, importer) => {
+          try {
+            const r = await this.resolve(source, importer, { skipSelf: true });
+            return r && !r.external ? r.id.split('?')[0] : null;
+          } catch {
+            return null;
+          }
+        };
+        const { css, deps } = await compile[kind](code, file, named, resolve);
         for (const dep of deps) if (dep !== file) this.addWatchFile(dep);
-        return { code: css, moduleType: 'css' };
+        text = css;
       }
-      return null;
+      if (postcssSetup) {
+        const { plugins, options } = postcssSetup;
+        const result = await postcssModule(plugins).process(text, { ...options, to: file, from: file, map: false });
+        for (const warning of result.warnings()) this.warn(`${warning.plugin ? `${warning.plugin}: ` : ''}${warning.text}`);
+        for (const message of result.messages) if (message.type === 'dependency' && message.file) this.addWatchFile(message.file);
+        text = result.css;
+      }
+      // A file read as CSS already keeps its extension's loader (`.module.css` has local names); what was compiled says which it is.
+      if (!kind) return { code: text };
+      return { code: text, moduleType: /\.module\.[\w]+$/i.test(named) ? 'local-css' : 'css' };
     },
   };
 };
@@ -1138,7 +1323,8 @@ async function importBundled(file) {
   const here = pathToFileURL(file).href;
   const args = ['bundle', file, '--format', 'esm', '--packages', 'external', '--outfile', out, '--no-config',
     `--define:import.meta.url=${JSON.stringify(here)}`, `--define:import.meta.dirname=${JSON.stringify(dir)}`, `--define:import.meta.filename=${JSON.stringify(file)}`,
-    `--define:__dirname=${JSON.stringify(dir)}`, `--define:__filename=${JSON.stringify(file)}`];
+    // `__dirname` is each file's own folder (a config that imports `./config/theme.ts`, which reads a file next to itself).
+    '--original-paths'];
   const built = spawnSync(exe, args, { cwd: dir, encoding: 'utf8' });
   if (built.status !== 0) return null;
   try {
@@ -1266,7 +1452,7 @@ async function init(params) {
   }
   // A project that lists its own plugin for these languages keeps it; otherwise Less, Sass and Stylus are compiled when installed.
   const ownPreprocessor = [...pre, ...list, ...post].some((plugin) => /less|sass|scss|stylus/i.test(plugin?.name ?? ''));
-  const preprocessors = ownPreprocessor ? null : preprocessorPlugin(root);
+  const preprocessors = await stylePlugin(root, config.css ?? {}, cli.mode, !ownPreprocessor);
   plugins = [...(externals.length ? [externalPlugin(externals)] : []), ...(preprocessors ? [preprocessors] : []), ...pre, ...compilerPlugins, ...parcelPlugins, ...list, ...post];
   const hooks = {};
   for (const name of HOOKS) hooks[name] = hooksOf(name).length > 0;
@@ -1277,6 +1463,7 @@ async function init(params) {
     // Functions and promises cannot be carried out of the host (a regular expression goes as its source and flags); what is left is plain data.
     federation: federationOptions ? JSON.parse(JSON.stringify(federationOptions, (key, value) => (typeof value === 'function' && key === 'afterGenerate' ? String(value) : typeof value === 'function' || value instanceof Promise ? undefined : value instanceof RegExp ? { __regexp: value.source, flags: value.flags } : value))) : null,
     plugins: plugins.map((p) => p.name ?? 'anonymous'),
+    styleOnly: !params.config,
     hooks,
     define: Object.entries(configOptions.define).map(([k, v]) => [k, typeof v === 'string' ? v : JSON.stringify(v)]),
     // Aliases that are a name and a path (what `import.meta.glob` patterns need); the others (patterns, functions) work through the plugin.

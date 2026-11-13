@@ -907,8 +907,11 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
         (None, true) => ["rathkit.config.mjs", "rathkit.config.js", "rathkit.config.cjs", ".parcelrc"].iter().find(|f| cwd.join(f).is_file()).map(|f| f.to_string()),
         (None, false) => None,
     };
-    let plugin_host = match &config_file {
-        Some(file) => {
+    // No config, but a PostCSS configuration or a Sass, Less or Stylus compiler in the project: the host runs for the style sheets.
+    let implicit_host = config_file.is_none() && use_config && rathkit_pack::plugins::needs_style_host(&cwd);
+    let plugin_host = match (&config_file, implicit_host) {
+        (Some(_), _) | (None, true) => {
+            let file = config_file.as_deref();
             let info = rathkit_pack::plugins::CliInfo {
                 entries: entries.clone(),
                 outdir: outdir.clone(),
@@ -930,7 +933,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
                 serve,
                 public_path: options.public_path.clone(),
             };
-            match rathkit_pack::plugins::PluginHost::start(&cwd, Some(file), &info) {
+            match rathkit_pack::plugins::PluginHost::start(&cwd, file, &info) {
                 Ok(host) => Some(host),
                 Err(message) => {
                     eprintln!("error: {message}");
@@ -938,7 +941,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
                 }
             }
         }
-        None => None,
+        (None, false) => None,
     };
     if let Some(host) = &plugin_host {
         // The config's aliases are looked up by the plugin that resolves them; here they are for the patterns of `import.meta.glob`.

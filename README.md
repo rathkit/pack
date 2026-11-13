@@ -117,6 +117,15 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   file or `from "./other.module.css"`). In a style sheet `url(/fonts/a.woff2)` is a file of the project (its folder, then `public/`), and stays as written when it is nowhere. A sheet's `@import`s are inlined in order (`@import "x" screen` wraps what
   x holds), `url()` points at the copied files, and each chunk's sheets go to a `.css` file next to its `.js`
   (with `--sourcemap`, a `.css.map` too); `--minify` also shrinks the CSS. A copied file nothing uses is not written.
+  Sass, Less and Stylus files (`.scss .sass .less .styl`) are compiled when the project has the compiler installed (`sass` or
+  `sass-embedded`, `less`, `stylus`), with no config file; `@use`/`@import` find relative files, packages in `node_modules` and the
+  config's aliases, and a `.module.scss` (or `.less`, `.sass`, `.styl`) has local class names like `.module.css`. A PostCSS
+  configuration (`postcss.config.*`, `.postcssrc*`, a `postcss` field in `package.json`, or `css.postcss` in the config) runs over
+  every style sheet after the compiler, when `postcss` is installed in the project or next to Vite or the plugins; `css.preprocessorOptions`
+  (`additionalData`, include paths) are honored. With `--no-config` none of this runs. Style sheet details: `@import` conditions
+  (`layer()`, `supports()`, media) nest as `@layer`, `@supports`, `@media` and pass on to what the sheet imports; `@charset` goes first;
+  `url()` keeps its `#fragment` and `?query` (`font.eot?#iefix`, `icons.svg#home`), may be written with CSS escapes or a leading `~`,
+  and a string in `image-set()` is a file; in `.module.css`, `@value` (also `from`), `:export` and `composes` are supported.
 - Plugins (`--config FILE`, or `rathkit.config.{mjs,js,cjs}` or a `.parcelrc` next to the project): the config
   lists plugins and a Node process runs them, so nothing is needed when there is no config. All of these work
   together in one build:
@@ -386,6 +395,7 @@ node tools/test-npm-wrapper.mjs                 # the npm launcher and platform 
 node tools/scan-secrets.mjs [--history]         # secrets in the files, or in every commit ever (the values are not printed)
 node tools/check-denylist.mjs [--history]     # the private word list (RATHKIT_DENYLIST) against the files, or every commit
 node tools/run-assets.mjs                     # image, font and SVG plugins (url, svgr, file-loader, copy) run for real
+node tools/run-css.mjs                        # Sass, Less, Stylus, PostCSS and CSS modules with the real compilers, no config file
 node tools/run-sourcemaps.mjs                 # stack traces through source maps vs the original positions
 node tools/check-pieces.mjs                    # minifying in pieces vs in one pass (add --packages PROJECT for every package)
 node tools/check-sourcemap.mjs OUT.js         # one bundle's map against both ends

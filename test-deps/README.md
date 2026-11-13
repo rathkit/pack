@@ -17,6 +17,7 @@ leaf at the repository root on purpose: a `node_modules` or `package.json` above
 | Script | Uses |
 |---|---|
 | `tools/run-assets.mjs` | `@rollup/plugin-url`, `url-loader`, `file-loader`, `@svgr/rollup`, `@svgr/webpack`, `vite-plugin-svgr`, `vite-imagetools`, `vite-plugin-image-optimizer` (with `sharp`, `svgo`), `unplugin-fonts`, `vite-plugin-webfont-dl`, `rollup-plugin-copy`, `@fontsource/roboto-mono`, `react`, `react-dom`, `vite` |
+| `tools/run-css.mjs` | `sass`, `less`, `stylus`, `postcss`, `autoprefixer`, `postcss-nested` |
 | `tools/run-federation.mjs` | `@rspack/core`, `@module-federation/enhanced`, `@module-federation/vite`, `vite`, `typescript`, `react`, `react-dom`, `lodash-es` |
 | `tools/run-hmr.mjs` | `react`, `react-dom`, `react-refresh`, `rxjs`, `lodash-es`, `three`, `vue`, `@vitejs/plugin-vue`, `svelte`, `@sveltejs/vite-plugin-svelte`, `vite` |
 | `tools/run-dts.mjs`, `tools/test-npm-wrapper.mjs` | `typescript` |
