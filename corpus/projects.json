@@ -1525,7 +1525,15 @@
       "expect": {
         "files": [
           "dist/index.html"
-        ]
+        ],
+        "css": {
+          "contains": [
+            "_row {"
+          ],
+          "absent": [
+            ".row {"
+          ]
+        }
       }
     },
     {
@@ -1691,7 +1699,9 @@
         "--outdir",
         "dist",
         "--config",
-        "vite.config.ts"
+        "vite.config.ts",
+        "--public-path",
+        "/"
       ],
       "expect": {
         "files": [
@@ -1707,8 +1717,33 @@
       "dropLockfile": true,
       "addPackages": [
         "history@5.3.0"
+      ]
+    },
+    {
+      "name": "sass-postcss-no-config",
+      "kind": "app",
+      "repo": "https://github.com/goitacademy/vite-sass-app-template",
+      "sha": "bd5469a56efe4e0d765b352f5a9aab9a07344d7c",
+      "build": [
+        "bundle",
+        "index.html",
+        "--outdir",
+        "dist"
       ],
-      "expectFail": "the app uses @vitejs/plugin-legacy, whose polyfill chunks are roadmap 2.4; its Less files compile"
+      "expect": {
+        "files": [
+          "dist/index.html"
+        ],
+        "css": {
+          "contains": [
+            "@media (min-width: 767px){"
+          ],
+          "absent": [
+            "@use",
+            "$"
+          ]
+        }
+      }
     }
   ]
 }
