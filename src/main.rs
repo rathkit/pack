@@ -554,6 +554,10 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     let mut public_path_given = false;
     let mut metafile: Option<String> = None;
     let mut dts = false;
+    let mut formats = vec![rathkit_pack::bundle::Format::Esm];
+    let mut exports_given = false;
+    let mut preserve_root: Option<String> = None;
+    let mut write_exports: Option<String> = None;
     let mut dts_dir: Option<String> = None;
     let mut dts_bundle = false;
     let mut inject_files: Vec<String> = Vec::new();
@@ -612,12 +616,58 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
             "--sourcemap=inline" => bundle_options.sourcemap = rathkit_pack::bundle::SourceMapMode::Inline,
             "--sourcemap=external" => bundle_options.sourcemap = rathkit_pack::bundle::SourceMapMode::External,
             "--no-sources-content" => bundle_options.sources_content = false,
-            "--format" => {
-                bundle_options.format = match it.next().map(String::as_str) {
-                    Some("cjs") => rathkit_pack::bundle::Format::Cjs,
-                    Some("iife") => rathkit_pack::bundle::Format::Iife,
-                    _ => rathkit_pack::bundle::Format::Esm,
+            // --format esm|cjs|iife, or a list for a library: --format esm,cjs writes each (.mjs and .cjs).
+            arg if arg == "--format" || arg.starts_with("--format=") => {
+                let value = if arg == "--format" { it.next().cloned().unwrap_or_default() } else { arg["--format=".len()..].to_string() };
+                formats.clear();
+                for name in value.split(',') {
+                    let format = match name {
+                        "cjs" => rathkit_pack::bundle::Format::Cjs,
+                        "iife" => rathkit_pack::bundle::Format::Iife,
+                        "esm" | "es" => rathkit_pack::bundle::Format::Esm,
+                        _ if value.contains(',') => {
+                            eprintln!("error: --format is esm, cjs or iife, or a list of esm and cjs; not '{name}'");
+                            return Done::Exit(ExitCode::from(2));
+                        }
+                        _ => rathkit_pack::bundle::Format::Esm,
+                    };
+                    if !formats.contains(&format) {
+                        formats.push(format);
+                    }
                 }
+                if formats.len() > 1 && formats.contains(&rathkit_pack::bundle::Format::Iife) {
+                    eprintln!("error: --format iife is for a page and cannot be listed with another format");
+                    return Done::Exit(ExitCode::from(2));
+                }
+                bundle_options.format = formats[0];
+            }
+            // --write-exports[=FILE]: set `main`, `module`, `types` and `exports` in the package.json (or FILE) to the files this build wrote.
+            arg if arg == "--write-exports" || arg.starts_with("--write-exports=") => {
+                write_exports = Some(arg.strip_prefix("--write-exports=").map_or("package.json".to_string(), |f| f.to_string()));
+            }
+            // --preserve-modules [--preserve-modules-root DIR]: a library written as one file for each module.
+            "--preserve-modules" => bundle_options.preserve_modules = true,
+            arg if arg == "--preserve-modules-root" || arg.starts_with("--preserve-modules-root=") => {
+                let value = if arg == "--preserve-modules-root" { it.next().cloned().unwrap_or_default() } else { arg["--preserve-modules-root=".len()..].to_string() };
+                if value.is_empty() {
+                    eprintln!("error: --preserve-modules-root needs a folder");
+                    return Done::Exit(ExitCode::from(2));
+                }
+                bundle_options.preserve_modules = true;
+                preserve_root = Some(value);
+            }
+            // --exports auto|named: how an entry written as CommonJS hands out its exports (auto: a default alone is module.exports).
+            arg if arg == "--exports" || arg.starts_with("--exports=") => {
+                let value = if arg == "--exports" { it.next().cloned().unwrap_or_default() } else { arg["--exports=".len()..].to_string() };
+                bundle_options.cjs_exports = match value.as_str() {
+                    "auto" => rathkit_pack::bundle::CjsExports::Auto,
+                    "named" => rathkit_pack::bundle::CjsExports::Named,
+                    other => {
+                        eprintln!("error: --exports is auto or named, not '{other}'");
+                        return Done::Exit(ExitCode::from(2));
+                    }
+                };
+                exports_given = true;
             }
             "--global-name" => bundle_options.global_name = it.next().cloned(),
             "--global" => {
@@ -1183,7 +1233,36 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     // Workers are scripts built on their own; the files they read and the files they copy are noted for the build that asked.
     let workers = std::sync::Arc::new(WorkerLog::default());
     options.worker_builder = Some(worker_builder(cwd.clone(), options.clone(), bundle_options.clone(), treeshake, workers.clone(), 0));
-    let job = std::sync::Arc::new(Job { cwd, entries, options, bundle_options, treeshake, outfile, outdir, host: plugin_host, config_file, watch, serve: serve_state, bind: (host_name, port), restart_files, workers, pages, metafile, dts: dts.then(|| (dts_dir, tsconfig_path.clone(), dts_bundle)), https: https.then(|| (https_cert, https_key)) });
+    if bundle_options.preserve_modules {
+        if outdir.is_none() || outfile.is_some() || serve || !pages.is_empty() || options.federation.is_some() || bundle_options.format == rathkit_pack::bundle::Format::Iife {
+            eprintln!("error: --preserve-modules writes a file for each module: give --outdir (not --outfile), and it is not for a page, serve, module federation or iife");
+            return Done::Exit(ExitCode::from(2));
+        }
+        bundle_options.preserve_root = preserve_root.map(|r| std::path::absolute(&r).unwrap_or_else(|_| r.into()));
+    }
+    if formats.len() > 1 {
+        if watch || serve || !pages.is_empty() || options.federation.is_some() {
+            eprintln!("error: a list of formats is for building a library once (not with watch, serve, a page or module federation)");
+            return Done::Exit(ExitCode::from(2));
+        }
+        if outdir.is_none() && outfile.is_none() {
+            eprintln!("error: several formats write several files; give --outdir or --outfile");
+            return Done::Exit(ExitCode::from(2));
+        }
+        if bundle_options.out_extensions.iter().any(|(from, _)| from == ".js") {
+            eprintln!("error: with several formats the files end in .mjs and .cjs; --out-extension:.js is for a single format");
+            return Done::Exit(ExitCode::from(2));
+        }
+        if !exports_given {
+            bundle_options.cjs_exports = rathkit_pack::bundle::CjsExports::Auto;
+        }
+    }
+    if write_exports.is_some() && (outdir.is_none() || watch || serve) {
+        eprintln!("error: --write-exports describes the files of a build written with --outdir (not watch or serve)");
+        return Done::Exit(ExitCode::from(2));
+    }
+    let exports_target = write_exports.clone();
+    let job = std::sync::Arc::new(Job { cwd, entries, options, bundle_options, treeshake, outfile, outdir, host: plugin_host, config_file, watch, serve: serve_state, bind: (host_name, port), restart_files, workers, pages, metafile, dts: dts.then(|| (dts_dir, tsconfig_path.clone(), dts_bundle)), https: https.then(|| (https_cert, https_key)), more_builds: exports_target.is_some() });
     if let Some(host) = &job.host {
         // Child compilers of webpack plugins build one entry as a script that sets a global.
         let for_children = job.clone();
@@ -1192,7 +1271,16 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     if job.watch {
         return watch_loop(job);
     }
-    let outcome = run_build(&job);
+    let mut outcome = if formats.len() > 1 { run_formats(&job, &formats) } else { run_build(&job) };
+    if let (true, Some(file)) = (outcome.ok, &exports_target) {
+        match write_package_exports(&job, &formats, file) {
+            Ok(summary) => println!("{summary}"),
+            Err(message) => {
+                eprintln!("error: --write-exports: {message}");
+                outcome.ok = false;
+            }
+        }
+    }
     if let Some(host) = &job.host {
         if let Err(message) = host.close_bundle() {
             eprintln!("error: {message}");
@@ -1226,6 +1314,220 @@ struct Job {
     dts: Option<(Option<String>, Option<String>, bool)>,
     /// `--https`: the certificate and key files, or none for a self-signed certificate.
     https: Option<(Option<String>, Option<String>)>,
+    /// Another build follows this one (a library in several formats), so the process must not end with it.
+    more_builds: bool,
+}
+
+/// `--write-exports`: puts what the build wrote into a `package.json`: `main`, `module`, `types` and the `exports` map, with a subpath
+/// for each entry (`.` for `index`, or for the only entry). Other fields are kept; the file is written with two-space indentation.
+fn write_package_exports(job: &Job, formats: &[rathkit_pack::bundle::Format], file: &str) -> Result<String, String> {
+    use rathkit_pack::bundle::Format;
+    use rathkit_pack::json::Json;
+    let outdir = job.outdir.as_ref().ok_or("it needs --outdir")?;
+    let target = job.cwd.join(file);
+    let package_dir = target.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| job.cwd.clone());
+    let text = std::fs::read_to_string(&target).map_err(|e| format!("{}: {e}", target.display()))?;
+    let Json::Object(mut fields) = Json::parse_jsonc(&text).map_err(|e| format!("{}: {} (at {})", target.display(), e.message, e.pos))? else {
+        return Err(format!("{} is not a JSON object", target.display()));
+    };
+    let outdir_abs = job.cwd.join(outdir);
+    // From the package folder, as `./dist/index.mjs`.
+    let from_package = |path: &std::path::Path| -> String {
+        let relative = rathkit_pack::sourcemap::relative(&package_dir, path);
+        let relative = relative.replace('\\', "/");
+        if relative.starts_with("../") || relative.starts_with("./") { relative } else { format!("./{relative}") }
+    };
+    let entries: Vec<std::path::PathBuf> = job.entries.iter().map(|e| job.cwd.join(e)).collect();
+    // Where each entry's file is, from the output folder: a folder of its own sources with --preserve-modules, the file name otherwise.
+    let base: std::path::PathBuf = match &job.bundle_options.preserve_root {
+        Some(root) => root.clone(),
+        None => entries
+            .iter()
+            .filter_map(|e| e.parent().map(|p| p.to_path_buf()))
+            .reduce(|a, b| a.components().zip(b.components()).take_while(|(x, y)| x == y).map(|(x, _)| x).collect())
+            .unwrap_or_default(),
+    };
+    let names: Vec<String> = entries
+        .iter()
+        .map(|e| {
+            let stem = e.with_extension("");
+            if job.bundle_options.preserve_modules {
+                stem.strip_prefix(&base).unwrap_or(&stem).to_string_lossy().replace('\\', "/")
+            } else {
+                stem.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+            }
+        })
+        .collect();
+    let types_dir = match &job.dts {
+        Some((Some(dir), _, _)) => Some(job.cwd.join(dir)),
+        Some(_) => Some(outdir_abs.clone()),
+        None => None,
+    };
+    let string = |s: String| Json::String(s);
+    let mut map: Vec<(String, Json)> = Vec::new();
+    let (mut main, mut module, mut types) = (None, None, None);
+    for (position, name) in names.iter().enumerate() {
+        let subpath = if name == "index" || names.len() == 1 { ".".to_string() } else { format!("./{name}") };
+        let mut conditions: Vec<(String, Json)> = Vec::new();
+        let flat = job.bundle_options.preserve_modules || names.len() > 1;
+        let _ = flat;
+        let file = |extension: &str| outdir_abs.join(format!("{name}{extension}"));
+        let dts = types_dir.as_ref().map(|d| d.join(format!("{name}.d.ts"))).filter(|f| f.is_file());
+        if let Some(dts) = &dts {
+            conditions.push(("types".into(), string(from_package(dts))));
+        }
+        let several = formats.len() > 1;
+        for &format in formats {
+            let extension = match (format, several) {
+                (Format::Cjs, true) => ".cjs",
+                (_, true) => ".mjs",
+                _ => ".js",
+            };
+            let path = file(extension);
+            if !path.is_file() {
+                return Err(format!("{} was not written, so the exports cannot name it", path.display()));
+            }
+            let value = string(from_package(&path));
+            match format {
+                Format::Esm => conditions.push(("import".into(), value)),
+                Format::Cjs => conditions.push(("require".into(), value)),
+                Format::Iife => conditions.push(("default".into(), value)),
+            }
+            if subpath == "." || position == 0 && names.len() > 1 && !names.iter().any(|n| n == "index") {
+                match format {
+                    Format::Cjs => main = Some(from_package(&path)),
+                    Format::Esm => module = Some(from_package(&path)),
+                    Format::Iife => main = Some(from_package(&path)),
+                }
+            }
+        }
+        if subpath == "." {
+            types = dts.as_ref().map(|d| from_package(d));
+        }
+        // A package with one format has a `default` for what the other conditions miss.
+        let fallback = conditions.iter().rev().find(|(k, _)| k != "types").map(|(_, v)| v.clone());
+        if let (Some(value), false) = (fallback, several) {
+            if !conditions.iter().any(|(k, _)| k == "default") {
+                conditions.push(("default".into(), value));
+            }
+        }
+        map.push((subpath, Json::Object(conditions)));
+    }
+    map.sort_by_key(|(k, _)| k != ".");
+    map.push(("./package.json".into(), string("./package.json".into())));
+    if main.is_none() {
+        main = module.clone();
+    }
+    let mut set = |key: &str, value: Option<Json>| {
+        let Some(value) = value else { return };
+        match fields.iter_mut().find(|(k, _)| k == key) {
+            Some(slot) => slot.1 = value,
+            None => fields.push((key.to_string(), value)),
+        }
+    };
+    set("main", main.map(Json::String));
+    set("module", module.map(Json::String));
+    set("types", types.map(Json::String));
+    set("exports", Some(Json::Object(map.clone())));
+    let mut out = String::new();
+    pretty_json(&Json::Object(fields), 0, &mut out);
+    out.push('\n');
+    std::fs::write(&target, out).map_err(|e| format!("{}: {e}", target.display()))?;
+    Ok(format!("{}  exports for {} entr{}", target.display(), names.len(), if names.len() == 1 { "y" } else { "ies" }))
+}
+
+/// JSON with two-space indentation, as `package.json` is written.
+fn pretty_json(value: &rathkit_pack::json::Json, depth: usize, out: &mut String) {
+    use rathkit_pack::json::Json;
+    let pad = "  ".repeat(depth + 1);
+    match value {
+        Json::Array(items) if !items.is_empty() => {
+            out.push_str("[\n");
+            for (i, item) in items.iter().enumerate() {
+                out.push_str(&pad);
+                pretty_json(item, depth + 1, out);
+                out.push_str(if i + 1 < items.len() { ",\n" } else { "\n" });
+            }
+            out.push_str(&"  ".repeat(depth));
+            out.push(']');
+        }
+        Json::Object(entries) if !entries.is_empty() => {
+            out.push_str("{\n");
+            for (i, (key, item)) in entries.iter().enumerate() {
+                out.push_str(&pad);
+                out.push_str(&Json::String(key.clone()).to_string());
+                out.push_str(": ");
+                pretty_json(item, depth + 1, out);
+                out.push_str(if i + 1 < entries.len() { ",\n" } else { "\n" });
+            }
+            out.push_str(&"  ".repeat(depth));
+            out.push('}');
+        }
+        other => out.push_str(&other.to_string()),
+    }
+}
+
+/// A library written in several formats: one build for each, the ES module files ending in `.mjs` and the CommonJS ones in `.cjs`.
+/// The declarations and the metafile are written once.
+fn run_formats(job: &Job, formats: &[rathkit_pack::bundle::Format]) -> Outcome {
+    use rathkit_pack::bundle::Format;
+    let mut outcome = Outcome { ok: true, watched: Vec::new(), error: None };
+    // ES modules are split when there are several entries, so what they share is written once. CommonJS cannot be split: each entry is
+    // built on its own then, and carries what it needs.
+    let mut plan: Vec<(Format, Vec<String>)> = Vec::new();
+    for &format in formats {
+        if format == Format::Cjs && job.entries.len() > 1 && !job.bundle_options.preserve_modules {
+            plan.extend(job.entries.iter().map(|e| (format, vec![e.clone()])));
+        } else {
+            plan.push((format, job.entries.clone()));
+        }
+    }
+    plan.sort_by_key(|(format, _)| *format == Format::Cjs);
+    let total = plan.len();
+    for (position, (format, entries)) in plan.into_iter().enumerate() {
+        let extension = if format == Format::Cjs { ".cjs" } else { ".mjs" };
+        let mut bundle_options = job.bundle_options.clone();
+        bundle_options.format = format;
+        bundle_options.splitting = format == Format::Esm && entries.len() > 1;
+        bundle_options.out_extensions.push((".js".to_string(), extension.to_string()));
+        // One entry is one file, named after the entry's file.
+        if let ([entry], None) = (entries.as_slice(), &job.outfile) {
+            if let Some(stem) = std::path::Path::new(entry).file_stem() {
+                bundle_options.file_name = Some(format!("{}.js", stem.to_string_lossy()));
+            }
+        }
+        let run = Job {
+            cwd: job.cwd.clone(),
+            entries,
+            options: job.options.clone(),
+            bundle_options,
+            treeshake: job.treeshake,
+            outfile: job.outfile.as_ref().map(|f| std::path::Path::new(f).with_extension(&extension[1..]).to_string_lossy().into_owned()),
+            outdir: job.outdir.clone(),
+            host: job.host.clone(),
+            config_file: job.config_file.clone(),
+            watch: false,
+            serve: None,
+            bind: job.bind.clone(),
+            restart_files: job.restart_files.clone(),
+            workers: job.workers.clone(),
+            pages: Vec::new(),
+            metafile: if position == 0 { job.metafile.clone() } else { None },
+            dts: if position == 0 { job.dts.clone() } else { None },
+            https: None,
+            more_builds: job.more_builds || position + 1 < total,
+        };
+        let one = run_build(&run);
+        outcome.ok &= one.ok;
+        outcome.watched.extend(one.watched);
+        if one.error.is_some() {
+            outcome.error = one.error;
+        }
+        if !one.ok {
+            break;
+        }
+    }
+    outcome
 }
 
 /// An html page given as an entry: its text, and the scripts in it with the files they come from.
@@ -1538,6 +1840,33 @@ fn run_build(job: &Job) -> Outcome {
         }
         bundle_options.splitting = true;
     }
+    // `--preserve-modules`: every module of the project is an entry too, so each keeps all its exports and has a file of its own.
+    let graph = if bundle_options.preserve_modules {
+        bundle_options.preserve_entries = entries.len();
+        let known: std::collections::HashSet<&std::path::Path> = graph.entries.iter().map(|&e| graph.module(e).path.as_path()).collect();
+        let more: Vec<String> = graph
+            .modules
+            .iter()
+            .filter(|m| {
+                matches!(m.kind, rathkit_pack::graph::ModuleKind::Esm | rathkit_pack::graph::ModuleKind::CommonJs)
+                    && m.asset.is_none()
+                    && m.css.is_none()
+                    && m.path.is_file()
+                    && !m.path.components().any(|c| c.as_os_str() == "node_modules")
+                    && !known.contains(m.path.as_path())
+            })
+            .map(|m| m.path.to_string_lossy().into_owned())
+            .collect();
+        if more.is_empty() {
+            graph
+        } else {
+            entries.extend(more);
+            entry_names.resize(entries.len(), None);
+            build(cwd, &entries, options)
+        }
+    } else {
+        graph
+    };
     if options.federation.is_some() {
         // The runtime's own entry follows the application's.
         entry_names.push(None);
@@ -1794,7 +2123,7 @@ fn run_build(job: &Job) -> Outcome {
     // A build that is the whole run, with nothing to stop or clean up (no watching, no plugin process), leaves its graph, syntax trees and
     // text to the system rather than freeing them one allocation at a time, which takes a few percent of a small build. What was written
     // is written; the standard output is flushed on the way out.
-    if job.options.cache.is_none() && job.host.is_none() {
+    if job.options.cache.is_none() && job.host.is_none() && !job.more_builds {
         std::process::exit(if outcome.ok { 0 } else { 1 });
     }
     if let Some(cache) = &job.options.cache {
