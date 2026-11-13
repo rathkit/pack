@@ -1002,13 +1002,26 @@ impl<'a> Bundler<'a> {
                 }
                 sheets.sort_by_key(|m| position[m.index()]);
                 // `@import "x" screen` wraps what x holds.
-                let mut wrappers: HashMap<ModuleId, String> = HashMap::new();
-                for &id in &sheets {
+                // The conditions pass on to what the sheet imports in turn; a sheet imported more than once keeps the first wrapping.
+                let mut wrappers: HashMap<ModuleId, Vec<String>> = HashMap::new();
+                let mut work: Vec<ModuleId> = sheets.clone();
+                let mut visits = 0usize;
+                while let Some(id) = work.pop() {
+                    visits += 1;
+                    if visits > graph.modules.len() * 8 + 64 {
+                        break;
+                    }
                     let module = graph.module(id);
-                    let sheet = module.css.as_ref().expect("a sheet");
-                    for r in sheet.parsed.refs.iter().filter(|r| r.kind == RefKind::Import && !r.conditions.is_empty()) {
+                    let Some(sheet) = module.css.as_ref() else { continue };
+                    let own = wrappers.get(&id).cloned().unwrap_or_default();
+                    for r in sheet.parsed.refs.iter().filter(|r| r.kind == RefKind::Import) {
                         if let Some(Edge::Module(target)) = module.record.request_index(&r.specifier, RequestKind::Static).map(|i| &module.edges[i]) {
-                            wrappers.entry(*target).or_insert_with(|| r.conditions.clone());
+                            let mut chain = own.clone();
+                            chain.extend(css::import_wrappers(&r.conditions));
+                            if !chain.is_empty() && !wrappers.contains_key(target) {
+                                wrappers.insert(*target, chain);
+                                work.push(*target);
+                            }
                         }
                     }
                 }
@@ -1035,7 +1048,7 @@ impl<'a> Bundler<'a> {
                                 },
                                 (RefKind::Url, _) => Replacement::Leave,
                                 (RefKind::Compose, Some(Edge::Module(target))) => match &graph.module(*target).css {
-                                    Some(other) => Replacement::Seed(other.seed.clone()),
+                                    Some(other) => Replacement::Sheet(other.seed.clone(), other.parsed.values.clone()),
                                     None => Replacement::Leave,
                                 },
                                 (RefKind::Compose, _) => Replacement::Leave,
@@ -1052,15 +1065,14 @@ impl<'a> Bundler<'a> {
                     if text.is_empty() {
                         continue;
                     }
-                    let block = match wrappers.get(&id) {
-                        Some(c) if c.starts_with("layer(") => format!("@layer {}{{{}}}", c[6..].trim_end_matches(')'), text),
-                        Some(c) if c.starts_with("supports(") => format!("@supports {}{{{}}}", &c[8..c.rfind(')').map_or(c.len(), |p| p + 1)], text),
-                        Some(c) => format!("@media {c}{{{text}}}"),
-                        None => text.to_string(),
+                    let (opening, closing) = match wrappers.get(&id) {
+                        Some(chain) => (chain.iter().map(|w| format!("{w}{{")).collect::<String>(), "}".repeat(chain.len())),
+                        None => (String::new(), String::new()),
                     };
+                    let block = format!("{opening}{text}{closing}");
                     if mapping {
                         let lead = rendered.css.len() - rendered.css.trim_start().len();
-                        let prefix = if wrappers.contains_key(&id) { block.len() - text.len() - 1 } else { 0 };
+                        let prefix = opening.len();
                         for &(offset, source) in &rendered.anchors {
                             if offset >= lead && offset - lead <= text.len() {
                                 anchors.push((body.len() + prefix + offset - lead, id, source));
@@ -1071,6 +1083,12 @@ impl<'a> Bundler<'a> {
                     body.push('\n');
                 }
                 let mut out = String::new();
+                // `@charset` has to be the first thing in the file.
+                if let Some(charset) = hoisted.iter().find(|h| h.starts_with("@charset")) {
+                    out.push_str(charset);
+                    out.push('\n');
+                }
+                hoisted.retain(|h| !h.starts_with("@charset"));
                 if let Some(banner) = &options.banner_css {
                     out.push_str(banner);
                     out.push('\n');
@@ -2818,6 +2836,14 @@ impl<'a> Scanner<'_, 'a> {
                         }
                     }
                 } else {
+                    // A free `__dirname` in a module written with `import` (a config the bundler reads) is also its own file's folder.
+                    if self.bundler.original_paths && matches!(ast.atom(name), "__dirname" | "__filename") && self.semantic.symbol_of(node).is_none() {
+                        let path = &self.module.path;
+                        let text = if ast.atom(name) == "__filename" { path.parent().map(|_| path.as_path()) } else { path.parent() };
+                        let text = json_string(&text.unwrap_or(path).to_string_lossy());
+                        self.push(node, vec![Piece::Text(text)]);
+                        return;
+                    }
                     self.ident(node);
                 }
                 return;

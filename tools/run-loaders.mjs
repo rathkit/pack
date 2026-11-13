@@ -47,7 +47,7 @@ const checkCssMap = (cssFile, dir) => {
     const content = map.sourcesContent?.[s.source];
     if (content === undefined) return 'the css map has no sources content';
     const here = token(out[s.line], s.col), there = token(content.split('\n')[s.sline], s.scol);
-    if (!here || !there || !(here.endsWith(there) || there.endsWith(here))) return `css map segment at ${s.line + 1}:${s.col + 1} says ${JSON.stringify(here)} came from ${JSON.stringify(there)} (${map.sources[s.source]}:${s.sline + 1}:${s.scol + 1})`;
+    if (!here || !there || !(here.toLowerCase().endsWith(there.toLowerCase()) || there.toLowerCase().endsWith(here.toLowerCase()))) return `css map segment at ${s.line + 1}:${s.col + 1} says ${JSON.stringify(here)} came from ${JSON.stringify(there)} (${map.sources[s.source]}:${s.sline + 1}:${s.scol + 1})`;
   }
   return null;
 };
@@ -92,7 +92,7 @@ for (const name of names) {
       if (!problem && flags.includes('--sourcemap') && existsSync(css)) problem = checkCssMap(css, dir);
       if (!problem && existsSync(css)) {
         for (const m of readFileSync(css, 'utf8').matchAll(/url\(("?)(\.\/[^")]+)\1\)/g)) {
-          if (!existsSync(join(out, m[2]))) problem = `the sheet points to ${m[2]}, which was not written`;
+          if (!existsSync(join(out, decodeURIComponent(m[2].replace(/[?#].*$/, ''))))) problem = `the sheet points to ${m[2]}, which was not written`;
         }
       }
     }

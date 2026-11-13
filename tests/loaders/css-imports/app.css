@@ -1,0 +1,9 @@
+@import "./base.css";
+@import "kit";
+@import "~@scope/theme/theme.css";
+@import url("./cond.css") layer(base) supports(display: grid) screen and (min-width: 600px);
+@import './anon.css' layer;
+@import url(./print.css) print;
+@import "https://fonts.example/a.css";
+@import url(//cdn.example/b.css) screen;
+.app { color: red; }

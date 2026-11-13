@@ -632,7 +632,13 @@ impl<'a> Context<'a> {
         let kind_now = kind_of(plugin_text.as_deref());
         if from_type.is_none() && ext_loader.is_none() && !by_plugin && !matches!(extension.as_deref(), Some("json" | "js" | "jsx" | "ts" | "tsx" | "mjs" | "mts" | "cjs" | "cts")) {
             let ext = extension.as_deref().map_or(String::new(), |e| format!(".{e}"));
-            return Err(error(format!("No loader for '{ext}' files"), None));
+            let hint = match extension.as_deref() {
+                Some("scss" | "sass") => ": install the package sass (or sass-embedded) in the project to compile it",
+                Some("less") => ": install the package less in the project to compile it",
+                Some("styl" | "stylus") => ": install the package stylus in the project to compile it",
+                _ => "",
+            };
+            return Err(error(format!("No loader for '{ext}' files{hint}"), None));
         }
         let (loader, force_js, syntax_hint, as_json) = match kind_now {
             Kind::Loader(l) => (Some(l), false, None, false),
@@ -668,7 +674,8 @@ impl<'a> Context<'a> {
                             }
                             let request = Request { specifier: r.specifier.clone(), kind: RequestKind::Static, attrs: Vec::new(), span: crate::ast::Span { start: 0, end: 0 } };
                             if let Target::Path(other) = self.resolve_request(path.parent().unwrap_or(Path::new("/")), path, &request, true, &mut diagnostics) {
-                                *slot = crate::css::Replacement::Seed(self.css_seed(&other));
+                                let values = self.resolver.read_to_string(&other).ok().and_then(|t| crate::css::parse(&t, true).ok()).map(|p| p.values).unwrap_or_default();
+                                *slot = crate::css::Replacement::Sheet(self.css_seed(&other), values);
                             }
                         }
                         crate::loader::local_names_module(&crate::css::render(&text, &parsed, &replacements, Some(&seed), false).exports)
@@ -950,7 +957,12 @@ impl<'a> Context<'a> {
     /// a hash of the file's place in the project.
     fn css_seed(&self, path: &Path) -> String {
         let relative = path.strip_prefix(self.cwd).unwrap_or(path);
-        crate::loader::hash(relative.to_string_lossy().as_bytes(), 5)
+        let mut seed = crate::loader::hash(relative.to_string_lossy().as_bytes(), 5);
+        // The name is a CSS identifier (`.2hnx2_card` is not one), so it starts with a letter.
+        if let Some(first) = seed.chars().next().filter(char::is_ascii_digit) {
+            seed.replace_range(0..1, &char::from(b'u' + (first as u8 - b'2') % 6).to_string());
+        }
+        seed
     }
 
     fn is_external(&self, specifier: &str) -> bool {

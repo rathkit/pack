@@ -1,0 +1,11 @@
+@charset "utf-8";
+@import "https://fonts.example/a.css";
+@import url(//cdn.example/b.css) screen;
+.base{margin:0}
+.kit{color:navy}
+.theme{color:teal}
+@layer base{@supports (display: grid){@media screen and (min-width: 600px){.deep{padding:0}}}}
+@layer base{@supports (display: grid){@media screen and (min-width: 600px){.cond{display:grid}}}}
+@layer{.anon{color:green}}
+@media print{.print{color:black}}
+.app{color:red}
