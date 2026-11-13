@@ -239,6 +239,7 @@ fn in_pieces(source: &str, layout: &Layout, ranges: &[std::ops::Range<usize>], o
         if let (Some(prep), Some(top)) = (&unit.prep, &shared) {
             unit.facts.plan_renames(&unit.parsed.ast, &unit.parsed.semantic, tokens, unit.source, prep, &top.avoid, Some(&top.names[unit.group]), &mut renames);
         }
+        plan_private_names(tokens, unit.source, &unit.parsed.semantic, &options, &mut renames);
         let mut found = anchors.is_some().then(Vec::new);
         let out = emit(unit.source, tokens, &renames, &unit.asi, &unit.facts, &options, unit.plan.as_ref(), found.as_mut(), follows[i]);
         (out, found.unwrap_or_default())
