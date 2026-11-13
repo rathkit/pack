@@ -3,7 +3,7 @@
 // accepted at all (the page would reload).
 //   node tools/run-hmr.mjs
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, renameSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -326,6 +326,10 @@ for (const name of ['rxjs', 'lodash', 'three']) {
       if (!(await until(() => /(?:127\.0\.0\.1|localhost):\d+/.test(log)))) throw new Error('the server did not start: ' + log);
       const port = /(?:localhost|127\.0\.0\.1):(\d+)/.exec(log)[1];
       tab = await openBrowser(kind, browser);
+      const pageEvents = []; // what the page printed and when it loaded, for the failure messages that explain a reload
+      tab.onEvent((e) => {
+        if (e.type === 'load' || e.type === 'exception' || (e.type === 'console' && /\[rkp\]/.test(e.text))) pageEvents.push(e.type === 'load' ? 'page loaded' : e.type === 'exception' ? 'exception: ' + e.text : e.text);
+      });
       const evaluate = (expression) => tab.evaluate(expression);
       await tab.navigate(`http://127.0.0.1:${port}/`);
       check(await until(async () => (await evaluate("document.getElementById('out')?.textContent")) === 'one|a'), 'the page runs the modules');
@@ -351,6 +355,7 @@ for (const name of ['rxjs', 'lodash', 'three']) {
         let reactLog = '';
         react.stdout.on('data', (d) => (reactLog += d));
         react.stderr.on('data', (d) => (reactLog += d));
+        const explainReload = explainReloadOf(pageEvents);
         try {
           if (!(await until(() => /(?:127\.0\.0\.1|localhost):\d+/.test(reactLog)))) throw new Error('the React server did not start: ' + reactLog);
           const reactPort = /(?:localhost|127\.0\.0\.1):(\d+)/.exec(reactLog)[1];
@@ -366,9 +371,10 @@ for (const name of ['rxjs', 'lodash', 'three']) {
           write2(app, 'App.jsx', readFileSync(join(app, 'App.jsx'), 'utf8').replace('Hello', 'Howdy'));
           check(await until60(async () => (await text()) === 'Howdy count 2'), 'an edited component is replaced with its state kept', String(await text()));
           check((await evaluate('window.__page')) === first, 'without a reload');
+          const hooksEdit = { log: reactLog.length, events: pageEvents.length };
           write2(app, 'App.jsx', readFileSync(join(app, 'App.jsx'), 'utf8').replace('useState(0)', 'useState(10)'));
           check(await until60(async () => (await text()) === 'Howdy count 10'), 'when its hooks change the state starts again', String(await text()));
-          check((await evaluate('window.__page')) === first, 'and still no reload');
+          check((await evaluate('window.__page')) === first, 'and still no reload', explainReload(reactLog, hooksEdit));
           write2(app, 'App.jsx', readFileSync(join(app, 'App.jsx'), 'utf8') + 'export const notAComponent = 1;\n');
           check(await until60(async () => (await evaluate('window.__page')) !== first), 'a module that exports more than components reloads the page');
         } finally {
@@ -453,8 +459,25 @@ for (const name of ['rxjs', 'lodash', 'three']) {
     }
   }
 }
+// The message of a check that found a reload it did not expect: which rebuilds the server made after the edit, whether one failed, and what
+// the page did with them, so a failure on a slow machine says what happened.
+function explainReloadOf(pageEvents) {
+  return (log, mark) => {
+    const lines = log.slice(mark.log).split('\n').filter(Boolean);
+    const rebuilds = lines.filter((l) => /^rebuilt in /.test(l)).length;
+    const errors = lines.filter((l) => /^error|build error|failed/i.test(l));
+    const seen = pageEvents.slice(mark.events);
+    const why = errors.length ? 'a build error came first' : rebuilds > 1 ? 'a second rebuild came after the first' : rebuilds === 1 ? 'one rebuild, and the page asked for the reload itself' : 'no rebuild had finished';
+    return `after the edit the server made ${rebuilds} rebuild(s); the reload is explained by: ${why}\n--- server log since the edit\n${lines.join('\n')}\n--- page since the edit\n${seen.join('\n')}`;
+  };
+}
+// An edit lands whole, like the save of an editor that writes a temporary file and renames it. A plain writeFileSync empties the file first,
+// and on a loaded machine the server can look at it in between: it builds a module with no exports (the page reloads, as for any module
+// that stops being a component), and the full file then comes as a second rebuild. That was the flake of the React Refresh scenario.
 function write2(base, name, text) {
-  writeFileSync(join(base, name), text);
+  const temporary = join(base, `.${name}.${process.pid}.tmp`);
+  writeFileSync(temporary, text);
+  renameSync(temporary, join(base, name));
 }
 if (failed) {
   console.log(`${failed} failure(s)`);
