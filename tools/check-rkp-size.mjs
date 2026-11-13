@@ -9,7 +9,7 @@
 // a difference in bytes at the same size is reported as a note, not a failure.
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -30,12 +30,17 @@ function build() {
   return { size: statSync(exe).size, sha: createHash('sha256').update(bytes).digest('hex') };
 }
 
-if (!existsSync(join(root, 'check', 'Cargo.toml'))) {
+try {
+  readFileSync(join(root, 'check', 'Cargo.toml'));
+} catch {
   console.error('check/Cargo.toml not found: nothing to compare against');
   process.exit(2);
 }
 const manifest = readFileSync(manifestPath, 'utf8');
-const lock = existsSync(lockPath) ? readFileSync(lockPath) : null;
+let lock = null;
+try {
+  lock = readFileSync(lockPath);
+} catch {}
 const withMember = /members\s*=\s*\[[^\]]*"check"[^\]]*\]/.test(manifest);
 if (!withMember) {
   console.error('Cargo.toml does not list "check" as a workspace member');

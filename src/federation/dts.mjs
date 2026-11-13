@@ -676,9 +676,13 @@ function declarationReader() {
   const loadFile = (fileName) => {
     const name = path.resolve(fileName);
     if (files.has(name)) return files.get(name);
-    if (!fs.existsSync(name) || !fs.statSync(name).isFile()) return null;
-    const file = parseFile(name, fs.readFileSync(name, 'utf8'));
-    return file;
+    let text;
+    try {
+      text = fs.readFileSync(name, 'utf8');
+    } catch {
+      return null; // missing, or a folder
+    }
+    return parseFile(name, text);
   };
 
   const tools = (file) => ({

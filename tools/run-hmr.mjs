@@ -465,7 +465,7 @@ function explainReloadOf(pageEvents) {
   return (log, mark) => {
     const lines = log.slice(mark.log).split('\n').filter(Boolean);
     const rebuilds = lines.filter((l) => /^rebuilt in /.test(l)).length;
-    const errors = lines.filter((l) => /^error|build error|failed/i.test(l));
+    const errors = lines.filter((l) => /^error/i.test(l) || /build error|failed/i.test(l));
     const seen = pageEvents.slice(mark.events);
     const why = errors.length ? 'a build error came first' : rebuilds > 1 ? 'a second rebuild came after the first' : rebuilds === 1 ? 'one rebuild, and the page asked for the reload itself' : 'no rebuild had finished';
     return `after the edit the server made ${rebuilds} rebuild(s); the reload is explained by: ${why}\n--- server log since the edit\n${lines.join('\n')}\n--- page since the edit\n${seen.join('\n')}`;

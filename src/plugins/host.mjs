@@ -976,18 +976,23 @@ const findPostcssConfig = async (projectRoot) => {
   for (let dir = projectRoot; ; dir = path.dirname(dir)) {
     for (const name of names) {
       const file = path.join(dir, name);
-      if (!fs.existsSync(file) || !fs.statSync(file).isFile()) continue;
+      let text;
+      try {
+        text = fs.readFileSync(file, 'utf8'); // one read, no check first: the file may change in between
+      } catch {
+        continue; // missing, or a folder
+      }
       if (name === 'package.json') {
         let field;
         try {
-          field = JSON.parse(fs.readFileSync(file, 'utf8')).postcss;
+          field = JSON.parse(text).postcss;
         } catch {}
         if (field && typeof field === 'object') return { file, config: field };
         continue;
       }
       if (name === '.postcssrc' || name.endsWith('.json')) {
         try {
-          return { file, config: JSON.parse(fs.readFileSync(file, 'utf8')) };
+          return { file, config: JSON.parse(text) };
         } catch (error) {
           // `.postcssrc` without an extension may be YAML, which is not read here
           throw new Error(`Cannot read ${file} as JSON: ${error.message}`);
