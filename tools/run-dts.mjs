@@ -17,12 +17,13 @@ if (!existsSync(typescript)) {
 }
 const tmp = mkdtempSync(join(tmpdir(), 'dts-'));
 let failed = 0;
-const check = (ok, what, detail = '') => {
+const outerCheck = (ok, what, detail = '') => {
   if (!ok) {
     failed++;
     console.log(`FAIL ${what}${detail ? '\n' + detail : ''}`);
   }
 };
+const check = outerCheck;
 const write = (dir, file, text) => {
   mkdirSync(dirname(join(dir, file)), { recursive: true });
   writeFileSync(join(dir, file), text);
@@ -65,45 +66,63 @@ check(r.status !== 0 && /typescript package is not installed/.test(r.stderr), 'a
 check(existsSync(join(bare, 'dist', 'bundle.js')), 'the bundle itself is still written');
 
 
-// --dts-bundle: one declaration file for the entry, with everything it reaches merged in.
-{
-  const lib = join(tmp, 'lib');
-  cpSync(join(root, 'tests', 'dts-bundle', 'lib'), lib, { recursive: true });
-  symlinkSync(realpathSync(typescript), join(lib, 'node_modules', 'typescript'), 'dir');
-  const built = run(lib, ['bundle', 'src/index.ts', '--outdir', 'dist', '--dts-bundle', '--external', 'ext-pkg']);
-  check(built.status === 0, 'a build with --dts-bundle', built.stderr + built.stdout);
-  const files = existsSync(join(lib, 'dist')) ? readdirSync(join(lib, 'dist')).filter((f) => f.endsWith('.d.ts')).sort() : [];
-  check(files.join() === 'index.d.ts', 'one declaration file for the entry', files.join());
-  const merged = existsSync(join(lib, 'dist', 'index.d.ts')) ? readFileSync(join(lib, 'dist', 'index.d.ts'), 'utf8') : '';
-  check(!/from '\.\.?\//.test(merged) && !/import\("\.\.?\//.test(merged), 'with no import of another file of the library', merged.slice(0, 300));
-  check(/^import .* from 'ext-pkg';/m.test(merged) && /export \{ makeExt \} from 'ext-pkg';/.test(merged), 'and what comes from a package stays an import and a re-export');
-  check((merged.match(/\binterface Item\b|\binterface Item\$\d\b/g) ?? []).length === 3, 'the three things named Item are told apart', (merged.match(/interface Item\S*/g) ?? []).join());
-  check(/export \{[^}]*\bdescribe\b[^}]*\};/.test(merged), 'and the exports are listed');
-  mkdirSync(join(lib, 'consumer'), { recursive: true });
-  copyFileSync(join(root, 'tests', 'dts-bundle', 'consumer.ts'), join(lib, 'consumer', 'main.ts'));
-  const compile = spawnSync('node', [join(typescript, 'bin', 'tsc'), '--noEmit', '--strict', '--module', 'esnext', '--moduleResolution', 'bundler', '--target', 'es2020', 'consumer/main.ts'], { cwd: lib, encoding: 'utf8' });
-  check(compile.status === 0, 'a strict consumer type-checks against it, and its wrong uses are errors', compile.stdout);
-}
-
-
-// And a library with the awkward corners: default exports, a default re-export, `declare global`, a module augmentation, a const enum.
-{
-  const lib = join(tmp, 'edge');
-  cpSync(join(root, 'tests', 'dts-bundle', 'edge'), lib, { recursive: true });
-  symlinkSync(realpathSync(typescript), join(lib, 'node_modules', 'typescript'), 'dir');
-  const built = run(lib, ['bundle', 'src/index.ts', '--outdir', 'dist', '--dts-bundle', '--external', 'ext-pkg']);
-  check(built.status === 0, 'a build with --dts-bundle of a library with augmentations', built.stderr + built.stdout);
-  const merged = existsSync(join(lib, 'dist', 'index.d.ts')) ? readFileSync(join(lib, 'dist', 'index.d.ts'), 'utf8') : '';
-  check(/declare global \{/.test(merged) && /declare module 'ext-pkg' \{/.test(merged), 'declare global and a module augmentation are kept', merged.slice(0, 200));
-  check(/export \{[^}]*\bThing as default\b[^}]*\}|export default Thing/.test(merged), 'and so is the default export');
-  mkdirSync(join(lib, 'consumer'), { recursive: true });
-  copyFileSync(join(lib, 'consumer.ts'), join(lib, 'consumer', 'main.ts'));
-  const compile = spawnSync('node', [join(typescript, 'bin', 'tsc'), '--noEmit', '--strict', '--module', 'esnext', '--moduleResolution', 'bundler', '--target', 'es2020', 'consumer/main.ts'], { cwd: lib, encoding: 'utf8' });
-  check(compile.status === 0, 'a strict consumer type-checks against it', compile.stdout);
-}
-
-// TypeScript 7 is the native compiler: --dts and --dts-dir write the same declarations through its command line, --dts-bundle says it needs 5 or 6.
+// Declarations are merged with TypeScript 5's API, and with a reader of our own when the project's typescript is version 7 (it has no API).
 const ts7 = join(testModules, 'ts7');
+for (const [tag, compiler] of [['', typescript], [' (TypeScript 7)', ts7]]) {
+  if (!existsSync(compiler)) continue;
+  const check = (ok, what, detail = '') => outerCheck(ok, what + tag, detail);
+  {
+    const lib = join(tmp, 'lib' + tag.length);
+    cpSync(join(root, 'tests', 'dts-bundle', 'lib'), lib, { recursive: true });
+    symlinkSync(realpathSync(compiler), join(lib, 'node_modules', 'typescript'), 'dir');
+    const built = run(lib, ['bundle', 'src/index.ts', '--outdir', 'dist', '--dts-bundle', '--external', 'ext-pkg']);
+    check(built.status === 0, 'a build with --dts-bundle', built.stderr + built.stdout);
+    const files = existsSync(join(lib, 'dist')) ? readdirSync(join(lib, 'dist')).filter((f) => f.endsWith('.d.ts')).sort() : [];
+    check(files.join() === 'index.d.ts', 'one declaration file for the entry', files.join());
+    const merged = existsSync(join(lib, 'dist', 'index.d.ts')) ? readFileSync(join(lib, 'dist', 'index.d.ts'), 'utf8') : '';
+    check(!/from '\.\.?\//.test(merged) && !/import\("\.\.?\//.test(merged), 'with no import of another file of the library', merged.slice(0, 300));
+    check(/^import .* from 'ext-pkg';/m.test(merged) && /export \{ makeExt \} from 'ext-pkg';/.test(merged), 'and what comes from a package stays an import and a re-export');
+    check((merged.match(/\binterface Item\b|\binterface Item\$\d\b/g) ?? []).length === 3, 'the three things named Item are told apart', (merged.match(/interface Item\S*/g) ?? []).join());
+    check(/export \{[^}]*\bdescribe\b[^}]*\};/.test(merged), 'and the exports are listed');
+    mkdirSync(join(lib, 'consumer'), { recursive: true });
+    copyFileSync(join(root, 'tests', 'dts-bundle', 'consumer.ts'), join(lib, 'consumer', 'main.ts'));
+    const compile = spawnSync('node', [join(typescript, 'bin', 'tsc'), '--noEmit', '--strict', '--module', 'esnext', '--moduleResolution', 'bundler', '--target', 'es2020', 'consumer/main.ts'], { cwd: lib, encoding: 'utf8' });
+    check(compile.status === 0, 'a strict consumer type-checks against it, and its wrong uses are errors', compile.stdout);
+  }
+
+
+  // Re-exports written with the .ts extension (allowImportingTsExtensions) are followed.
+  {
+    const lib = join(tmp, 'tsext' + tag.length);
+    cpSync(join(root, 'tests', 'dts-bundle', 'ts-ext'), lib, { recursive: true });
+    mkdirSync(join(lib, 'node_modules'), { recursive: true });
+    symlinkSync(realpathSync(compiler), join(lib, 'node_modules', 'typescript'), 'dir');
+    const built = run(lib, ['bundle', 'src/index.ts', '--outdir', 'dist', '--dts-bundle']);
+    check(built.status === 0, 'a build with --dts-bundle of a library that imports with .ts extensions', built.stderr + built.stdout);
+    const merged = existsSync(join(lib, 'dist', 'index.d.ts')) ? readFileSync(join(lib, 'dist', 'index.d.ts'), 'utf8') : '';
+    check(/\bgreet\b/.test(merged) && /\banswer\b/.test(merged) && /\bGreeting\b/.test(merged) && !/from '\.\//.test(merged), 'what a .ts re-export names is merged in', merged);
+  }
+
+  // And a library with the awkward corners: default exports, a default re-export, `declare global`, a module augmentation, a const enum.
+  {
+    const lib = join(tmp, 'edge' + tag.length);
+    cpSync(join(root, 'tests', 'dts-bundle', 'edge'), lib, { recursive: true });
+    symlinkSync(realpathSync(compiler), join(lib, 'node_modules', 'typescript'), 'dir');
+    const built = run(lib, ['bundle', 'src/index.ts', '--outdir', 'dist', '--dts-bundle', '--external', 'ext-pkg']);
+    check(built.status === 0, 'a build with --dts-bundle of a library with augmentations', built.stderr + built.stdout);
+    const merged = existsSync(join(lib, 'dist', 'index.d.ts')) ? readFileSync(join(lib, 'dist', 'index.d.ts'), 'utf8') : '';
+    check(/declare global \{/.test(merged) && /declare module 'ext-pkg' \{/.test(merged), 'declare global and a module augmentation are kept', merged.slice(0, 200));
+    check(/export \{[^}]*\bThing as default\b[^}]*\}|export default Thing/.test(merged), 'and so is the default export');
+    mkdirSync(join(lib, 'consumer'), { recursive: true });
+    copyFileSync(join(lib, 'consumer.ts'), join(lib, 'consumer', 'main.ts'));
+    const compile = spawnSync('node', [join(typescript, 'bin', 'tsc'), '--noEmit', '--strict', '--module', 'esnext', '--moduleResolution', 'bundler', '--target', 'es2020', 'consumer/main.ts'], { cwd: lib, encoding: 'utf8' });
+    check(compile.status === 0, 'a strict consumer type-checks against it', compile.stdout);
+  }
+
+
+}
+
+// TypeScript 7 is the native compiler: --dts and --dts-dir write the same declarations through its command line.
 if (existsSync(ts7)) {
   const native = join(tmp, 'native7');
   mkdirSync(join(native, 'node_modules'), { recursive: true });
@@ -119,8 +138,6 @@ if (existsSync(ts7)) {
   write(native, 'src/util.ts', 'export interface Point { x: number; y: number }\nexport const origin: Point = { x: "no", y: 0 };\n');
   const bad = run(native, ['bundle', 'src/index.ts', 'src/plain.js', '--outdir', 'dist2', '--dts']);
   check(bad.status === 0 && /util\.ts:2: .*not assignable/.test(bad.stderr + bad.stdout), 'a type error is reported and the declarations are written all the same', bad.stderr);
-  const bundled = run(native, ['bundle', 'src/index.ts', '--outdir', 'dist3', '--dts-bundle']);
-  check(bundled.status !== 0 && /--dts-bundle .*typescript 5 or 6/.test(bundled.stderr), '--dts-bundle names TypeScript 5 or 6', bundled.stderr);
 } else {
   console.log('dts: ts7 is not installed; the TypeScript 7 checks are skipped');
 }

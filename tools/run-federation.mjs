@@ -6,7 +6,7 @@
 import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import { browserKind, findBrowser, openBrowser } from './lib/browsers.mjs';
-import { existsSync, readdirSync, readFileSync, writeFileSync, mkdtempSync, rmSync, cpSync, symlinkSync, mkdirSync, statSync } from 'node:fs';
+import { existsSync, realpathSync, readdirSync, readFileSync, writeFileSync, mkdtempSync, rmSync, cpSync, symlinkSync, mkdirSync, statSync } from 'node:fs';
 import { join, dirname, extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -682,6 +682,26 @@ scenario('development servers: a page of one loads the other, and a change in th
   } finally {
     for (const p of procs) p.kill();
   }
+});
+
+scenario('types with TypeScript 7: the native compiler writes the declarations of the exposed modules', async () => {
+  const ts7 = join(testModules, 'ts7');
+  if (!existsSync(ts7)) {
+    console.log('federation: ts7 is not installed (' + installHint + '); the TypeScript 7 types scenario is skipped');
+    return;
+  }
+  const dist = await build('remote-types', {
+    entry: 'src/index.ts',
+    as: 'remote-types-ts7',
+    links: false,
+    patch: (dir) => {
+      mkdirSync(join(dir, 'node_modules'), { recursive: true });
+      symlinkSync(realpathSync(ts7), join(dir, 'node_modules', 'typescript'), 'dir');
+    },
+  });
+  for (const file of ['@mf-types.zip', '@mf-types.d.ts', '@mf-types/apis.d.ts', '@mf-types/compiled-types/Button.d.ts']) check(`with TypeScript 7 the remote publishes ${file}`, existsSync(join(dist, file)));
+  check('the declarations describe the module', /export default function makeButton\(props: ButtonProps\): string/.test(existsSync(join(dist, '@mf-types', 'compiled-types', 'Button.d.ts')) ? readFileSync(join(dist, '@mf-types', 'compiled-types', 'Button.d.ts'), 'utf8') : ''));
+  check('and the build did not warn that no types were written', !/no types were written|has no JavaScript API/.test(lastStderr), lastStderr);
 });
 
 for (const [name, fn] of scenarios) {
