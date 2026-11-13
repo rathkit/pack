@@ -1256,7 +1256,11 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
             eprintln!("error: --preserve-modules writes a file for each module: give --outdir (not --outfile), and it is not for a page, serve, module federation or iife");
             return Done::Exit(ExitCode::from(2));
         }
-        bundle_options.preserve_root = preserve_root.map(|r| std::path::absolute(&r).unwrap_or_else(|_| r.into()));
+        // The graph names modules by their real path (on Windows the long form, not 8.3 short names like RUNNER~1), so the root is the real path too.
+        bundle_options.preserve_root = preserve_root.map(|r| {
+            let absolute = std::path::absolute(&r).unwrap_or_else(|_| r.into());
+            std::fs::canonicalize(&absolute).map(|c| rathkit_pack::resolve::without_verbatim_prefix(&c)).unwrap_or(absolute)
+        });
     }
     if formats.len() > 1 {
         if watch || serve || !pages.is_empty() || options.federation.is_some() {
@@ -1356,6 +1360,7 @@ fn write_package_exports(job: &Job, formats: &[rathkit_pack::bundle::Format], fi
         if relative.starts_with("../") || relative.starts_with("./") { relative } else { format!("./{relative}") }
     };
     let entries: Vec<std::path::PathBuf> = job.entries.iter().map(|e| job.cwd.join(e)).collect();
+    let entries: Vec<std::path::PathBuf> = if job.bundle_options.preserve_modules { entries.into_iter().map(|e| std::fs::canonicalize(&e).map(|c| rathkit_pack::resolve::without_verbatim_prefix(&c)).unwrap_or(e)).collect() } else { entries };
     // Where each entry's file is, from the output folder: a folder of its own sources with --preserve-modules, the file name otherwise.
     let base: std::path::PathBuf = match &job.bundle_options.preserve_root {
         Some(root) => root.clone(),
