@@ -65,11 +65,28 @@ async function one(p) {
     r = run('pnpm', ['install', '--ignore-scripts', lock ? '--frozen-lockfile' : '--no-frozen-lockfile', ...(p.installArgs || [])], where, 900);
     if (!r.ok) return step('install', r);
   }
+  // `addPackages`: packages the project's own config imports but its package.json does not list (a folder of a larger repository gets them from the repository's root).
+  if (p.addPackages?.length) {
+    r = run('pnpm', ['add', '--ignore-scripts', '--ignore-workspace', ...p.addPackages], where, 900);
+    if (!r.ok) return step('install', r);
+  }
   const started = Date.now();
   r = run(rkp, p.build, where, 300);
   const ms = Date.now() - started;
   if (!r.ok) return { ...step('build', r), ms };
   for (const f of p.expect?.files || []) if (!fs.existsSync(path.join(where, f))) return { ok: false, step: 'output', detail: `missing ${f}`, ms };
+  // `css`: the style sheets the build wrote (all `.css` files under the output folder) must hold the given texts and none of the others, so a
+  // sheet that was copied uncompiled (a Sass variable or a nesting rule left in it) fails.
+  if (p.expect?.css) {
+    const outdir = p.build[p.build.indexOf('--outdir') + 1] || 'dist';
+    const sheets = [];
+    const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) e.isDirectory() ? walk(path.join(d, e.name)) : e.name.endsWith('.css') && sheets.push(fs.readFileSync(path.join(d, e.name), 'utf8')); };
+    if (fs.existsSync(path.join(where, outdir))) walk(path.join(where, outdir));
+    const all = sheets.join('\n');
+    if (!sheets.length) return { ok: false, step: 'css', detail: 'no .css file was written', ms };
+    for (const t of p.expect.css.contains || []) if (!all.includes(t)) return { ok: false, step: 'css', detail: `no sheet holds ${JSON.stringify(t)}`, ms };
+    for (const t of p.expect.css.absent || []) if (all.includes(t)) return { ok: false, step: 'css', detail: `a sheet still holds ${JSON.stringify(t)}`, ms };
+  }
   // `run`: a program built for Node is run with arguments and must print what is expected.
   for (const check of p.expect?.run || []) {
     r = run(process.execPath, [path.join(where, p.expect.files[0]), ...check.args], where, 60);

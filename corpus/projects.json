@@ -1231,7 +1231,12 @@
       "expect": {
         "files": [
           "dist/index.html"
-        ]
+        ],
+        "css": {
+          "absent": [
+            "$"
+          ]
+        }
       }
     },
     {
@@ -1371,6 +1376,70 @@
           "dist/index.html"
         ]
       }
+    },
+    {
+      "name": "vite-playground-tailwind-v3",
+      "kind": "app",
+      "repo": "https://github.com/vitejs/vite",
+      "sha": "b3cb0575aff63004a71301a1ec798aeea2aa05d7",
+      "dir": "playground/tailwind-v3",
+      "installArgs": [
+        "--ignore-workspace"
+      ],
+      "build": [
+        "bundle",
+        "index.html",
+        "--outdir",
+        "dist",
+        "--config",
+        "vite.config.ts"
+      ],
+      "expect": {
+        "files": [
+          "dist/index.html"
+        ],
+        "css": {
+          "contains": [
+            "--tw-"
+          ],
+          "absent": [
+            "@tailwind"
+          ]
+        }
+      },
+      "addPackages": [
+        "vite@8.3.5"
+      ]
+    },
+    {
+      "name": "vite-react-ts-less",
+      "kind": "app",
+      "repo": "https://github.com/JS-banana/vite-react-ts",
+      "sha": "d38f110dbaae18e8a775df64d49aa74e6bea1bf3",
+      "build": [
+        "bundle",
+        "index.html",
+        "--outdir",
+        "dist",
+        "--config",
+        "vite.config.ts"
+      ],
+      "expect": {
+        "files": [
+          "dist/index.html"
+        ],
+        "css": {
+          "absent": [
+            "@primary",
+            "@import"
+          ]
+        }
+      },
+      "dropLockfile": true,
+      "addPackages": [
+        "history@5.3.0"
+      ],
+      "expectFail": "the app uses @vitejs/plugin-legacy, whose polyfill chunks are roadmap 2.4; its Less files compile"
     }
   ]
 }
