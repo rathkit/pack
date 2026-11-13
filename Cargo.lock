@@ -3,5 +3,9 @@
 version = 4
 
 [[package]]
+name = "rathkit-check"
+version = "0.0.1"
+
+[[package]]
 name = "rathkit-pack"
 version = "0.2.0-beta.0"

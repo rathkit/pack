@@ -1,0 +1,19 @@
+[package]
+name = "rathkit-check"
+version = "0.0.1"
+edition = "2024"
+description = "The optional type checker for Rathkit Pack (stage 1: scanner diagnostics only; not a type checker yet)"
+license = "Apache-2.0"
+repository = "https://github.com/rathkit/pack"
+publish = false
+
+[lib]
+name = "rathkit_check"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rkp-check"
+path = "src/main.rs"
+
+# Zero dependencies is a hard rule, enforced by tools/check-zero-deps.mjs.
+[dependencies]

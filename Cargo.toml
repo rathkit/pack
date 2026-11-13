@@ -11,6 +11,12 @@ keywords = ["bundler", "javascript", "typescript", "zero-dependency", "alpha"]
 categories = ["development-tools", "web-programming"]
 include = ["/src/**", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE", "/NOTICE", "/CHANGELOG.md"]
 
+# The optional checker is a separate crate of this workspace (roadmap 2.12). `rkp` does not link it: it is a different package with its
+# own binary, and the root package stays the default member, so `cargo build` here builds `rkp` only. tools/check-rkp-size.mjs checks
+# that the rkp binary is byte-for-byte the same with and without it.
+[workspace]
+members = [".", "check"]
+
 [lib]
 name = "rathkit_pack"
 path = "src/lib.rs"
