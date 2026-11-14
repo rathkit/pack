@@ -29,6 +29,13 @@ about stability.
   whose file did not change, the places its imports were found, so a warm rebuild looks nothing up again for them. Elsewhere
   (macOS, Windows, or when inotify has no watch left) the files are polled as before; FSEvents, kqueue and `ReadDirectoryChangesW`
   need a run loop or overlapped I/O that cannot be had without a dependency.
+- `rkp serve --hmr` tells the page of a module update as soon as the modules are written, before the source map and the other files of the
+  build are made (the files wait for the build, so a page that loads then does not get the code from before), and a watcher starts a
+  build at once when the writer of a changed file has closed it instead of waiting 4 ms for quiet. The wait for file events lasts until
+  the next full look, and a signal ends it through a pipe. When a build is run again (watch, serve), the scan of a module that imports
+  nothing from the bundle (a CommonJS library, a big vendored file) and the pieces a big bundle is minified in are kept for the next
+  build and used when nothing they depend on changed, which takes the warm minified rebuild of the TypeScript compiler from over a hundred
+  milliseconds to a few tens. The output is the same as that of a build from nothing (`tests/rebuild.rs`, `tools/run-rebuild.mjs`).
 
 ### Added
 

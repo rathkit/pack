@@ -401,6 +401,7 @@ TS_MODULE=/path/to/typescript cargo test      # also the comparisons against tsc
 node tools/run-fixtures.mjs                   # bundle fixtures vs Node
 node tools/run-plugins.mjs                    # Rollup, Vite, esbuild, webpack and Parcel plugins through the host
 node tools/run-watch.mjs                      # --watch: rebuilds, plugin hooks, restart on config change, Ctrl-C
+node tools/run-rebuild.mjs                    # a rebuild that keeps what it can writes what a fresh build writes
 node tools/run-serve.mjs                      # serve: pages, middlewares, html hooks, css swaps, reloads, errors
 node tools/run-federation.mjs                 # module federation in a browser (BROWSER=chromium|firefox|webkit): our host and remote, rspack's, dev servers, types
 node tools/test-federation-runtime.mjs        # the federation runtime without a browser

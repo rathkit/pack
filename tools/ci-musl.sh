@@ -52,7 +52,7 @@ step sbom bash -c 'node tools/make-sbom.mjs /tmp/sbom.cdx.json && node -e "proce
 step build cargo build --release
 step version ./target/release/rkp --version
 step cargo-test cargo test --release
-for t in run-fixtures run-defines run-loaders run-plugins run-assets run-target test-npm-wrapper check-promises run-split run-sourcemaps run-watch run-serve run-jsx test-federation-runtime diff-semver; do
+for t in run-fixtures run-defines run-loaders run-plugins run-assets run-target test-npm-wrapper check-promises run-split run-sourcemaps run-watch run-rebuild run-serve run-jsx test-federation-runtime diff-semver; do
   step "$t" node "tools/$t.mjs"
 done
 step fuzz-bundle python3 tools/fuzz-bundle.py --count 300
