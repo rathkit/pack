@@ -20,6 +20,10 @@ about stability.
 
 ### Changed
 
+- Faster builds of mid-size programs, most of all with `--minify --sourcemap`: the tree shaker reads the modules side by side, a bundle
+  from 96 KB of text is minified in pieces (it was 192 KB; the names inside a piece are chosen apart, so a bundle of that size can come out
+  a few bytes different, with the same behavior), and on Linux with glibc the allocator takes the heap in steps of 2 MB and keeps what it took
+  instead of asking the system for 128 KB at a time. Peak memory is unchanged.
 - Watch mode and the development server hear of a change at once on Linux (inotify, called through the C library, no dependency)
   instead of at the next 80 ms poll and a 40 ms wait; the change is taken after a 4 ms quiet spell. A build keeps, for every module
   whose file did not change, the places its imports were found, so a warm rebuild looks nothing up again for them. Elsewhere

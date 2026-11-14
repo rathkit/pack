@@ -4,7 +4,30 @@ use std::time::Instant;
 use rathkit_pack::lexer::{Kind, Kw, Lexer, Punct};
 use rathkit_pack::parser::{ParseOptions, parse};
 
+/// glibc's allocator grows the heap in steps of 128 KB (a system call each, and fresh pages for each step) and gives the top of
+/// it back to the system whenever more than that is free. A build is short, allocates a lot and in several threads, so those calls
+/// were a good part of its time. Steps of 2 MB and keeping what was taken (up to 256 MB) save them. Memory use is the same: the
+/// extra is address space that is not touched, and the system takes it all back when the process ends. (Raising the threshold at
+/// which big blocks get a mapping of their own was faster still, but kept more memory in use, so it is left alone.)
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn tune_allocator() {
+    unsafe extern "C" {
+        fn mallopt(param: i32, value: i32) -> i32;
+    }
+    const M_TRIM_THRESHOLD: i32 = -1;
+    const M_TOP_PAD: i32 = -2;
+    // SAFETY: `mallopt` only sets allocator parameters; a value it refuses is ignored.
+    unsafe {
+        mallopt(M_TOP_PAD, 2 << 20);
+        mallopt(M_TRIM_THRESHOLD, 256 << 20);
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn tune_allocator() {}
+
 fn main() -> ExitCode {
+    tune_allocator();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.split_first() {
         Some((cmd, _)) if cmd == "--version" || cmd == "-V" => {
@@ -1831,22 +1854,26 @@ fn run_build(job: &Job) -> Outcome {
             }
         }
     };
-    outcome.watched = graph.modules.iter().map(|m| m.path.clone()).filter(|p| p.is_file()).collect();
-    // What the resolver read about packages (`exports`, `sideEffects`, `type`) decides how modules are built.
-    let mut package_dirs: Vec<&std::path::Path> = graph.modules.iter().filter_map(|m| m.package.as_ref().map(|p| p.dir.as_path())).collect();
-    package_dirs.sort();
-    package_dirs.dedup();
-    outcome.watched.extend(package_dirs.into_iter().map(|d| d.join("package.json")).filter(|p| p.is_file()));
-    // A file that failed to parse is not in the graph, and is the one to watch for the fix.
-    for d in &graph.diagnostics {
-        if let Some(file) = &d.file {
-            if file.is_file() && !outcome.watched.contains(file) {
-                outcome.watched.push(file.clone());
+    // What a watching run follows. A build that is the whole run (see the end of this function) has no use for the list, and
+    // making it asks the file system about every module.
+    if job.watch || job.serve.is_some() || job.options.cache.is_some() || job.host.is_some() || job.more_builds {
+        outcome.watched = graph.modules.iter().map(|m| m.path.clone()).filter(|p| p.is_file()).collect();
+        // What the resolver read about packages (`exports`, `sideEffects`, `type`) decides how modules are built.
+        let mut package_dirs: Vec<&std::path::Path> = graph.modules.iter().filter_map(|m| m.package.as_ref().map(|p| p.dir.as_path())).collect();
+        package_dirs.sort();
+        package_dirs.dedup();
+        outcome.watched.extend(package_dirs.into_iter().map(|d| d.join("package.json")).filter(|p| p.is_file()));
+        // A file that failed to parse is not in the graph, and is the one to watch for the fix.
+        for d in &graph.diagnostics {
+            if let Some(file) = &d.file {
+                if file.is_file() && !outcome.watched.contains(file) {
+                    outcome.watched.push(file.clone());
+                }
             }
         }
+        outcome.watched.extend(job.workers.watched.lock().unwrap().drain(..));
+        outcome.watched.extend(graph.watch_dirs.iter().cloned());
     }
-    outcome.watched.extend(job.workers.watched.lock().unwrap().drain(..));
-    outcome.watched.extend(graph.watch_dirs.iter().cloned());
     if let Some(host) = plugin_host {
         outcome.watched.extend(host.watch_files());
         let failure = graph.diagnostics.iter().find(|d| d.severity == Severity::Error).map(|d| d.message.clone());

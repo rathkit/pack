@@ -226,3 +226,34 @@ fn builtin_members_and_collections_are_free_of_effects() {
     ]);
     assert_eq!(r.live("lib.js"), ["<stmt>", "items"], "only `new Set(items)` (it reads `items`, which may be anything) stays");
 }
+
+/// A program big enough to be shaken on several threads gives what one thread gives, module by module.
+#[test]
+fn shaking_on_several_threads_matches_one() {
+    let mut files: Vec<(String, String)> = Vec::new();
+    let mut main = String::new();
+    for m in 0..12 {
+        let mut text = String::new();
+        for f in 0..120 {
+            text.push_str(&format!("export function f{m}_{f}(a) {{ return a + {f} + (a ? '{}' : 0); }}\n", "x".repeat(24)));
+        }
+        text.push_str(&format!("export const unused{m} = [{}];\n", "1, ".repeat(40)));
+        files.push((format!("m{m}.js"), text));
+        main.push_str(&format!("import {{ f{m}_1, f{m}_{} }} from './m{m}.js';\nconsole.log(f{m}_1(1), f{m}_{}(2));\n", m + 2, m + 2));
+    }
+    files.push(("main.js".to_string(), main));
+    let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    let r = run(&refs);
+    assert!(crate::par::worth_it(r.graph.modules.len(), r.graph.modules.iter().map(|m| m.source.len()).sum()), "the program must be big enough to be split up");
+    let linked = link(&r.graph);
+    let enums = EnumTable::build(&r.graph);
+    for (i, module) in r.graph.modules.iter().enumerate() {
+        let alone = build_parts(&r.graph, module.id, Some((&enums, &linked)));
+        assert_eq!(alone.parts.len(), r.shaken.modules[i].parts.len(), "{}", module.path.display());
+        for (a, b) in alone.parts.iter().zip(&r.shaken.modules[i].parts) {
+            assert_eq!((a.stmt, &a.declares, &a.uses, a.effects), (b.stmt, &b.declares, &b.uses, b.effects));
+        }
+    }
+    assert!(r.included("m3.js"));
+    assert_eq!(r.live("m3.js"), vec!["f3_1", "f3_5"]);
+}

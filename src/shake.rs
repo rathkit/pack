@@ -102,7 +102,10 @@ pub fn shake(graph: &Graph, linked: &Linked) -> Shaken {
 /// `entry_exports` false: nobody reads what the entries export (an iife with no global name), so only their effects are kept.
 pub fn shake_entries(graph: &Graph, linked: &Linked, entry_exports: bool) -> Shaken {
     let enums = EnumTable::build(graph);
-    let mut modules: Vec<ModuleShake> = graph.modules.iter().map(|m| build_parts(graph, m.id, Some((&enums, linked)))).collect();
+    // Each module's parts depend on nothing the others make, so a big program is split up side by side.
+    let build = |i: usize| build_parts(graph, graph.modules[i].id, Some((&enums, linked)));
+    let n = graph.modules.len();
+    let mut modules: Vec<ModuleShake> = if crate::par::worth_it(n, graph.modules.iter().map(|m| m.source.len()).sum()) { crate::par::map(n, build) } else { (0..n).map(build).collect() };
     let mut by_symbol: Vec<HashMap<SymbolId, Vec<usize>>> = Vec::with_capacity(modules.len());
     for module in &modules {
         let mut map: HashMap<SymbolId, Vec<usize>> = HashMap::new();

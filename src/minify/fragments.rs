@@ -49,7 +49,7 @@ pub struct Layout {
 }
 
 /// Bundles smaller than this are not worth cutting.
-const MIN_BYTES: usize = 192 * 1024;
+const MIN_BYTES: usize = 96 * 1024;
 
 /// As `minify`, for a bundle whose layout is known, saying where every token went when asked.
 pub fn minify_chunk(source: &str, layout: &Layout, options: &Options, anchors: Option<&mut Vec<Anchor>>) -> Result<String, String> {
@@ -780,6 +780,16 @@ export { counter as total, bump };
             let before = &source[a.inp as usize..(a.inp + a.in_len) as usize];
             let after = &pieces[a.out as usize..(a.out + a.out_len) as usize];
             assert!(before == after || after.contains(before) || (before.chars().all(char::is_alphanumeric) && after.chars().all(char::is_alphanumeric)) || options.syntax, "{before} -> {after}");
+        }
+    }
+
+    #[test]
+    fn a_bundle_of_a_hundred_kilobytes_is_cut_and_a_small_one_is_not() {
+        // Lines of 1 KB, each a statement.
+        let layout = |len: usize| Layout { head: 0, tail: len, cuts: (1..=len / 1024).map(|i| i * 1024).collect(), reserved: Vec::new(), ..Layout::default() };
+        if workers() > 1 {
+            assert!(pieces(120 * 1024, &layout(120 * 1024)).len() > 1);
+            assert!(pieces(60 * 1024, &layout(60 * 1024)).is_empty());
         }
     }
 
