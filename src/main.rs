@@ -2443,7 +2443,14 @@ fn watch_loop(job: std::sync::Arc<Job>) -> Done {
         if let Some(state) = &job.serve {
             state.rebuild_for(changed.iter().map(|(p, _)| p.clone()).collect(), suppressed);
         }
+        // With file events every change was heard: a module whose file is not among those that changed is not looked at again.
+        if let (Some(cache), Some(_)) = (&job.options.cache, &notifier) {
+            cache.changes_are_known(Some(changed.iter().map(|(p, _)| p.clone()).collect()));
+        }
         outcome = run_build(&job);
+        if let Some(cache) = &job.options.cache {
+            cache.changes_are_known(None);
+        }
         if let Some(state) = &job.serve {
             // Whatever way the build ended, files are served again.
             state.open_gate();
