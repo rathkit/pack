@@ -13,13 +13,13 @@
       "rssKb": 10632
     },
     "react/min": {
-      "bytes": 232899,
-      "gzip": 69905,
+      "bytes": 232782,
+      "gzip": 69931,
       "rssKb": 16260
     },
     "react/min-map": {
-      "bytes": 232943,
-      "gzip": 69937,
+      "bytes": 232826,
+      "gzip": 69963,
       "map": 873706,
       "rssKb": 18584
     },
@@ -29,13 +29,13 @@
       "rssKb": 9616
     },
     "rxjs/min": {
-      "bytes": 24639,
-      "gzip": 7415,
+      "bytes": 24608,
+      "gzip": 7399,
       "rssKb": 10264
     },
     "rxjs/min-map": {
-      "bytes": 24682,
-      "gzip": 7453,
+      "bytes": 24651,
+      "gzip": 7438,
       "map": 228414,
       "rssKb": 11524
     },
@@ -45,13 +45,13 @@
       "rssKb": 15112
     },
     "lodash/min": {
-      "bytes": 77424,
-      "gzip": 27353,
+      "bytes": 77264,
+      "gzip": 27395,
       "rssKb": 18036
     },
     "lodash/min-map": {
-      "bytes": 77469,
-      "gzip": 27383,
+      "bytes": 77309,
+      "gzip": 27425,
       "map": 777247,
       "rssKb": 23032
     },
@@ -61,13 +61,13 @@
       "rssKb": 21356
     },
     "three/min": {
-      "bytes": 527098,
-      "gzip": 130560,
+      "bytes": 526406,
+      "gzip": 130642,
       "rssKb": 32444
     },
     "three/min-map": {
-      "bytes": 527142,
-      "gzip": 130594,
+      "bytes": 526450,
+      "gzip": 130677,
       "map": 2794503,
       "rssKb": 39084
     },
@@ -77,13 +77,13 @@
       "rssKb": 78336
     },
     "ts5/min": {
-      "bytes": 3556538,
-      "gzip": 995792,
+      "bytes": 3551415,
+      "gzip": 996487,
       "rssKb": 170116
     },
     "ts5/min-map": {
-      "bytes": 3556580,
-      "gzip": 995819,
+      "bytes": 3551457,
+      "gzip": 996515,
       "map": 13928385,
       "rssKb": 204712
     }
