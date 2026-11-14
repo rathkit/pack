@@ -119,7 +119,7 @@ fn self_precedence_ok(ast: &Ast, left: NodeId) -> bool {
 }
 
 pub(crate) fn plan(source: &str, ast: &Ast, sem: &Semantic, tokens: &[Token], barriers: &[u32], legacy: bool) -> Plan {
-    let mut ctx = Ctx { legacy, source, ast, sem, tokens, barriers, parent: vec![None; ast.node_count() + 1], actions: vec![Action::Keep; tokens.len()], locked: vec![false; tokens.len()], dead: Vec::new(), kept_semi: Vec::new(), done: Default::default(), visited: Default::default(), as_expr: Default::default(), inlined: Default::default(), seq_returns: Default::default(), closers: vec![false; tokens.len()], texts: Vec::new(), text_index: Default::default() };
+    let mut ctx = Ctx { legacy, source, ast, sem, tokens, barriers, parent: vec![None; ast.node_count() + 1], actions: vec![Action::Keep; tokens.len()], locked: vec![false; tokens.len()], dead: Vec::new(), kept_semi: Vec::new(), done: Default::default(), visited: Default::default(), as_expr: Default::default(), inlined: Default::default(), seq_returns: Default::default(), closers: vec![false; tokens.len()], listed: Default::default(), joined_ifs: Default::default(), consumed: Default::default(), texts: Vec::new(), text_index: Default::default() };
     let mut order = Vec::new();
     let mut stack = vec![ast.root];
     while let Some(n) = stack.pop() {
@@ -203,6 +203,12 @@ struct Ctx<'a> {
     /// Blocks written as `return a, b;` (the braces and the `;` of each statement but the last are replaced; see `block_sequence`).
     seq_returns: crate::fxhash::FastSet<NodeId>,
     closers: Vec<bool>,
+    /// Statement lists (by their block or `case`) whose statements have been rewritten (an arrow function decides the list of its body before its own turn).
+    listed: crate::fxhash::FastSet<NodeId>,
+    /// `if` statements that were joined into a `return` of a conditional.
+    joined_ifs: crate::fxhash::FastSet<NodeId>,
+    /// Statements that a rewrite wrote as part of the one before them (the `return` an `if` was joined with).
+    consumed: crate::fxhash::FastSet<NodeId>,
     texts: Vec<String>,
     text_index: crate::fxhash::FastMap<String, u32>,
 }
@@ -405,18 +411,12 @@ impl Ctx<'_> {
             }
             NodeKind::For { body, .. } | NodeKind::ForIn { body, .. } | NodeKind::ForOf { body, .. } | NodeKind::While { body, .. } | NodeKind::DoWhile { body, .. } => self.unbrace(body),
             NodeKind::Program(list) | NodeKind::Block(list) | NodeKind::StaticBlock(list) => {
-                self.inline_returned_values(ast.list(list));
-                self.merge_declarations(ast.list(list));
-                self.merge_returns(ast.list(list));
+                self.rewrite_statements(n, ast.list(list));
                 if matches!(node.kind, NodeKind::Block(_)) {
                     self.tail_guard(n, ast.list(list));
                 }
             }
-            NodeKind::Case { body, .. } => {
-                self.inline_returned_values(ast.list(body));
-                self.merge_declarations(ast.list(body));
-                self.merge_returns(ast.list(body));
-            }
+            NodeKind::Case { body, .. } => self.rewrite_statements(n, ast.list(body)),
             NodeKind::Function { body, .. } if node.has(flags::ARROW) && !node.has(flags::EXPR_BODY) => self.arrow_expression(n, body),
             NodeKind::Return(Some(arg)) => self.return_nothing(n, arg),
             NodeKind::Conditional { test, cons, alt } => {
@@ -426,6 +426,16 @@ impl Ctx<'_> {
             }
             _ => {}
         }
+    }
+
+    /// The rewrites that look at the statements of one list, once: names returned, declarations joined, returns joined.
+    fn rewrite_statements(&mut self, owner: NodeId, items: &[NodeId]) {
+        if !self.listed.insert(owner) {
+            return;
+        }
+        self.inline_returned_values(items);
+        self.merge_declarations(items);
+        self.merge_returns(items);
     }
 
     /// The rewrites of one `if` statement, decided once (a body that is about to become a sequence decides the `if` statements in it first).
@@ -958,7 +968,10 @@ impl Ctx<'_> {
         }
         self.force(second_return, Action::Skip);
         self.force_text(last_semi, ")");
+        self.consumed.extend(list[i + 1..=j].iter().copied());
         joined.push(s);
+        self.joined_ifs.insert(s);
+        self.joined_ifs.insert(s);
         true
     }
 
@@ -1041,7 +1054,12 @@ impl Ctx<'_> {
             self.force_text(cons_semi, ":");
         }
         self.force(second_return, Action::Skip);
+        // The `return` after the `if` (or the `if` after it, joined already) is written as part of it.
+        if else_tok.is_none() {
+            self.consumed.insert(other_return);
+        }
         joined.push(s);
+        self.joined_ifs.insert(s);
         true
     }
 
@@ -1673,24 +1691,36 @@ impl Ctx<'_> {
     /// `x => { return y; }` is `x => y`.
     fn arrow_expression(&mut self, f: NodeId, body: NodeId) {
         let NodeKind::Block(list) = self.ast[body].kind else { return };
-        if self.ast.list(list).len() > 1 {
+        // The body's own statements first: `if (a) return b; return c;` is one `return` of a conditional, which is all there is to the body.
+        self.rewrite_statements(body, self.ast.list(list));
+        let items: Vec<NodeId> = self.ast.list(list).iter().copied().filter(|s| !self.consumed.contains(s)).collect();
+        if items.len() > 1 {
             return self.arrow_sequence(f, body);
         }
-        let [s] = self.ast.list(list) else { return };
-        let NodeKind::Return(Some(arg)) = self.ast[*s].kind else { return };
+        let [s] = &items[..] else { return };
+        let joined = matches!(self.ast[*s].kind, NodeKind::If { .. }) && self.joined_ifs.contains(s);
+        let arg = match self.ast[*s].kind {
+            NodeKind::Return(Some(arg)) => Some(arg),
+            _ if joined => None,
+            _ => return,
+        };
         if self.in_declaration_head(f) {
             return;
         }
         let open = self.first_tok(self.ast[body].span.start);
         let close = self.last_tok(self.ast[body].span.end);
         let ret = self.first_tok(self.ast[*s].span.start);
-        if !self.is(open, Punct::LBrace) || !self.is(close, Punct::RBrace) || !self.kw(ret, Kw::Return) || ret != open + 1 {
+        // A joined `if` has its `return` written in place of the `if` (and its own parentheses, so no object literal starts it).
+        let returns = if joined { self.actions[ret] != Action::Keep } else { self.kw(ret, Kw::Return) };
+        if !self.is(open, Punct::LBrace) || !self.is(close, Punct::RBrace) || !returns || ret != open + 1 {
             return;
         }
-        let arg_node = &self.ast[arg];
-        let first = self.first_tok(arg_node.span.start);
-        // An object literal would read as a block, a sequence as several arguments.
-        let wrap = !arg_node.has(flags::PARENTHESIZED) && (matches!(arg_node.kind, NodeKind::Sequence(_)) || self.is(first, Punct::LBrace));
+        let wrap = arg.is_some_and(|arg| {
+            let arg_node = &self.ast[arg];
+            let first = self.first_tok(arg_node.span.start);
+            // An object literal would read as a block, a sequence as several arguments.
+            !arg_node.has(flags::PARENTHESIZED) && (matches!(arg_node.kind, NodeKind::Sequence(_)) || self.is(first, Punct::LBrace))
+        });
         if wrap {
             self.set_text(open, "(");
             self.set_text(close, ")");
@@ -1698,48 +1728,71 @@ impl Ctx<'_> {
             self.set(open, Action::Skip);
             self.set(close, Action::Skip);
         }
-        self.set(ret, Action::Skip);
-        if close >= 1 && self.is(close - 1, Punct::Semi) && close - 1 > ret {
-            self.set(close - 1, Action::Skip);
+        self.force(ret, Action::Skip);
+        if let Some(semi) = self.trailing_semi(ret, close) {
+            self.set(semi, Action::Skip);
         }
+    }
+
+    /// The `;` that is written last before the `}` at `close`, looking back over tokens that are left out, as long as it is after `from`.
+    fn trailing_semi(&self, from: usize, close: usize) -> Option<usize> {
+        let mut k = close.checked_sub(1)?;
+        while k > from && self.actions[k] == Action::Skip {
+            k -= 1;
+        }
+        (k > from && self.is(k, Punct::Semi) && self.actions[k] == Action::Keep).then_some(k)
     }
 
     /// `=> { a(); b(); return c; }` is `=> (a(), b(), c)`.
     fn arrow_sequence(&mut self, f: NodeId, body: NodeId) {
         let ast = self.ast;
         let NodeKind::Block(list) = ast[body].kind else { return };
-        let items = ast.list(list);
+        let items: Vec<NodeId> = ast.list(list).iter().copied().filter(|s| !self.consumed.contains(s)).collect();
         let Some((&last, before)) = items.split_last() else { return };
-        let NodeKind::Return(Some(arg)) = ast[last].kind else { return };
-        // `return undefined` loses its value to `return_nothing`, which would leave the sequence unfinished.
-        if self.is_nothing(arg) || self.in_declaration_head(f) {
+        // The last statement is a `return`, or an `if` that was joined into one.
+        let joined = matches!(ast[last].kind, NodeKind::If { .. }) && self.joined_ifs.contains(&last);
+        if !joined {
+            let NodeKind::Return(Some(arg)) = ast[last].kind else { return };
+            // `return undefined` loses its value to `return_nothing`, which would leave the sequence unfinished.
+            if self.is_nothing(arg) {
+                return;
+            }
+        }
+        if self.in_declaration_head(f) {
             return;
+        }
+        // An `if` among the statements may be an expression of its own, which a comma can join.
+        for &s in before {
+            if matches!(ast[s].kind, NodeKind::If { .. }) {
+                self.visit_if(s);
+            }
         }
         let mut commas = Vec::with_capacity(before.len());
         for &s in before {
-            if !matches!(ast[s].kind, NodeKind::ExprStmt(_)) || ast[s].has(flags::DIRECTIVE) {
+            if !self.is_expression_statement(s) {
                 return;
             }
             // A line break that stood for the `;` has no token to become a comma.
-            match self.semi_of(s) {
-                Some(semi) if self.actions[semi] == Action::Keep => commas.push(semi),
-                _ => return,
+            match self.expression_terminator(s) {
+                Some(semi) => commas.push(semi),
+                None => return,
             }
         }
         let open = self.first_tok(ast[body].span.start);
         let close = self.last_tok(ast[body].span.end);
         let ret = self.first_tok(ast[last].span.start);
-        if !self.is(open, Punct::LBrace) || !self.is(close, Punct::RBrace) || !self.kw(ret, Kw::Return) {
+        let returns = if joined { self.actions[ret] != Action::Keep } else { self.kw(ret, Kw::Return) };
+        if !self.is(open, Punct::LBrace) || !self.is(close, Punct::RBrace) || !returns {
             return;
         }
         self.set_text(open, "(");
         self.set_text(close, ")");
         for semi in commas {
-            self.set_text(semi, ",");
+            self.force_text(semi, ",");
         }
-        self.set(ret, Action::Skip);
-        if close >= 1 && self.is(close - 1, Punct::Semi) && close - 1 > ret {
-            self.set(close - 1, Action::Skip);
+        self.force(ret, Action::Skip);
+        if let Some(semi) = self.trailing_semi(ret, close) {
+            self.set(semi, Action::Skip);
         }
     }
 
