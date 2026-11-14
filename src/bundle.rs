@@ -751,7 +751,7 @@ impl<'a> Bundler<'a> {
         // Frameworks that use decorators read class names at run time (Nest builds its module
         // tokens from them), so shortening them breaks those programs unless asked for.
         let keep_names = options.minify.keep_names.unwrap_or(graph.decorator_metadata || graph.experimental_decorators);
-        let settings = crate::minify::Options { keep_top_level: self.format == Format::Iife, keep_names: Some(keep_names), legacy: !self.target.supports(crate::target::Feature::Template), ..options.minify };
+        let settings = crate::minify::Options { keep_top_level: self.format == Format::Iife, keep_names: Some(keep_names), legacy: !self.target.supports(crate::target::Feature::Template) || !self.target.supports(crate::target::Feature::OptionalCatch), ..options.minify };
         let marks = std::mem::take(&mut *self.marks.lock().expect("marks"));
         // The chunks are independent from here on, so with several they are finished side by side.
         let finish = |c: usize, (raw, layout): (String, crate::minify::Layout)| self.finish_chunk(c, raw, layout, options, &settings, &marks);
