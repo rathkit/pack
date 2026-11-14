@@ -155,6 +155,16 @@ impl Purity<'_> {
             NodeKind::New { callee, args } => (callee, args, true),
             _ => return false,
         };
+        if let NodeKind::Member { object, prop } = ast[callee].kind {
+            // `Object.create(null)`: an object with no prototype, which only makes a value.
+            let is_create = !is_new
+                && !ast[callee].has(flags::COMPUTED)
+                && !ast[callee].has(flags::OPTIONAL)
+                && !ast[id].has(flags::OPTIONAL)
+                && matches!(ast[prop].kind, NodeKind::PropName(p) if ast.atom(p) == "create")
+                && matches!(ast[object].kind, NodeKind::Ident(o) if ast.atom(o) == "Object" && self.semantic.symbol_of(object).is_none());
+            return is_create && matches!(ast.list(args), [only] if matches!(ast[*only].kind, NodeKind::Null));
+        }
         let NodeKind::Ident(name) = ast[callee].kind else { return false };
         if self.semantic.symbol_of(callee).is_some() || ast[id].has(flags::OPTIONAL) {
             return false;
@@ -341,6 +351,8 @@ mod tests {
             "new Map; new Set; new WeakMap; new WeakSet;",
             "const m = new Map([[1, 2], ['a', [3]]]), t = new Set(['a', 'b', 1]);",
             "Object.keys; Array.prototype.indexOf; Math.PI; String.prototype;",
+            "Object.create(null);",
+            "const a = /* @__PURE__ */ Object.assign(Object.create(null), { x: 1 });",
         ] {
             assert!(pure(src), "should be pure: {src}");
         }
@@ -397,6 +409,13 @@ mod tests {
             "foo.prototype.x;",
             "Object[key]; var key;",
             "Object?.keys;",
+            "Object.create(proto); var proto;",
+            "Object.create(null, props); var props;",
+            "Object.create(null) + 1;",
+            "Object.create(undefined);",
+            "Object.create(null); function Object() {}",
+            "Object['create'](null);",
+            "Object.assign(Object.create(null), { x: 1 });",
         ] {
             assert!(!pure(src), "should have effects: {src}");
         }
