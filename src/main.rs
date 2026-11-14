@@ -1215,6 +1215,8 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     if watch {
         // Watching builds again and again: modules whose files did not change are kept between builds.
         options.cache = Some(std::sync::Arc::new(rathkit_pack::graph::ModuleCache::default()));
+        bundle_options.keep_scans = true;
+        rathkit_pack::minify::keep_pieces(true);
     }
     let serve_state = if serve {
         // Maps are served from memory and name the files relative to the project.
@@ -2339,7 +2341,7 @@ fn watch_loop(job: std::sync::Arc<Job>) -> Done {
                     // A save is often several writes: take what follows until it is quiet.
                     let quiet_from = Instant::now();
                     // Writers that have closed their files are done: nothing is waited for then.
-                    while quiet_from.elapsed() < std::time::Duration::from_millis(50) && !n.settled() {
+                    while quiet_from.elapsed() < std::time::Duration::from_millis(50) && !n.settled_among(|p| stamps.contains_key(p) || p.parent().is_some_and(|d| stamps.contains_key(d))) {
                         match n.wait(4) {
                             rathkit_pack::watch::Wake::Paths(more) => paths.extend(more),
                             _ => break,

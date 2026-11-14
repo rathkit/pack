@@ -68,6 +68,24 @@ pub struct Module {
     pub stamp: Option<Stamp>,
     /// Where each request of the module was found, for builds that reuse modules and the places they found (watching with file events).
     pub targets: Option<Vec<Target>>,
+    /// What the bundler works out from this module alone and keeps for the next build while the module itself is kept.
+    pub memo: Memo,
+}
+
+/// What the bundler keeps with a module (see `bundle.rs`). It goes when the module does: a module that is read again starts empty.
+#[derive(Default)]
+pub struct Memo {
+    /// The scan of the module: its edits and what registering them did; opaque here.
+    pub scan: Mutex<Option<Box<dyn std::any::Any + Send>>>,
+    /// The names the module uses, which the bundler avoids when it names what it moves to the top level.
+    pub names: std::sync::OnceLock<ModuleNames>,
+}
+
+pub struct ModuleNames {
+    /// The names of the module's free references (globals).
+    pub unresolved: Vec<String>,
+    /// The names an inner scope of the module declares (all of its names, for a module that is wrapped).
+    pub nested: std::collections::HashSet<String>,
 }
 
 /// A file's modification time and size.
@@ -828,7 +846,7 @@ impl<'a> Context<'a> {
             None => package.as_ref().is_none_or(|p| p.file_has_side_effects(path)),
         });
         let stamp = if used_glob { None } else { stamp };
-        let module = Module { id: ModuleId(slot as u32), path: module_path.to_path_buf(), source, kind, parsed, record, edges: Vec::new(), package, side_effects, asset, css, stamp, targets: None };
+        let module = Module { id: ModuleId(slot as u32), path: module_path.to_path_buf(), source, kind, parsed, record, edges: Vec::new(), package, side_effects, asset, css, stamp, targets: None, memo: Memo::default() };
         Ok(Processed { module, targets, diagnostics })
     }
 

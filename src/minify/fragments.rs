@@ -157,8 +157,6 @@ fn par_map<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
 /// One piece, parsed and analyzed.
 struct Unit<'s> {
     source: &'s str,
-    /// Where the piece starts in the whole text.
-    start: usize,
     /// 0 for the bundle's own top level; `k` for the body of function `k - 1` of the layout's `bodies`.
     group: usize,
     parsed: parser::Parsed,
@@ -169,6 +167,177 @@ struct Unit<'s> {
     /// Identifiers nothing in the piece declares, with how often each stands (an `export { a }`
     /// of a name declared elsewhere counts as one).
     unresolved: Vec<(Atom, u32)>,
+}
+
+/// What choosing the names of the bundle's top level needs to know about one piece. It is kept, with the text the piece wrote, for a
+/// piece that has not changed (see `keep_pieces`): then the piece is neither parsed nor analyzed again.
+#[derive(Clone, Default)]
+struct Summary<'a> {
+    /// The root scope has a direct `eval`.
+    eval: bool,
+    /// The top-level names of the piece (one per variable), in order, how often each is used, and whether it must keep its name.
+    roots: Vec<(Cow<'a, str>, u32, bool)>,
+    /// Names given to an anonymous function by an assignment to a name that is declared in another piece.
+    inferred_outer: Vec<Cow<'a, str>>,
+    /// The names of the symbols that stay as they are.
+    kept: Vec<Cow<'a, str>>,
+    /// Identifiers nothing in the piece declares, with how often each stands.
+    unresolved: Vec<(Cow<'a, str>, u32)>,
+    /// Whether the first and the last statement of the piece are `var` declarations.
+    first_var: bool,
+    last_var: bool,
+}
+
+impl<'a> Summary<'a> {
+    fn of(unit: &'a Unit) -> Summary<'a> {
+        let (ast, sem) = (&unit.parsed.ast, &unit.parsed.semantic);
+        let mut summary = Summary::default();
+        if let Some(prep) = &unit.prep {
+            let root = sem.root_scope();
+            summary.eval = sem.scope(root).flags & scope_flags::HAS_EVAL != 0;
+            for &sym in sem.scope(root).symbols() {
+                let c = prep.canon[sym.index()];
+                if c != sym.index() {
+                    continue;
+                }
+                summary.roots.push((Cow::Borrowed(ast.atom(sem.symbol(sym).name)), prep.uses[c], prep.fixed[c]));
+            }
+            summary.inferred_outer = prep.inferred_outer.iter().map(|&a| Cow::Borrowed(ast.atom(a))).collect();
+            summary.kept = prep.kept.iter().map(|&a| Cow::Borrowed(ast.atom(a))).collect();
+        }
+        summary.unresolved = unit.unresolved.iter().map(|&(a, n)| (Cow::Borrowed(ast.atom(a)), n)).collect();
+        let var_at = |first: bool| -> bool {
+            let NodeKind::Program(list) = ast[ast.root].kind else { return false };
+            let statements = ast.list(list);
+            let statement = if first { statements.first() } else { statements.last() };
+            statement.is_some_and(|&n| matches!(ast[n].kind, NodeKind::VarDecl { kind: crate::ast::VarKind::Var, .. }))
+        };
+        summary.first_var = var_at(true);
+        summary.last_var = var_at(false);
+        summary
+    }
+
+    fn owned(&self) -> Summary<'static> {
+        Summary {
+            eval: self.eval,
+            roots: self.roots.iter().map(|(n, u, f)| (Cow::Owned(n.to_string()), *u, *f)).collect(),
+            inferred_outer: self.inferred_outer.iter().map(|n| Cow::Owned(n.to_string())).collect(),
+            kept: self.kept.iter().map(|n| Cow::Owned(n.to_string())).collect(),
+            unresolved: self.unresolved.iter().map(|(n, c)| (Cow::Owned(n.to_string()), *c)).collect(),
+            first_var: self.first_var,
+            last_var: self.last_var,
+        }
+    }
+}
+
+/// A piece kept from the last build: what it was (its summary), and what it wrote when the names it reads and the names no new name may
+/// be were as `deps` says.
+struct Kept {
+    summary: Summary<'static>,
+    deps: u64,
+    written: String,
+}
+
+type PieceKey = (usize, u64, u64);
+
+static KEEP_PIECES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The pieces of the last build that kept them, by what they are (their text and the options).
+/// Each with the build it was last used in. The chunks of one build are minified side by side and each adds its own pieces, so the map
+/// is not replaced; what neither this build nor the one before used is dropped.
+static KEPT: Mutex<Option<HashMap<PieceKey, (u64, std::sync::Arc<Kept>)>>> = Mutex::new(None);
+static BUILD: AtomicUsize = AtomicUsize::new(0);
+
+/// A build is starting: the pieces its chunks use are the ones to keep.
+pub fn next_build() {
+    BUILD.fetch_add(1, Ordering::Relaxed);
+}
+
+/// For a build that is run again with most of its text the same (watching): a piece of a big bundle that comes out as it did, with
+/// the same names given to everything it shares with the others, is not parsed and written again. The output is what it would be
+/// without this; only the time differs. Costs the memory of the last bundle's text.
+/// How many pieces were taken from the last build instead of being written again, over the life of the process (for tests).
+pub static REUSED_PIECES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+pub fn keep_pieces(on: bool) {
+    KEEP_PIECES.store(on, Ordering::Relaxed);
+}
+
+/// Drops every piece kept.
+pub fn forget_pieces() {
+    *KEPT.lock().expect("kept pieces") = None;
+}
+
+fn piece_key(text: &str, options: &Options) -> PieceKey {
+    use std::hash::Hasher;
+    let bytes = text.as_bytes();
+    let mut h = crate::fxhash::FxHasher::default();
+    h.write(bytes);
+    // A second, different number from a sample of the text and the options, so two texts must agree on both.
+    let mut sample = 0xcbf2_9ce4_8422_2325u64;
+    for &b in bytes.iter().step_by(61) {
+        sample = (sample ^ b as u64).wrapping_mul(0x0100_0000_01b3);
+    }
+    let flags = options.whitespace as u64 | (options.identifiers as u64) << 1 | (options.syntax as u64) << 2 | (options.legacy as u64) << 3 | (options.keep_names.unwrap_or(false) as u64) << 4 | (options.keep_names.is_some() as u64) << 5;
+    (bytes.len(), h.finish(), sample ^ flags.wrapping_mul(0x9e37_79b9_7f4a_7c15))
+}
+
+/// What one piece wrote depends on: for each name it declares at the top level or reads from another piece, the name chosen for it, and
+/// the names no new name may be (the same for every piece), and whether more text follows it.
+fn deps_of(summary: &Summary, names: &HashMap<&str, String>, avoid: u64, follows: bool) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = crate::fxhash::FxHasher::default();
+    avoid.hash(&mut h);
+    follows.hash(&mut h);
+    for name in summary.roots.iter().map(|r| r.0.as_ref()).chain(summary.unresolved.iter().map(|u| u.0.as_ref())) {
+        name.hash(&mut h);
+        names.get(name).hash(&mut h);
+    }
+    h.finish()
+}
+
+/// The names no new name may be, as one number that does not depend on the order they are in.
+fn avoid_digest(avoid: &Avoid) -> u64 {
+    let sum = |set: &HashSet<&str>| -> u64 {
+        use std::hash::{Hash, Hasher};
+        set.iter()
+            .map(|name| {
+                let mut h = crate::fxhash::FxHasher::default();
+                name.hash(&mut h);
+                h.finish()
+            })
+            .fold(0u64, |a, b| a.wrapping_add(b))
+    };
+    sum(&avoid.kept).wrapping_mul(31).wrapping_add(sum(&avoid.globals)).wrapping_add((avoid.kept.len() * 1_000_003 + avoid.globals.len()) as u64)
+}
+
+fn analyze<'s>(source: &'s str, range: &std::ops::Range<usize>, layout: &Layout, options: &Options) -> Result<Unit<'s>, String> {
+    let text = &source[range.clone()];
+    let parsed = parser::parse(text, ParseOptions::new(true).with_recorded_tokens().as_fragment()).map_err(|e| format!("cannot minify: {e}"))?;
+    let tokens = &parsed.tokens;
+    let mut asi = vec![false; tokens.len() + 1];
+    for &i in &parsed.asi {
+        asi[i] = true;
+    }
+    asi[tokens.len()] = parsed.eof_asi;
+    let plan = options.syntax.then(|| crate::compress::plan(text, &parsed.ast, &parsed.semantic, tokens, &[], options.legacy));
+    let mut facts = Facts::default();
+    facts.collect(&parsed.ast, &parsed.semantic, text);
+    let prep = options.identifiers.then(|| facts.prepare(&parsed.ast, &parsed.semantic, options));
+    let mut counts: HashMap<Atom, u32> = HashMap::default();
+    for &(node, _) in &facts.unresolved {
+        if let NodeKind::Ident(a) = parsed.ast[node].kind {
+            *counts.entry(a).or_default() += 1;
+        }
+    }
+    let root = parsed.semantic.root_scope();
+    for (_, local, _) in &facts.export_specifiers {
+        if parsed.semantic.lookup_local(root, *local).is_none() {
+            *counts.entry(*local).or_default() += 1;
+        }
+    }
+    let unresolved = counts.into_iter().collect();
+    let group = layout.bodies.iter().position(|b| b.start <= range.start && range.end <= b.end).map_or(0, |k| k + 1);
+    Ok(Unit { source: text, group, parsed, facts, prep, plan, asi, unresolved })
 }
 
 fn in_pieces(source: &str, layout: &Layout, ranges: &[std::ops::Range<usize>], options: &Options, mut anchors: Option<&mut Vec<Anchor>>) -> Result<String, String> {
@@ -184,42 +353,26 @@ fn in_pieces(source: &str, layout: &Layout, ranges: &[std::ops::Range<usize>], o
     let options = Options { keep_top_level: false, ..*options };
     let compact = options.whitespace || options.syntax;
 
-    // 1. Parse and analyze every piece.
-    let analyzed: Vec<Result<Unit, String>> = par_map(ranges.len(), |i| {
-        let range = &ranges[i];
-        let text = &source[range.clone()];
-        let parsed = parser::parse(text, ParseOptions::new(true).with_recorded_tokens().as_fragment()).map_err(|e| format!("cannot minify: {e}"))?;
-        let tokens = &parsed.tokens;
-        let mut asi = vec![false; tokens.len() + 1];
-        for &i in &parsed.asi {
-            asi[i] = true;
-        }
-        asi[tokens.len()] = parsed.eof_asi;
-        let plan = options.syntax.then(|| crate::compress::plan(text, &parsed.ast, &parsed.semantic, tokens, &[], options.legacy));
-        let mut facts = Facts::default();
-        facts.collect(&parsed.ast, &parsed.semantic, text);
-        let prep = options.identifiers.then(|| facts.prepare(&parsed.ast, &parsed.semantic, &options));
-        let mut counts: HashMap<Atom, u32> = HashMap::default();
-        for &(node, _) in &facts.unresolved {
-            if let NodeKind::Ident(a) = parsed.ast[node].kind {
-                *counts.entry(a).or_default() += 1;
-            }
-        }
-        let root = parsed.semantic.root_scope();
-        for (_, local, _) in &facts.export_specifiers {
-            if parsed.semantic.lookup_local(root, *local).is_none() {
-                *counts.entry(*local).or_default() += 1;
-            }
-        }
-        let unresolved = counts.into_iter().collect();
-        let group = layout.bodies.iter().position(|b| b.start <= range.start && range.end <= b.end).map_or(0, |k| k + 1);
-        Ok(Unit { source: text, start: range.start, group, parsed, facts, prep, plan, asi, unresolved })
-    });
-    let units: Vec<Unit> = analyzed.into_iter().collect::<Result<_, _>>()?;
+    // 0. Pieces kept from the last build: the same text under the same options.
+    let keep = KEEP_PIECES.load(Ordering::Relaxed) && anchors.is_none();
+    let keys: Vec<PieceKey> = if keep { par_map(ranges.len(), |i| piece_key(&source[ranges[i].clone()], &options)) } else { Vec::new() };
+    let before: Vec<Option<std::sync::Arc<Kept>>> = if keep {
+        let kept = KEPT.lock().expect("kept pieces");
+        keys.iter().map(|k| kept.as_ref().and_then(|m| m.get(k).map(|(_, e)| e.clone()))).collect()
+    } else {
+        vec![None; ranges.len()]
+    };
+
+    // 1. Parse and analyze every piece that was not kept.
+    let analyzed: Vec<Result<Option<Unit>, String>> = par_map(ranges.len(), |i| if before[i].is_some() { Ok(None) } else { analyze(source, &ranges[i], layout, &options).map(Some) });
+    let units: Vec<Option<Unit>> = analyzed.into_iter().collect::<Result<_, _>>()?;
     lap("parse and analyze (pieces)");
+    let groups: Vec<usize> = (0..ranges.len()).map(|i| layout.bodies.iter().position(|b| b.start <= ranges[i].start && ranges[i].end <= b.end).map_or(0, |k| k + 1)).collect();
+    let fresh: Vec<Option<Summary>> = units.iter().map(|u| u.as_ref().map(Summary::of)).collect();
+    let summaries: Vec<&Summary> = (0..ranges.len()).map(|i| fresh[i].as_ref().unwrap_or_else(|| &before[i].as_ref().expect("a piece is fresh or kept").summary)).collect();
 
     // 2. Name the top level of the bundle.
-    let shared = if options.identifiers { Some(top_level(&units, layout, source)?) } else { None };
+    let shared = if options.identifiers { Some(top_level(&summaries, &groups, layout, source)?) } else { None };
     lap("top level names");
 
     // What comes right after a piece: another piece, or text that is kept (which needs the statement ended, unless it closes a block).
@@ -231,9 +384,18 @@ fn in_pieces(source: &str, layout: &Layout, ranges: &[std::ops::Range<usize>], o
         })
         .collect();
 
-    // 3. Name everything inside the pieces and write them.
-    let written: Vec<(String, Vec<Anchor>)> = par_map(units.len(), |i| {
-        let unit = &units[i];
+    // 3. Name everything inside the pieces and write them: all but those kept whose names came out the same.
+    let avoid = shared.as_ref().filter(|_| keep).map_or(0, |top| avoid_digest(&top.avoid));
+    let deps: Vec<u64> = if keep { (0..ranges.len()).map(|i| shared.as_ref().map_or(0, |top| deps_of(summaries[i], &top.names[groups[i]], avoid, follows[i]))).collect() } else { Vec::new() };
+    let reused: Vec<bool> = (0..ranges.len()).map(|i| keep && before[i].as_ref().is_some_and(|k| k.deps == deps[i])).collect();
+    // A kept piece whose names changed is parsed now.
+    let again: Vec<Result<Option<Unit>, String>> = par_map(ranges.len(), |i| if before[i].is_some() && !reused[i] { analyze(source, &ranges[i], layout, &options).map(Some) } else { Ok(None) });
+    let again: Vec<Option<Unit>> = again.into_iter().collect::<Result<_, _>>()?;
+    let written: Vec<(String, Vec<Anchor>)> = par_map(ranges.len(), |i| {
+        if reused[i] {
+            return (before[i].as_ref().expect("reused").written.clone(), Vec::new());
+        }
+        let unit = units[i].as_ref().or(again[i].as_ref()).expect("a piece that is not reused was parsed");
         let tokens = &unit.parsed.tokens;
         let mut renames = Renames::new(tokens.len());
         if let (Some(prep), Some(top)) = (&unit.prep, &shared) {
@@ -245,6 +407,25 @@ fn in_pieces(source: &str, layout: &Layout, ranges: &[std::ops::Range<usize>], o
         (out, found.unwrap_or_default())
     });
     lap("name and write (pieces)");
+    if keep {
+        // What this build has is what the next one starts from.
+        let build = BUILD.load(Ordering::Relaxed) as u64;
+        let mut all = KEPT.lock().expect("kept pieces");
+        let map = all.get_or_insert_with(HashMap::default);
+        for i in 0..ranges.len() {
+            let entry = match &before[i] {
+                Some(k) if reused[i] => k.clone(),
+                _ => std::sync::Arc::new(Kept { summary: summaries[i].owned(), deps: deps[i], written: written[i].0.clone() }),
+            };
+            map.insert(keys[i], (build, entry));
+        }
+        map.retain(|_, (used, _)| *used + 1 >= build);
+        drop(all);
+        REUSED_PIECES.fetch_add(reused.iter().filter(|r| **r).count(), Ordering::Relaxed);
+        if timing {
+            eprintln!("  minify pieces kept: {} of {}", reused.iter().filter(|r| **r).count(), ranges.len());
+        }
+    }
 
     // 4. Put the wrapper and the pieces together.
     let wrapper = |text: &str, tail: bool| -> String {
@@ -275,15 +456,6 @@ fn in_pieces(source: &str, layout: &Layout, ranges: &[std::ops::Range<usize>], o
         text.push_str(&source[at..to]);
         text
     };
-    // Whether the first or the last statement of a piece is a `var` declaration: next to kept text that starts or ends with one, the two
-    // are one declaration, as they would be if they were one pass.
-    let var_at = |unit: &Unit, first: bool| -> bool {
-        let ast = &unit.parsed.ast;
-        let NodeKind::Program(list) = ast[ast.root].kind else { return false };
-        let statements = ast.list(list);
-        let statement = if first { statements.first() } else { statements.last() };
-        statement.is_some_and(|&n| matches!(ast[n].kind, NodeKind::VarDecl { kind: crate::ast::VarKind::Var, .. }))
-    };
     // True after a `var` declaration (a piece's last statement, or the closing of the bundler's own `var x = __cjs(...)`) that was
     // written with its `;`: when a `var` follows it, the two are one declaration and the `;` is a `,`.
     let mut open_var = false;
@@ -309,14 +481,15 @@ fn in_pieces(source: &str, layout: &Layout, ranges: &[std::ops::Range<usize>], o
     if let Some(list) = anchors.as_deref_mut() {
         list.reserve_exact(written.iter().map(|(_, found)| found.len()).sum());
     }
-    for (unit, (text, found)) in units.iter().zip(written) {
+    for (i, (text, found)) in written.into_iter().enumerate() {
         let (mut text, mut found) = (text, found);
-        if unit.start > at {
-            keep_text(&mut out, at, unit.start, &mut open_var);
+        let range = &ranges[i];
+        if range.start > at {
+            keep_text(&mut out, at, range.start, &mut open_var);
         }
-        at = unit.start + unit.source.len();
+        at = range.end;
         let mut dropped = 0u32;
-        if compact && open_var && text.starts_with("var ") && out.ends_with(';') && var_at(unit, true) {
+        if compact && open_var && text.starts_with("var ") && out.ends_with(';') && summaries[i].first_var {
             out.pop();
             out.push(',');
             text.drain(..4);
@@ -330,13 +503,13 @@ fn in_pieces(source: &str, layout: &Layout, ranges: &[std::ops::Range<usize>], o
             }
         }
         if let Some(list) = anchors.as_deref_mut() {
-            let (shift_out, shift_in) = (out.len() as u32, unit.start as u32);
+            let (shift_out, shift_in) = (out.len() as u32, range.start as u32);
             // The `var ` that went is no token of the output.
             found.retain(|a| a.out >= dropped);
             list.extend(found.into_iter().map(|a| Anchor { out: a.out + shift_out - dropped, inp: a.inp + shift_in, ..a }));
         }
         out.push_str(&text);
-        open_var = compact && text.ends_with(';') && var_at(unit, false);
+        open_var = compact && text.ends_with(';') && summaries[i].last_var;
     }
     let end = layout.tail.min(source.len());
     if at < end {
@@ -353,6 +526,9 @@ fn in_pieces(source: &str, layout: &Layout, ranges: &[std::ops::Range<usize>], o
     out.push_str(&tail);
     // The syntax trees and tokens of every piece are done with.
     drop(shared);
+    drop(summaries);
+    drop(fresh);
+    drop(again);
     drop(units);
     // Only a big bundle has enough to give back for it to be worth the time.
     if source.len() >= 2 << 20 {
@@ -386,7 +562,7 @@ struct TopLevel<'a> {
 
 /// Chooses the names of the bundle's top level, most used first, as one pass over one scope would.
 /// The names of a function body (a group of pieces) and of the bundle are chosen together, so that none is given twice.
-fn top_level<'a>(units: &'a [Unit], layout: &'a Layout, source: &'a str) -> Result<TopLevel<'a>, String> {
+fn top_level<'a>(summaries: &[&'a Summary<'a>], piece_groups: &[usize], layout: &'a Layout, source: &'a str) -> Result<TopLevel<'a>, String> {
     struct Group<'a> {
         name: &'a str,
         scope: usize,
@@ -399,23 +575,16 @@ fn top_level<'a>(units: &'a [Unit], layout: &'a Layout, source: &'a str) -> Resu
     // The group a name means from a piece in `scope`: the body's own, else the bundle's.
     let lookup = |index: &HashMap<(usize, &str), usize>, scope: usize, name: &str| -> Option<usize> { index.get(&(scope, name)).or_else(|| if scope != 0 { index.get(&(0, name)) } else { None }).copied() };
     let mut eval = false;
-    for unit in units {
-        let (ast, sem) = (&unit.parsed.ast, &unit.parsed.semantic);
-        let Some(prep) = &unit.prep else { continue };
-        let root = sem.root_scope();
-        eval |= sem.scope(root).flags & scope_flags::HAS_EVAL != 0;
-        for &sym in sem.scope(root).symbols() {
-            let c = prep.canon[sym.index()];
-            if c != sym.index() {
-                continue;
-            }
-            let name = ast.atom(sem.symbol(sym).name);
-            let g = *index.entry((unit.group, name)).or_insert_with(|| {
-                groups.push(Group { name, scope: unit.group, uses: 0, fixed: false });
+    for (summary, &group) in summaries.iter().zip(piece_groups) {
+        eval |= summary.eval;
+        for (name, uses, fixed) in &summary.roots {
+            let name: &str = name.as_ref();
+            let g = *index.entry((group, name)).or_insert_with(|| {
+                groups.push(Group { name, scope: group, uses: 0, fixed: false });
                 groups.len() - 1
             });
-            groups[g].uses += prep.uses[c];
-            groups[g].fixed |= prep.fixed[c];
+            groups[g].uses += uses;
+            groups[g].fixed |= fixed;
         }
     }
     // `undefined` read in one piece is the global unless another declares it; the plan was made
@@ -424,12 +593,10 @@ fn top_level<'a>(units: &'a [Unit], layout: &'a Layout, source: &'a str) -> Resu
         return Err("a piece declares `undefined`".to_string());
     }
     // A name given to an anonymous function by an assignment in a piece other than the declaring one.
-    for unit in units {
-        if let Some(prep) = &unit.prep {
-            for &a in &prep.inferred_outer {
-                if let Some(g) = lookup(&index, unit.group, unit.parsed.ast.atom(a)) {
-                    groups[g].fixed = true;
-                }
+    for (summary, &group) in summaries.iter().zip(piece_groups) {
+        for name in &summary.inferred_outer {
+            if let Some(g) = lookup(&index, group, name.as_ref()) {
+                groups[g].fixed = true;
             }
         }
     }
@@ -475,20 +642,17 @@ fn top_level<'a>(units: &'a [Unit], layout: &'a Layout, source: &'a str) -> Resu
         }
     }
     let mut globals: HashSet<&str> = HashSet::default();
-    for unit in units {
-        let ast = &unit.parsed.ast;
-        for &(atom, count) in &unit.unresolved {
-            let name = ast.atom(atom);
-            match lookup(&index, unit.group, name) {
+    for (summary, &group) in summaries.iter().zip(piece_groups) {
+        for (name, count) in &summary.unresolved {
+            let name: &str = name.as_ref();
+            match lookup(&index, group, name) {
                 Some(g) => groups[g].uses += count,
                 None => {
                     globals.insert(name);
                 }
             }
         }
-        if let Some(prep) = &unit.prep {
-            kept.extend(prep.kept.iter().map(|&a| ast.atom(a)));
-        }
+        kept.extend(summary.kept.iter().map(|n| n.as_ref()));
     }
     let mut names: Vec<HashMap<&str, String>> = (0..scopes).map(|_| HashMap::default()).collect();
     let mut taken: HashSet<&str> = HashSet::default();
@@ -508,9 +672,9 @@ fn top_level<'a>(units: &'a [Unit], layout: &'a Layout, source: &'a str) -> Resu
         list.sort_by_key(|&i| std::cmp::Reverse(groups[i].uses));
         let mut avoid: HashSet<String> = HashSet::default();
         if scope > 0 {
-            for unit in units.iter().filter(|u| u.group == scope) {
-                for &(atom, _) in &unit.unresolved {
-                    let name = unit.parsed.ast.atom(atom);
+            for (summary, _) in summaries.iter().zip(piece_groups).filter(|(_, g)| **g == scope) {
+                for (name, _) in &summary.unresolved {
+                    let name: &str = name.as_ref();
                     if !index.contains_key(&(scope, name)) {
                         if let Some(outer) = names[0].get(name) {
                             avoid.insert(outer.clone());

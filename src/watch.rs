@@ -158,6 +158,12 @@ mod imp {
             self.open.is_empty()
         }
 
+        /// As `settled`, for the files `watched` says matter: a log or a swap file that something keeps open in the same folder
+        /// does not hold anything up.
+        pub fn settled_among(&self, watched: impl Fn(&Path) -> bool) -> bool {
+            !self.open.iter().any(|p| watched(p))
+        }
+
         /// Waits up to `timeout_ms` for something to happen.
         pub fn wait(&mut self, timeout_ms: i32) -> Wake {
             let wake_fd = wake_pipe();
@@ -238,6 +244,9 @@ mod imp {
 
     impl Notifier {
         pub fn settled(&self) -> bool {
+            true
+        }
+        pub fn settled_among(&self, _watched: impl Fn(&std::path::Path) -> bool) -> bool {
             true
         }
         pub fn new() -> Option<Notifier> {
@@ -337,9 +346,12 @@ mod tests {
         std::io::Write::write_all(&mut file, b"22").unwrap();
         let _ = n.wait(500);
         assert!(!n.settled(), "still open for writing");
+        assert!(!n.settled_among(|p| p == a));
+        assert!(n.settled_among(|p| p != a), "a file nobody asks about does not matter");
         drop(file);
         let _ = n.wait(500);
         assert!(n.settled());
+        assert!(n.settled_among(|_| true));
         // A folder made is not a file that gets closed.
         std::fs::create_dir(dir.join("sub")).unwrap();
         let _ = collect(&mut n);
