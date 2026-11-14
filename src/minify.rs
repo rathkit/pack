@@ -940,7 +940,6 @@ fn separator_needed(last: u8, first: u8, out: &str, whole_number: bool) -> bool 
 
 // ---- checking a result ----------------------------------------------------------------------
 
-/// One side of a pair being compared: a node, or (when declarations were merged) the
 /// An `if` whose branches return, written as the conditional `e`: what pairs of nodes to compare, and `Some(None)` when the chain ends in an `else`, or
 /// `Some(Some(last))` when it goes on in the branch `last` (the statement after the `if` is what that branch returns). `None` when the shapes differ.
 fn walk(a: &parser::Parsed, b: &parser::Parsed, s: NodeId, e: NodeId, out: &mut Vec<(Side, Side)>) -> Option<Option<NodeId>> {
@@ -968,16 +967,48 @@ fn walk(a: &parser::Parsed, b: &parser::Parsed, s: NodeId, e: NodeId, out: &mut 
     }
 }
 
+/// `if (a) return b; c(); d(); return e;` is `return a ? b : (c(), d(), e);`: the statements from `from` on, up to a return, are the parts of the sequence
+/// `target`. The pairs to compare, and where the statements end (after the return).
+fn guarded_run(a: &parser::Parsed, b: &parser::Parsed, items: &[Side], from: usize, target: NodeId, out: &mut Vec<(Side, Side)>) -> Option<usize> {
+    let mut parts = Vec::new();
+    let mut m = from;
+    while let Some(item) = items.get(m).filter(|item| item.declarators.is_none()) {
+        match a.ast[item.id].kind {
+            NodeKind::ExprStmt(e) if !a.ast[item.id].has(flags::DIRECTIVE) => flatten_sequence(&a.ast, e, &mut parts),
+            // An `if` that is an expression of its own is one part of the sequence.
+            NodeKind::If { .. } => parts.push(item.id),
+            _ => break,
+        }
+        m += 1;
+    }
+    if m == from {
+        return None;
+    }
+    let last = items.get(m).filter(|item| item.declarators.is_none())?;
+    let NodeKind::Return(Some(arg)) = a.ast[last.id].kind else { return None };
+    flatten_sequence(&a.ast, arg, &mut parts);
+    let mut to = Vec::new();
+    flatten_sequence(&b.ast, target, &mut to);
+    if parts.len() != to.len() {
+        return None;
+    }
+    out.extend(parts.into_iter().zip(to).map(|(x, y)| (Side::node(x), Side::node(y))));
+    Some(m + 1)
+}
+
+/// One side of a pair being compared: a node, or (when declarations were merged) the
 /// declarators of a run of `var`/`let`/`const` statements standing for one statement.
 #[derive(Clone)]
 struct Side {
     id: NodeId,
     declarators: Option<Vec<NodeId>>,
+    /// A `return` that stands for a declaration and the `return` after it (`let n = x; return n;`): what it returns instead of the name.
+    returns: Option<NodeId>,
 }
 
 impl Side {
     fn node(id: NodeId) -> Side {
-        Side { id, declarators: None }
+        Side { id, declarators: None, returns: None }
     }
 }
 
@@ -1047,13 +1078,15 @@ fn guard_pairs(a: &parser::Parsed, b: &parser::Parsed, test: NodeId, cons: NodeI
         _ => plain(cons),
     };
     let NodeKind::Binary { op: op @ (LogOr | LogAnd), left, right } = b.ast[ey].kind else { return None };
-    if !jump || rest.is_empty() || rest.iter().any(|&r| !matches!(a.ast[r].kind, NodeKind::ExprStmt(_)) || a.ast[r].has(flags::DIRECTIVE)) {
+    if !jump || rest.is_empty() || rest.iter().any(|&r| !matches!(a.ast[r].kind, NodeKind::ExprStmt(_) | NodeKind::If { .. }) || a.ast[r].has(flags::DIRECTIVE)) {
         return None;
     }
     let mut from = Vec::new();
     for &r in rest {
-        if let NodeKind::ExprStmt(e) = a.ast[r].kind {
-            flatten_sequence(&a.ast, e, &mut from);
+        match a.ast[r].kind {
+            NodeKind::ExprStmt(e) => flatten_sequence(&a.ast, e, &mut from),
+            // An `if` that is an expression of its own is one part of the sequence.
+            _ => from.push(r),
         }
     }
     let mut to = Vec::new();
@@ -1077,6 +1110,9 @@ fn children(parsed: &parser::Parsed, side: &Side, syntax: bool, original: bool, 
     if let Some(list) = &side.declarators {
         return list.iter().map(|&c| Side::node(c)).collect();
     }
+    if let Some(value) = side.returns {
+        return vec![Side::node(value)];
+    }
     let mut kids = Vec::new();
     ast.for_each_child(side.id, |c| kids.push(c));
     // `catch (e)` is `catch` when nothing uses `e`.
@@ -1096,10 +1132,22 @@ fn children(parsed: &parser::Parsed, side: &Side, syntax: bool, original: bool, 
     }
     let mut out: Vec<Side> = Vec::new();
     let mut run_kind = None;
-    for c in kids {
+    let mut index = 0;
+    while index < kids.len() {
+        let c = kids[index];
+        index += 1;
         // Statements the minifier removes leave their neighbors next to each other.
         if original && removable(parsed, c) {
             continue;
+        }
+        // `let n = x; return n;` is `return x;`.
+        if let (true, Some(&next)) = (original, kids.get(index)) {
+            if let Some(value) = crate::compress::inline_returned(ast, &parsed.semantic, c, next) {
+                out.push(Side { id: next, declarators: None, returns: Some(value) });
+                run_kind = None;
+                index += 1;
+                continue;
+            }
         }
         if let NodeKind::VarDecl { kind, decls } = ast[c].kind {
             // A `const` nobody assigns to is written `let`.
@@ -1109,7 +1157,7 @@ fn children(parsed: &parser::Parsed, side: &Side, syntax: bool, original: bool, 
                 out.last_mut().and_then(|s| s.declarators.as_mut()).expect("a run").extend(own);
             } else {
                 run_kind = Some(kind);
-                out.push(Side { id: c, declarators: Some(own) });
+                out.push(Side { id: c, declarators: Some(own), returns: None });
             }
         } else {
             run_kind = None;
@@ -1638,6 +1686,19 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                                                     target = more;
                                                     k += 1;
                                                 }
+                                                None => match guarded_run(&a, &b, &ca, k, target, &mut pairs) {
+                                                    Some(end) => {
+                                                        k = end;
+                                                        break true;
+                                                    }
+                                                    None => break false,
+                                                },
+                                            },
+                                            NodeKind::ExprStmt(_) => match guarded_run(&a, &b, &ca, k, target, &mut pairs) {
+                                                Some(end) => {
+                                                    k = end;
+                                                    break true;
+                                                }
                                                 None => break false,
                                             },
                                             _ => break false,
@@ -1861,6 +1922,45 @@ mod tests {
     }
 
     #[test]
+    fn a_guard_before_expressions_that_include_an_if_is_one_expression() {
+        assert_eq!(
+            syntax("function f(a, b, c) { for (const x of a) { if (b(x)) continue; if (c) delete a[x]; } }"),
+            "function f(a,b,c){for(let x of a)b(x)||(c&&delete a[x])}"
+        );
+        assert_eq!(
+            syntax("function f(a, b, c) { if (!a) return; b(); if (c) b(c); else a(); }"),
+            "function f(a,b,c){a&&(b(),c?b(c):a())}"
+        );
+        // A statement that is not an expression stops it.
+        assert_eq!(syntax("function f(a, b) { if (a) return; b(); if (b) return 1; }"), "function f(a,b){if(a)return;b();if(b)return 1}");
+    }
+
+    #[test]
+    fn a_guard_return_with_statements_before_the_last_return_is_one_conditional() {
+        assert_eq!(syntax("function f(a, b, n) { if (a) return n; b(n); return n; }"), "function f(a,b,n){return a?n:(b(n),n)}");
+        assert_eq!(syntax("function f(a, b, c, n) { if (a) return 1; if (b) return 2; c(n); c(a); return 3; }"), "function f(a,b,c,n){return a?1:b?2:(c(n),c(a),3)}");
+        assert_eq!(syntax("function f(a, b, c) { if (a) return 1; if (b) c(); else a(); return 3; }"), "function f(a,b,c){return a?1:(b?c():a(),3)}");
+        // Not when what follows the last return is a statement (the parenthesis ends where the `;` was), or something in between is not an expression.
+        assert_eq!(syntax("function f(a, b) { if (a) return 1; b(); return 2; function g() {} }"), "function f(a,b){if(a)return 1;b();return 2;function g(){}}");
+        assert_eq!(syntax("function f(a, b) { if (a) return 1; var c = b(); return c; }"), "function f(a,b){if(a)return 1;return b()}");
+        assert_eq!(syntax("function f(a, b) { if (a) return 1; b(); return 2 }"), "function f(a,b){if(a)return 1;b();return 2}");
+    }
+
+    #[test]
+    fn a_name_that_is_only_returned_is_not_declared() {
+        assert_eq!(syntax("function f(a) { let n = a.map(x => x + 1); return n; }"), "function f(a){return a.map(x=>x+1)}");
+        assert_eq!(syntax("function f(a) { const n = a(); return n; }"), "function f(a){return a()}");
+        assert_eq!(syntax("function f(a) { var r = 1; var n = a(r); return n; }"), "function f(a){var r=1;return a(r)}");
+        // Read twice, written again, used before, a function or class (which would lose its name), or something else in between: kept.
+        assert_eq!(syntax("function f(a) { let n = a(); return n || n; }"), "function f(a){let n=a();return n||n}");
+        assert_eq!(syntax("function f(a) { let n = a(); n = 2; return n; }"), "function f(a){let n=a();n=2;return n}");
+        assert_eq!(syntax("function f(a) { const n = () => 1; return n; }"), "function f(a){let n=()=>1;return n}");
+        assert_eq!(syntax("function f(a) { let n = a(); a(); return n; }"), "function f(a){let n=a();a();return n}");
+        assert_eq!(syntax("function f(a) { let n = a(() => n); return n; }"), "function f(a){let n=a(()=>n);return n}");
+        assert_eq!(syntax("function f(a) { let n = a(); return eval('n'); }"), "function f(a){let n=a();return eval('n')}");
+    }
+
+    #[test]
     fn infinity_is_one_over_zero() {
         assert_eq!(syntax("x = [Infinity, -Infinity, +Infinity]; y = a + Infinity; z = Infinity;"), "x=[1/0,-1/0,+1/0];y=a+1/0;z=1/0");
         // Where an operator binds tighter than `/`, or a form takes it as an operand, it is in parentheses.
@@ -1933,7 +2033,7 @@ mod tests {
         assert_eq!(syntax("function f(a, b) { if (!a) return; b(); }"), "function f(a,b){a&&b()}");
         assert_eq!(syntax("function f(a, b) { x(); if (a === 1) return; b = 2; }"), "function f(a,b){x();a===1||(b=2)}");
         assert_eq!(syntax("function f(a, b) { for (const x of a) { if (x.skip) continue; b(x); } }"), "function f(a,b){for(let x of a)x.skip||b(x)}");
-        assert_eq!(syntax("function f(a, b) { for (const x of a) { if (!x) continue; b(x); b(x + 1); } }"), "function f(a,b){for(let x of a)x&&(b(x),b(x+1));}");
+        assert_eq!(syntax("function f(a, b) { for (const x of a) { if (!x) continue; b(x); b(x + 1); } }"), "function f(a,b){for(let x of a)x&&(b(x),b(x+1))}");
         assert_eq!(syntax("function f(a, b) { for (const x of a) { g(x); if (!x) continue; b(x); } }"), "function f(a,b){for(let x of a){g(x);x&&b(x)}}");
         // Not when something other than expressions follows, with a value, with a label, or where `return` would not be the end.
         assert_eq!(syntax("function f(a, b) { if (a) return; let c = 1; b(c); }"), "function f(a,b){if(a)return;let c=1;b(c)}");
