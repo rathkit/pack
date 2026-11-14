@@ -209,6 +209,9 @@ pub struct Options {
     pub browser: bool,
     /// Shorten names and remove whitespace in the finished files.
     pub minify: crate::minify::Options,
+    /// With `hmr`: called with every module as soon as they are written, before the files of the build are finished (the source
+    /// map is the longest part), so a page can be told of the change at once.
+    pub on_modules: Option<std::sync::Arc<dyn Fn(&[HmrModule]) + Send + Sync>>,
     /// Write a source map for each output file.
     pub sourcemap: SourceMapMode,
     /// Put the original files' text into the map, so it works without them.
@@ -280,7 +283,7 @@ pub enum SourceMapMode {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { splitting: false, format: Format::Esm, global_name: None, globals: Vec::new(), original_paths: false, browser: false, minify: crate::minify::Options::default(), sourcemap: SourceMapMode::None, sources_content: true, map_base: None, file_name: None, hot: false, hmr: false, react_refresh: false, entry_names: Vec::new(), federation: None, banner_js: None, footer_js: None, banner_css: None, footer_css: None, drop_console: false, drop_debugger: false, entry_template: None, chunk_template: None, out_extensions: Vec::new(), legal_comments: crate::legal::LegalComments::Eof, target: crate::target::Target::ESNEXT, cjs_exports: CjsExports::Named, preserve_modules: false, preserve_root: None, preserve_entries: 0 }
+        Options { splitting: false, format: Format::Esm, global_name: None, globals: Vec::new(), original_paths: false, browser: false, minify: crate::minify::Options::default(), on_modules: None, sourcemap: SourceMapMode::None, sources_content: true, map_base: None, file_name: None, hot: false, hmr: false, react_refresh: false, entry_names: Vec::new(), federation: None, banner_js: None, footer_js: None, banner_css: None, footer_css: None, drop_console: false, drop_debugger: false, entry_template: None, chunk_template: None, out_extensions: Vec::new(), legal_comments: crate::legal::LegalComments::Eof, target: crate::target::Target::ESNEXT, cjs_exports: CjsExports::Named, preserve_modules: false, preserve_root: None, preserve_entries: 0 }
     }
 }
 
