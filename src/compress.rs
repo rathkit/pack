@@ -71,8 +71,22 @@ pub(crate) fn const_is_let(ast: &Ast, sem: &Semantic, decl: NodeId) -> bool {
     true
 }
 
+/// Whether the binding of a `catch (e)` is never used, so `catch` can stand without it (es2019): no read, no assignment, no `eval` that could look.
+pub(crate) fn catch_param_unused(ast: &Ast, sem: &Semantic, param: NodeId, body: NodeId) -> bool {
+    // A `var e` in the body assigns to the parameter (and a function named `e` too), so the parameter stays.
+    if declares_var(ast, body) {
+        return false;
+    }
+    if !matches!(ast[param].kind, NodeKind::BindingIdent(_)) {
+        return false;
+    }
+    let Some(sym) = sem.symbol_of(param) else { return false };
+    let symbol = sem.symbol(sym);
+    symbol.reads == 0 && symbol.writes == 0 && symbol.flags & crate::semantic::symbol_flags::DYNAMIC == 0 && sem.scope(symbol.scope).flags & crate::semantic::scope_flags::HAS_EVAL == 0
+}
+
 pub(crate) fn plan(source: &str, ast: &Ast, sem: &Semantic, tokens: &[Token], barriers: &[u32], legacy: bool) -> Plan {
-    let mut ctx = Ctx { legacy, source, ast, sem, tokens, barriers, parent: vec![None; ast.node_count() + 1], actions: vec![Action::Keep; tokens.len()], locked: vec![false; tokens.len()], dead: Vec::new(), kept_semi: Vec::new(), done: Default::default(), texts: Vec::new(), text_index: Default::default() };
+    let mut ctx = Ctx { legacy, source, ast, sem, tokens, barriers, parent: vec![None; ast.node_count() + 1], actions: vec![Action::Keep; tokens.len()], locked: vec![false; tokens.len()], dead: Vec::new(), kept_semi: Vec::new(), done: Default::default(), visited: Default::default(), as_expr: Default::default(), texts: Vec::new(), text_index: Default::default() };
     let mut order = Vec::new();
     let mut stack = vec![ast.root];
     while let Some(n) = stack.pop() {
@@ -147,6 +161,10 @@ struct Ctx<'a> {
     kept_semi: Vec<usize>,
     /// `if` statements already turned into expressions, as the `else` of another.
     done: crate::fxhash::FastSet<NodeId>,
+    /// `if` statements whose rewrites have been decided (a body that wants to know whether an `if` inside it is an expression decides it first).
+    visited: crate::fxhash::FastSet<NodeId>,
+    /// `if` statements written as one expression (`a&&b();`, `a?b():c();`).
+    as_expr: crate::fxhash::FastSet<NodeId>,
     texts: Vec<String>,
     text_index: crate::fxhash::FastMap<String, u32>,
 }
@@ -277,11 +295,13 @@ impl Ctx<'_> {
                     }
                 }
             }
-            NodeKind::Str(_) if self.string_may_be_template(n) => {
+            NodeKind::Str(_) if !self.parent[n.index()].is_some_and(|p| ast[p].has(flags::DIRECTIVE)) => {
                 let i = self.first_tok(node.span.start);
                 if self.tokens.get(i).is_some_and(|t| t.kind == Kind::String) {
-                    if let Some(template) = as_template(self.text(i)) {
-                        self.set_text(i, &template);
+                    let text = self.text(i);
+                    let template = if self.string_may_be_template(n) { as_template(text) } else { None };
+                    if let Some(better) = template.or_else(|| requote(text)) {
+                        self.set_text(i, &better);
                     }
                 }
             }
@@ -320,17 +340,7 @@ impl Ctx<'_> {
                     self.set_text(i, "let");
                 }
             }
-            NodeKind::If { test, cons, alt } => {
-                self.unbrace(cons);
-                if let Some(alt) = alt {
-                    self.unbrace(alt);
-                }
-                if let Some(value) = self.constant(test) {
-                    self.dead_if(n, value, cons, alt);
-                } else if !self.done.contains(&n) {
-                    self.if_to_expression(n, test, cons, alt);
-                }
-            }
+            NodeKind::If { .. } => self.visit_if(n),
             NodeKind::While { test, body } if matches!(ast[test].kind, NodeKind::Bool(true)) && !ast[test].has(flags::PARENTHESIZED) => {
                 self.unbrace(body);
                 // `while (true)` is `for (;;)`.
@@ -339,6 +349,15 @@ impl Ctx<'_> {
                 if self.kw(w, Kw::While) && self.is(w + 1, Punct::LParen) && t == w + 2 && self.is(t + 1, Punct::RParen) {
                     self.set_text(w, "for");
                     self.set_text(t, ";;");
+                }
+            }
+            // `catch (e) {}` is `catch {}` when nothing reads `e`.
+            NodeKind::Catch { param: Some(param), body } if !self.legacy && catch_param_unused(ast, self.sem, param, body) => {
+                let catch = self.first_tok(node.span.start);
+                let open = catch + 1;
+                let close = self.last_tok(ast[param].span.end) + 1;
+                if self.kw(catch, Kw::Catch) && self.is(open, Punct::LParen) && self.is(close, Punct::RParen) {
+                    self.dead.push((open, close + 1));
                 }
             }
             NodeKind::Binary { op, left, right } => {
@@ -366,6 +385,49 @@ impl Ctx<'_> {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// The rewrites of one `if` statement, decided once (a body that is about to become a sequence decides the `if` statements in it first).
+    fn visit_if(&mut self, n: NodeId) {
+        if !self.visited.insert(n) {
+            return;
+        }
+        let NodeKind::If { test, cons, alt } = self.ast[n].kind else { return };
+        self.unbrace(cons);
+        if let Some(alt) = alt {
+            self.unbrace(alt);
+        }
+        if let Some(value) = self.constant(test) {
+            self.dead_if(n, value, cons, alt);
+        } else if !self.done.contains(&n) && self.if_to_expression(n, test, cons, alt) {
+            self.as_expr.insert(n);
+        }
+    }
+
+    /// Whether statement `s` is written as one expression followed by a `;`: an expression statement, or an `if` that became one.
+    fn is_expression_statement(&self, s: NodeId) -> bool {
+        match self.ast[s].kind {
+            NodeKind::ExprStmt(_) => !self.ast[s].has(flags::DIRECTIVE),
+            NodeKind::If { .. } => self.as_expr.contains(&s),
+            _ => false,
+        }
+    }
+
+    /// The token that ends the expression statement `s` with a `;`, if it can be turned into a `,`: a `;` that is written, or the `}` that
+    /// stands for one.
+    fn expression_terminator(&self, s: NodeId) -> Option<usize> {
+        match self.ast[s].kind {
+            NodeKind::ExprStmt(_) => self.semi_of(s).filter(|&semi| self.actions[semi] == Action::Keep),
+            _ => {
+                let start = self.first_tok(self.ast[s].span.start);
+                let mut i = self.last_tok(self.ast[s].span.end);
+                while i > start && self.actions[i] == Action::Skip {
+                    i -= 1;
+                }
+                let ends = (self.is(i, Punct::Semi) && self.actions[i] == Action::Keep) || (self.is(i, Punct::RBrace) && self.actions[i] == Action::Semi);
+                ends.then_some(i)
+            }
         }
     }
 
@@ -515,7 +577,10 @@ impl Ctx<'_> {
         let ast = self.ast;
         let Some(ce) = self.sole_expression(cons) else {
             if let Some(alt) = alt {
-                self.if_else_sequences(n, test, cons, alt);
+                if self.if_else_sequences(n, test, cons, alt) {
+                    self.as_expr.insert(n);
+                    return true;
+                }
             }
             return false;
         };
@@ -564,7 +629,10 @@ impl Ctx<'_> {
                 }
                 let ae = if chained { None } else { self.sole_expression(alt) };
                 if !chained && ae.is_none() {
-                    self.if_else_sequences(n, test, cons, alt);
+                    if self.if_else_sequences(n, test, cons, alt) {
+                        self.as_expr.insert(n);
+                        return true;
+                    }
                     return false;
                 }
                 let Some(cons_semi) = self.sole_statement_semi(cons) else { return false };
@@ -586,42 +654,68 @@ impl Ctx<'_> {
         }
     }
 
+    /// The `;` written right before the `}` at `close` (the braces of a block that opens at `open`), looking back over tokens that are left out: a `;`
+    /// that is kept, or a `}` that is written as one.
+    fn written_semi_before(&self, open: usize, close: usize) -> Option<usize> {
+        let mut k = close.checked_sub(1)?;
+        while k > open && self.actions[k] == Action::Skip {
+            k -= 1;
+        }
+        let ends = k > open && ((self.is(k, Punct::Semi) && self.actions[k] == Action::Keep) || (self.is(k, Punct::RBrace) && self.actions[k] == Action::Semi));
+        ends.then_some(k)
+    }
+
     /// A body that `block_sequence` made one comma expression: the block, its statements (at least two, all expressions), the `;` of the
     /// last one and the braces.
     fn expression_block(&self, s: NodeId) -> Option<(usize, usize, usize)> {
         let NodeKind::Block(list) = self.ast[s].kind else { return None };
         let items = self.ast.list(list);
         let (&last, before) = items.split_last()?;
-        if before.is_empty() || !matches!(self.ast[last].kind, NodeKind::ExprStmt(_)) || before.iter().any(|&b| !matches!(self.ast[b].kind, NodeKind::ExprStmt(_))) {
+        if before.is_empty() || !self.is_expression_statement(last) || before.iter().any(|&b| !self.is_expression_statement(b)) {
             return None;
         }
         let open = self.first_tok(self.ast[s].span.start);
         let close = self.last_tok(self.ast[s].span.end);
         // Its braces were taken off; the `;` of the last statement is written, so there is one to turn into the closing parenthesis.
-        if self.actions[open] != Action::Skip || !self.is(close, Punct::RBrace) || close == 0 || !self.is(close - 1, Punct::Semi) || self.actions[close - 1] != Action::Keep {
+        if self.actions[open] != Action::Skip || !self.is(close, Punct::RBrace) || close == 0 {
             return None;
         }
-        Some((open, close - 1, close))
+        let semi = self.written_semi_before(open, close)?;
+        Some((open, semi, close))
     }
 
     /// `if (a) { b(); c(); } else { d(); }` is `a?(b(),c()):d();`: each body is one expression, in parentheses when it is a sequence.
-    fn if_else_sequences(&mut self, n: NodeId, test: NodeId, cons: NodeId, alt: NodeId) {
+    fn if_else_sequences(&mut self, n: NodeId, test: NodeId, cons: NodeId, alt: NodeId) -> bool {
         let ast = self.ast;
         // How each body is written: a sequence block, or a single expression statement.
         let cons_block = self.expression_block(cons);
         let alt_block = self.expression_block(alt);
+        // An `else if` that is an expression of its own is what the `else` holds: `a?(b(),c()):d?e():f()`.
+        let mut chained = false;
+        if alt_block.is_none() && cons_block.is_some() {
+            if let NodeKind::If { test: t2, cons: c2, alt: a2 } = ast[alt].kind {
+                if self.constant(t2).is_none() && !self.done.contains(&alt) {
+                    self.done.insert(alt);
+                    self.unbrace(c2);
+                    if let Some(a2) = a2 {
+                        self.unbrace(a2);
+                    }
+                    chained = self.if_to_expression(alt, t2, c2, a2);
+                }
+            }
+        }
         if cons_block.is_none() && alt_block.is_none() {
-            return;
+            return false;
         }
         let (ce, ae) = (self.sole_expression(cons), self.sole_expression(alt));
-        if (cons_block.is_none() && ce.is_none_or(|e| self.precedence(e) < 2)) || (alt_block.is_none() && ae.is_none_or(|e| self.precedence(e) < 2)) {
-            return;
+        if (cons_block.is_none() && ce.is_none_or(|e| self.precedence(e) < 2)) || (alt_block.is_none() && !chained && ae.is_none_or(|e| self.precedence(e) < 2)) {
+            return false;
         }
         let cons_end = match cons_block {
             Some((_, semi, close)) => (semi, close),
             None => match self.sole_statement_semi(cons) {
                 Some(semi) => (semi, semi),
-                None => return,
+                None => return false,
             },
         };
         let if_tok = self.first_tok(ast[n].span.start);
@@ -629,7 +723,7 @@ impl Ctx<'_> {
         let close = self.first_tok(ast[cons].span.start).wrapping_sub(1);
         let else_tok = self.last_tok(ast[cons].span.end) + 1;
         if !self.kw(if_tok, Kw::If) || !self.is(open, Punct::LParen) || !self.is(close, Punct::RParen) || self.starts_statement_badly(test) || !self.kw(else_tok, Kw::Else) {
-            return;
+            return false;
         }
         // `{` is the first token of a block body, which is where the `(` goes; a body that is a sequence has no braces left.
         let keeps_parens = ast[test].has(flags::PARENTHESIZED);
@@ -657,6 +751,7 @@ impl Ctx<'_> {
             self.force_text(semi, ")");
             self.force(end, Action::Semi);
         }
+        true
     }
 
     /// The `;` of the only statement in `s` (a statement, or a block that holds one).
@@ -1225,14 +1320,20 @@ impl Ctx<'_> {
         if before.is_empty() {
             return;
         }
+        // An `if` among the statements may be an expression of its own, which a comma can join.
+        for &s in items {
+            if matches!(ast[s].kind, NodeKind::If { .. }) {
+                self.visit_if(s);
+            }
+        }
         let mut commas = Vec::with_capacity(before.len());
         for &s in before {
-            if !matches!(ast[s].kind, NodeKind::ExprStmt(_)) || ast[s].has(flags::DIRECTIVE) {
+            if !self.is_expression_statement(s) {
                 return;
             }
             // A line break that stood for the `;` has no token to become a comma.
-            match self.semi_of(s) {
-                Some(semi) if self.actions[semi] == Action::Keep => commas.push(semi),
+            match self.expression_terminator(s) {
+                Some(semi) => commas.push(semi),
                 _ => return,
             }
         }
@@ -1241,7 +1342,7 @@ impl Ctx<'_> {
         }
         // The last statement decides what the sequence is: an expression, a returned value or a thrown one.
         let keyword = match ast[last].kind {
-            NodeKind::ExprStmt(_) if !ast[last].has(flags::DIRECTIVE) => None,
+            _ if self.is_expression_statement(last) => None,
             NodeKind::Return(Some(arg)) if !self.is_nothing(arg) => Some(Kw::Return),
             NodeKind::Throw(_) => Some(Kw::Throw),
             _ => return,
@@ -1262,10 +1363,10 @@ impl Ctx<'_> {
             self.set(open, Action::Skip);
         }
         for semi in commas {
-            self.set_text(semi, ",");
+            self.force_text(semi, ",");
         }
-        // The last statement's own `;` stays; one that a line break or the `}` stood for is written.
-        if self.is(close - 1, Punct::Semi) && close - 1 > open {
+        // The last statement's own `;` stays (so does the one a `}` inside it stands for); one that a line break or the `}` stood for is written.
+        if self.written_semi_before(open, close).is_some() {
             self.set(close, Action::Skip);
         } else {
             self.set(close, Action::Semi);
@@ -1752,4 +1853,58 @@ pub(crate) fn as_template(token: &str) -> Option<String> {
     }
     out.push('`');
     (out.len() < token.len()).then_some(out)
+}
+
+/// A string token with the quote that needs the fewest escapes: `"say \"hi\""` is `'say "hi"'`. A tie keeps the quote the token has. `None` when
+/// the token is already the shortest.
+pub(crate) fn requote(token: &str) -> Option<String> {
+    let quote = token.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let body = token.get(1..token.len().checked_sub(1)?)?;
+    if !body.contains('"') && !body.contains('\'') {
+        return None;
+    }
+    // What each quote would cost, counting every quote character in the value (escaped or not).
+    let (mut doubles, mut singles) = (0usize, 0usize);
+    let mut chars = body.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => match chars.next()? {
+                '"' => doubles += 1,
+                '\'' => singles += 1,
+                _ => {}
+            },
+            '"' => doubles += 1,
+            '\'' => singles += 1,
+            _ => {}
+        }
+    }
+    let (have, other, other_count, have_count) = if quote == '"' { ('"', '\'', singles, doubles) } else { ('\'', '"', doubles, singles) };
+    if other_count >= have_count {
+        return None;
+    }
+    let _ = have;
+    let mut out = String::with_capacity(token.len());
+    out.push(other);
+    let mut chars = body.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => match chars.next()? {
+                q @ ('"' | '\'') if q != other => out.push(q),
+                q => {
+                    out.push('\\');
+                    out.push(q);
+                }
+            },
+            q if q == other => {
+                out.push('\\');
+                out.push(q);
+            }
+            q => out.push(q),
+        }
+    }
+    out.push(other);
+    Some(out)
 }

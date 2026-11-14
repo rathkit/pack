@@ -941,6 +941,33 @@ fn separator_needed(last: u8, first: u8, out: &str, whole_number: bool) -> bool 
 // ---- checking a result ----------------------------------------------------------------------
 
 /// One side of a pair being compared: a node, or (when declarations were merged) the
+/// An `if` whose branches return, written as the conditional `e`: what pairs of nodes to compare, and `Some(None)` when the chain ends in an `else`, or
+/// `Some(Some(last))` when it goes on in the branch `last` (the statement after the `if` is what that branch returns). `None` when the shapes differ.
+fn walk(a: &parser::Parsed, b: &parser::Parsed, s: NodeId, e: NodeId, out: &mut Vec<(Side, Side)>) -> Option<Option<NodeId>> {
+    let ret = |s: NodeId| -> Option<NodeId> {
+        match a.ast[s].kind {
+            NodeKind::Return(Some(arg)) => Some(arg),
+            NodeKind::Block(list) if a.ast.list(list).len() == 1 => match a.ast[a.ast.list(list)[0]].kind {
+                NodeKind::Return(Some(arg)) => Some(arg),
+                _ => None,
+            },
+            _ => None,
+        }
+    };
+    let NodeKind::If { test, cons, alt } = a.ast[s].kind else { return None };
+    let NodeKind::Conditional { test: ct, cons: cc, alt: ca } = b.ast[e].kind else { return None };
+    out.push((Side::node(test), Side::node(ct)));
+    out.push((Side::node(ret(cons)?), Side::node(cc)));
+    match alt {
+        None => Some(Some(ca)),
+        Some(alt) if matches!(a.ast[alt].kind, NodeKind::If { .. }) => walk(a, b, alt, ca, out),
+        Some(alt) => {
+            out.push((Side::node(ret(alt)?), Side::node(ca)));
+            Some(None)
+        }
+    }
+}
+
 /// declarators of a run of `var`/`let`/`const` statements standing for one statement.
 #[derive(Clone)]
 struct Side {
@@ -1045,13 +1072,19 @@ fn guard_pairs(a: &parser::Parsed, b: &parser::Parsed, test: NodeId, cons: NodeI
 }
 
 /// a statement list count as one declaration (the minifier joins them).
-fn children(parsed: &parser::Parsed, side: &Side, syntax: bool, original: bool) -> Vec<Side> {
+fn children(parsed: &parser::Parsed, side: &Side, syntax: bool, original: bool, legacy: bool) -> Vec<Side> {
     let ast = &parsed.ast;
     if let Some(list) = &side.declarators {
         return list.iter().map(|&c| Side::node(c)).collect();
     }
     let mut kids = Vec::new();
     ast.for_each_child(side.id, |c| kids.push(c));
+    // `catch (e)` is `catch` when nothing uses `e`.
+    if let (true, true, false, NodeKind::Catch { param: Some(param), body }) = (syntax, original, legacy, ast[side.id].kind) {
+        if crate::compress::catch_param_unused(ast, &parsed.semantic, param, body) {
+            kids.retain(|k| *k != param);
+        }
+    }
     if let (true, true, NodeKind::Switch { cases, .. }) = (syntax, original, ast[side.id].kind) {
         // `case 1: default:` is `default:`.
         let gone = crate::compress::redundant_cases(ast, cases);
@@ -1136,6 +1169,8 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                 (NodeKind::Bool(v), _) => truth(&b.ast, y) == Some(*v) && matches!(ny.kind, NodeKind::Unary { .. }),
                 (NodeKind::Ident(_), _) => (is_undefined(&a, x) && is_void_zero(&b.ast, y)) || (is_global_infinity(&a, x) && is_one_over_zero(&b.ast, y)),
                 (NodeKind::Str(sa), NodeKind::PropName(pb)) => a.ast.atom(*sa) == b.ast.atom(*pb),
+                // The same text in the quote that needs the fewest escapes.
+                (NodeKind::Str(sa), NodeKind::Str(sb)) => a.ast.atom(*sa) == b.ast.atom(*sb),
                 // A string written as a template with nothing in it to fill in: the same text.
                 (NodeKind::Str(sa), NodeKind::Template { quasis, exprs }) => {
                     b.ast.list(*exprs).is_empty()
@@ -1158,8 +1193,14 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                     _ => None,
                 }
             };
+            // The expression an `if` became: the one of an expression statement, or a part of a sequence (an `if` joined to the statements around it).
+            let if_target = match ny.kind {
+                NodeKind::ExprStmt(e) => Some(e),
+                NodeKind::Binary { op: crate::ast::BinOp::LogAnd | crate::ast::BinOp::LogOr, .. } | NodeKind::Conditional { .. } => Some(y),
+                _ => None,
+            };
             match (&nx.kind, &ny.kind) {
-                (NodeKind::If { test, cons, alt }, NodeKind::ExprStmt(ey)) => match (&b.ast[*ey].kind, alt) {
+                (NodeKind::If { test, cons, alt }, _) if if_target.is_some() => match (&b.ast[if_target.expect("a target")].kind, alt) {
                     (NodeKind::Binary { op: crate::ast::BinOp::LogAnd, left, right }, None) => {
                         if let Some(ce) = sole(&a, *cons) {
                             stack.push((Side::node(*test), Side::node(*left)));
@@ -1185,6 +1226,8 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                             for &item in a.ast.list(list) {
                                 match a.ast[item].kind {
                                     NodeKind::ExprStmt(e) if !a.ast[item].has(flags::DIRECTIVE) => flatten_sequence(&a.ast, e, &mut from),
+                                    // An `if` that is an expression of its own is one part of the sequence.
+                                    NodeKind::If { .. } => from.push(item),
                                     _ => return None,
                                 }
                             }
@@ -1210,6 +1253,22 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                                     true
                                 } else if matches!(a.ast[s].kind, NodeKind::If { .. }) {
                                     chain(a, b, s, e, out)
+                                } else if let NodeKind::Block(list) = a.ast[s].kind {
+                                    // Several expression statements: the parts of a sequence.
+                                    let mut from = Vec::new();
+                                    for &item in a.ast.list(list) {
+                                        match a.ast[item].kind {
+                                            NodeKind::ExprStmt(x) if !a.ast[item].has(flags::DIRECTIVE) => flatten_sequence(&a.ast, x, &mut from),
+                                            NodeKind::If { .. } => from.push(item),
+                                            _ => return false,
+                                        }
+                                    }
+                                    let mut to = Vec::new();
+                                    flatten_sequence(&b.ast, e, &mut to);
+                                    from.len() == to.len() && {
+                                        out.extend(from.into_iter().zip(to));
+                                        true
+                                    }
                                 } else {
                                     false
                                 }
@@ -1294,6 +1353,8 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                         let last = i + 1 == items.len();
                         match (&a.ast[s].kind, &ny.kind) {
                             (NodeKind::ExprStmt(e), _) if !a.ast[s].has(flags::DIRECTIVE) => flatten_sequence(&a.ast, *e, &mut from),
+                            // An `if` that is an expression of its own is one part of the sequence.
+                            (NodeKind::If { .. }, _) if !last || matches!(ny.kind, NodeKind::ExprStmt(_)) => from.push(s),
                             (NodeKind::Return(Some(e)), NodeKind::Return(_)) if last => flatten_sequence(&a.ast, *e, &mut from),
                             (NodeKind::Throw(e), NodeKind::Throw(_)) if last => flatten_sequence(&a.ast, *e, &mut from),
                             _ => return Err(format!("block at {} became {:?}", nx.span.start, ny.kind)),
@@ -1405,8 +1466,8 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
             }
             _ => {}
         }
-        let mut ca = children(&a, &sx, syntax, true);
-        let mut cb = children(&b, &sy, syntax, false);
+        let mut ca = children(&a, &sx, syntax, true, options.legacy);
+        let mut cb = children(&b, &sy, syntax, false, options.legacy);
         if syntax {
             match (&nx.kind, &ny.kind) {
                 // `=> { return x; }` and `=> x`.
@@ -1496,30 +1557,6 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                             };
                             // `if (a) return 1; else if (b) return 2; return 3;`: the `else if` chain goes on in the branch, the return after it ends it.
                             if let Some(alt_if) = alt.filter(|x| matches!(a.ast[*x].kind, NodeKind::If { .. })) {
-                                fn walk(a: &parser::Parsed, b: &parser::Parsed, s: NodeId, e: NodeId, out: &mut Vec<(Side, Side)>) -> Option<Option<NodeId>> {
-                                    let ret = |s: NodeId| -> Option<NodeId> {
-                                        match a.ast[s].kind {
-                                            NodeKind::Return(Some(arg)) => Some(arg),
-                                            NodeKind::Block(list) if a.ast.list(list).len() == 1 => match a.ast[a.ast.list(list)[0]].kind {
-                                                NodeKind::Return(Some(arg)) => Some(arg),
-                                                _ => None,
-                                            },
-                                            _ => None,
-                                        }
-                                    };
-                                    let NodeKind::If { test, cons, alt } = a.ast[s].kind else { return None };
-                                    let NodeKind::Conditional { test: ct, cons: cc, alt: ca } = b.ast[e].kind else { return None };
-                                    out.push((Side::node(test), Side::node(ct)));
-                                    out.push((Side::node(ret(cons)?), Side::node(cc)));
-                                    match alt {
-                                        None => Some(Some(ca)),
-                                        Some(alt) if matches!(a.ast[alt].kind, NodeKind::If { .. }) => walk(a, b, alt, ca, out),
-                                        Some(alt) => {
-                                            out.push((Side::node(ret(alt)?), Side::node(ca)));
-                                            Some(None)
-                                        }
-                                    }
-                                }
                                 let mut pairs = Vec::new();
                                 if let Some(first) = returned(*cons) {
                                     pairs.push((Side::node(*test), Side::node(*ct)));
@@ -1527,16 +1564,30 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                                     let rest = walk(&a, &b, alt_if, *ca_, &mut pairs);
                                     let extra = match rest {
                                         Some(None) => Some(0),
-                                        Some(Some(target)) => match ca.get(i) {
-                                            Some(next) if next.declarators.is_none() => match a.ast[next.id].kind {
-                                                NodeKind::Return(Some(arg)) => {
-                                                    pairs.push((Side::node(arg), Side::node(target)));
-                                                    Some(1)
+                                        Some(Some(mut target)) => {
+                                            // What follows is a return, or another `if` that returns (which goes on in the last branch).
+                                            let mut taken = 0;
+                                            loop {
+                                                match ca.get(i + taken) {
+                                                    Some(next) if next.declarators.is_none() => match a.ast[next.id].kind {
+                                                        NodeKind::Return(Some(arg)) => {
+                                                            pairs.push((Side::node(arg), Side::node(target)));
+                                                            break Some(taken + 1);
+                                                        }
+                                                        NodeKind::If { .. } => match walk(&a, &b, next.id, target, &mut pairs) {
+                                                            Some(None) => break Some(taken + 1),
+                                                            Some(Some(more)) => {
+                                                                target = more;
+                                                                taken += 1;
+                                                            }
+                                                            None => break None,
+                                                        },
+                                                        _ => break None,
+                                                    },
+                                                    _ => break None,
                                                 }
-                                                _ => None,
-                                            },
-                                            _ => None,
-                                        },
+                                            }
+                                        }
                                         None => None,
                                     };
                                     if let Some(extra) = extra {
@@ -1578,13 +1629,17 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                                                 k += 1;
                                                 break true;
                                             }
-                                            NodeKind::If { test: t2, cons: c2, alt: None } => {
-                                                let (Some(r2), NodeKind::Conditional { test: ct2, cons: cc2, alt: ca2 }) = (returned(c2), &b.ast[target].kind) else { break false };
-                                                pairs.push((Side::node(t2), Side::node(*ct2)));
-                                                pairs.push((Side::node(r2), Side::node(*cc2)));
-                                                target = *ca2;
-                                                k += 1;
-                                            }
+                                            NodeKind::If { .. } => match walk(&a, &b, next.id, target, &mut pairs) {
+                                                Some(None) => {
+                                                    k += 1;
+                                                    break true;
+                                                }
+                                                Some(Some(more)) => {
+                                                    target = more;
+                                                    k += 1;
+                                                }
+                                                None => break false,
+                                            },
                                             _ => break false,
                                         }
                                     };
@@ -1594,6 +1649,23 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                                         j += 1;
                                         continue;
                                     }
+                                }
+                            }
+                        }
+                    }
+                }
+                // `if (a) return; else if (b) return 1; return 2;` is `if (a) return; else return b ? 1 : 2;`: the chain after the `else` is a conditional.
+                if in_list && item.declarators.is_none() {
+                    if let (NodeKind::If { test, cons, alt: Some(alt) }, NodeKind::If { test: t2, cons: c2, alt: Some(alt2) }) = (&a.ast[item.id].kind, &b.ast[other.id].kind) {
+                        if let (NodeKind::If { .. }, NodeKind::Return(Some(joined))) = (&a.ast[*alt].kind, &b.ast[*alt2].kind) {
+                            let mut pairs = vec![(Side::node(*test), Side::node(*t2)), (Side::node(*cons), Side::node(*c2))];
+                            if let Some(Some(target)) = walk(&a, &b, *alt, *joined, &mut pairs) {
+                                if let Some(NodeKind::Return(Some(arg))) = ca.get(i).filter(|n| n.declarators.is_none()).map(|n| a.ast[n.id].kind) {
+                                    pairs.push((Side::node(arg), Side::node(target)));
+                                    aligned.extend(pairs);
+                                    i += 1;
+                                    j += 1;
+                                    continue;
                                 }
                             }
                         }
@@ -1719,6 +1791,73 @@ mod tests {
         // A statement in between, or a missing final return, leaves the run as it was.
         assert_eq!(syntax("function f(a, b) { if (a) return 1; g(); if (b) return 2; return 3; }"), "function f(a,b){if(a)return 1;g();return b?2:3}");
         assert_eq!(syntax("function f(a, b) { if (a) return 1; if (b) return 2; g(); }"), "function f(a,b){if(a)return 1;if(b)return 2;g()}");
+    }
+
+    #[test]
+    fn a_string_takes_the_quote_that_needs_the_fewest_escapes() {
+        assert_eq!(syntax(r#"x = "say \"hi\"" + y + "\"b\"";"#), r#"x='say "hi"'+y+'"b"'"#);
+        assert_eq!(syntax(r#"x = 'it\'s' + "it's";"#), r#"x="it's"+"it's""#);
+        // A tie keeps the quote it has; a string that has both quotes takes the one it has fewer of.
+        assert_eq!(syntax(r#"x = 'a"b\'c' + "a\"b'c\"d";"#), r#"x='a"b\'c'+'a"b\'c"d'"#);
+        // Other escapes stay as they are, and a backslash in front of the quote is its own escape.
+        assert_eq!(syntax(r#"x = f("\\\"\n" + "a");"#), r#"x=f('\\"\n'+"a")"#);
+        // A directive keeps its quotes.
+        assert_eq!(syntax(r#"function f() { "use \"x\""; }"#), r#"function f(){"use \"x\""}"#);
+    }
+
+    #[test]
+    fn a_catch_binding_nothing_uses_is_left_out() {
+        assert_eq!(syntax("try { f() } catch (e) { g() }"), "try{f()}catch{g()}");
+        // Used, assigned, destructured, or reachable by an `eval` or a `var` of its own name: kept.
+        assert_eq!(syntax("try { f() } catch (e) { g(e) }"), "try{f()}catch(e){g(e)}");
+        assert_eq!(syntax("try { f() } catch (e) { e = 1; g() }"), "try{f()}catch(e){e=1;g()}");
+        assert_eq!(syntax("try { f() } catch ({ message }) { g() }"), "try{f()}catch({message}){g()}");
+        assert_eq!(syntax("try { f() } catch (e) { eval('e') }"), "try{f()}catch(e){eval('e')}");
+        assert_eq!(syntax("try { f() } catch (e) { var e = 2; g() }"), "try{f()}catch(e){var e=2;g()}");
+        // es5 has no catch without a binding.
+        let legacy = Options { whitespace: true, syntax: true, legacy: true, ..Options::default() };
+        verify("try { f() } catch (e) { g() }", &legacy).unwrap();
+        assert_eq!(minify("try { f() } catch (e) { g() }", &legacy).unwrap(), "try{f()}catch(e){g()}");
+    }
+
+    #[test]
+    fn an_if_that_is_an_expression_joins_the_statements_around_it() {
+        assert_eq!(syntax("function f(a, b, c) { if (a) { b(); if (c) b(); } }"), "function f(a,b,c){if(a)b(),c&&b()}");
+        assert_eq!(syntax("function f(a, b, c) { for (;;) { a(); if (b) c(); else a(); } }"), "function f(a,b,c){for(;;)a(),b?c():a()}");
+        assert_eq!(syntax("function f(a, b, c) { if (a) { if (b) { c(); b(); } else { b(); c(); } a(); } else b(); }"), "function f(a,b,c){a?(b?(c(),b()):(b(),c()),a()):b()}");
+        // The braces of an inner block that goes do not leave a second `;` behind.
+        assert_eq!(syntax("function f(a, b, c) { if (a) { b(); if (c) { b(); } } else { c(); } }"), "function f(a,b,c){a?(b(),c&&b()):c()}");
+        // An `if` that stays a statement keeps its place.
+        assert_eq!(syntax("function f(a, b, c) { if (a) { b(); if (c) return 1; } }"), "function f(a,b,c){if(a){b();if(c)return 1}}");
+    }
+
+    #[test]
+    fn an_else_if_chain_may_end_in_a_sequence() {
+        assert_eq!(
+            syntax("function f(a, b, c, d) { if (a) b(); else if (c) d(); else { b(); d(); } }"),
+            "function f(a,b,c,d){a?b():c?d():(b(),d())}"
+        );
+        assert_eq!(
+            syntax("function f(a, b, c, d) { if (a) { b(); c(); } else if (c) d(); else { b(); d(); } }"),
+            "function f(a,b,c,d){a?(b(),c()):c?d():(b(),d())}"
+        );
+    }
+
+    #[test]
+    fn returns_after_an_else_if_chain_and_a_return_of_nothing_are_checked() {
+        // The `else if` goes on as the conditional in a branch; a return of nothing keeps its own `if`.
+        assert_eq!(
+            syntax("function f(a, b, c) { if (a) { return void 0; } else if (b) { return 1; } return c; }"),
+            "function f(a,b,c){if(a)return;else return b?1:c}"
+        );
+        assert_eq!(
+            syntax("function f(a, b, c, d) { if (a) { return 0; } if (b) { return 1; } else { return c; } }"),
+            "function f(a,b,c,d){return a?0:b?1:c}"
+        );
+        assert_eq!(
+            syntax("function f(a, b, c, d) { if (a) { return 0; } if (b) { return 1; } else if (c) { return 2; } return d; }"),
+            "function f(a,b,c,d){return a?0:b?1:c?2:d}"
+        );
     }
 
     #[test]
