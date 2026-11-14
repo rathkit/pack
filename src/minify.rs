@@ -883,6 +883,12 @@ fn emit(source: &str, tokens: &[Token], renames: &Renames, asi: &[bool], facts: 
             Action::Joiner => pending_asi = false,
             _ => {}
         }
+        // The end of a statement written in parentheses (`a&&(b=c);`): the `)` comes first, and then whatever the token is.
+        if plan.is_some_and(|p| p.closers[i]) {
+            out.push(')');
+            pending_asi = false;
+            whole_number = false;
+        }
         // A `;` that ends a statement just before `}` or the end of the text can go.
         let is_semi = match action {
             Action::Keep => tok.is(Punct::Semi) && !facts.empty_statements.contains(&tok.start),
@@ -2076,9 +2082,18 @@ mod tests {
     fn conditions_become_expressions() {
         assert_eq!(syntax("if (a) b(); if (!a) b(); if (a) b(); else c()"), "a&&b();a||b();a?b():c()");
         assert_eq!(syntax("if (a) { b() } else { c() }"), "a?b():c()");
-        // No shorter, or not the same: left alone.
-        assert_eq!(syntax("if (a || b) c(); if (a) b = 1; if (a) b(), c()"), "if(a||b)c();if(a)b=1;if(a)b(),c()");
+        // An assignment is put in parentheses (as long as the statement it replaces, but a comma or a chain can join it); a condition that binds
+        // too loosely, or a sequence, is left alone.
+        assert_eq!(syntax("if (a || b) c(); if (a) b = 1; if (a) b(), c()"), "if(a||b)c();a&&(b=1);if(a)b(),c()");
+        assert_eq!(syntax("if (!a) b = 1; if (a) { b = 1 } c()"), "a||(b=1);a&&(b=1);c()");
         assert_eq!(syntax("if (a) b(); else if (c) d()"), "a?b():c&&d()");
+    }
+
+    #[test]
+    fn a_body_with_an_assignment_is_in_parentheses_to_join_a_chain() {
+        assert_eq!(syntax("function f(a, b, c, i) { if (a) i.x = !1; else if (b) i.x = c; }"), "function f(a,b,c,i){a?i.x=!1:b&&(i.x=c)}");
+        assert_eq!(syntax("function f(a, b, c, i) { for (const x of a) { if (b) i.x = 1; if (!c) i.y = 2; } }"), "function f(a,b,c,i){for(let x of a)b&&(i.x=1),c||(i.y=2)}");
+        assert_eq!(syntax("function f(a, i) { if (a) { i.x = 1 } return i }"), "function f(a,i){a&&(i.x=1);return i}");
     }
 
     #[test]

@@ -49,6 +49,8 @@ pub(crate) struct Plan {
     pub interior: Vec<bool>,
     /// The texts `Action::Text` points to.
     pub texts: Vec<String>,
+    /// Tokens that a `)` is written in front of (the end of a statement that was put in parentheses).
+    pub closers: Vec<bool>,
 }
 
 /// `barriers` are source offsets (in order) where declarations on either side are not merged.
@@ -117,7 +119,7 @@ fn self_precedence_ok(ast: &Ast, left: NodeId) -> bool {
 }
 
 pub(crate) fn plan(source: &str, ast: &Ast, sem: &Semantic, tokens: &[Token], barriers: &[u32], legacy: bool) -> Plan {
-    let mut ctx = Ctx { legacy, source, ast, sem, tokens, barriers, parent: vec![None; ast.node_count() + 1], actions: vec![Action::Keep; tokens.len()], locked: vec![false; tokens.len()], dead: Vec::new(), kept_semi: Vec::new(), done: Default::default(), visited: Default::default(), as_expr: Default::default(), inlined: Default::default(), seq_returns: Default::default(), texts: Vec::new(), text_index: Default::default() };
+    let mut ctx = Ctx { legacy, source, ast, sem, tokens, barriers, parent: vec![None; ast.node_count() + 1], actions: vec![Action::Keep; tokens.len()], locked: vec![false; tokens.len()], dead: Vec::new(), kept_semi: Vec::new(), done: Default::default(), visited: Default::default(), as_expr: Default::default(), inlined: Default::default(), seq_returns: Default::default(), closers: vec![false; tokens.len()], texts: Vec::new(), text_index: Default::default() };
     let mut order = Vec::new();
     let mut stack = vec![ast.root];
     while let Some(n) = stack.pop() {
@@ -172,7 +174,7 @@ pub(crate) fn plan(source: &str, ast: &Ast, sem: &Semantic, tokens: &[Token], ba
             ctx.actions[i] = Action::KeptSemi;
         }
     }
-    Plan { actions: ctx.actions, interior, texts: ctx.texts }
+    Plan { actions: ctx.actions, interior, texts: ctx.texts, closers: ctx.closers }
 }
 
 struct Ctx<'a> {
@@ -200,6 +202,7 @@ struct Ctx<'a> {
     inlined: crate::fxhash::FastSet<NodeId>,
     /// Blocks written as `return a, b;` (the braces and the `;` of each statement but the last are replaced; see `block_sequence`).
     seq_returns: crate::fxhash::FastSet<NodeId>,
+    closers: Vec<bool>,
     texts: Vec<String>,
     text_index: crate::fxhash::FastMap<String, u32>,
 }
@@ -619,6 +622,26 @@ impl Ctx<'_> {
         }
     }
 
+    /// For a body that becomes the right side of `&&` or `||`: `Some(None)` when it stands there as it is (`tight`), and `Some(Some(semi))` when it goes in
+    /// parentheses, closed in front of the `;` at `semi`. `None` when it needs them and has no `;` that is written to close them.
+    fn paren_closer(&self, body: NodeId, tight: bool) -> Option<Option<usize>> {
+        if tight {
+            return Some(None);
+        }
+        let semi = self.sole_statement_semi(body)?;
+        // Without a `;` of its own the statement ends at the `}` of its block, which is then written as the `;` (after the parenthesis).
+        let ends = (self.is(semi, Punct::Semi) && self.actions[semi] == Action::Keep) || (self.is(semi, Punct::RBrace) && matches!(self.actions[semi], Action::Skip | Action::Semi));
+        ends.then_some(Some(semi))
+    }
+
+    /// Writes the `)` that closes what `paren_closer` found, in front of the token at `semi`.
+    fn set_closer(&mut self, semi: usize) {
+        self.closers[semi] = true;
+        if self.is(semi, Punct::RBrace) {
+            self.force(semi, Action::Semi);
+        }
+    }
+
     fn is_empty_block(&self, s: NodeId) -> bool {
         matches!(self.ast[s].kind, NodeKind::Block(list) if self.ast.list(list).is_empty())
     }
@@ -682,17 +705,26 @@ impl Ctx<'_> {
                     let bang = self.first_tok(ast[test].span.start);
                     let arg_precedence = self.precedence(arg);
                     let arg_nullish = matches!(ast[arg].kind, NodeKind::Binary { op: crate::ast::BinOp::Nullish, .. }) && !ast[arg].has(flags::PARENTHESIZED);
-                    if arg_precedence >= 6 && !arg_nullish && ce_precedence >= 6 && !self.starts_statement_badly(arg) && self.is(bang, Punct::Bang) {
+                    if arg_precedence >= 6 && !arg_nullish && ce_precedence >= 2 && !self.starts_statement_badly(arg) && self.is(bang, Punct::Bang) {
+                        // What is not tight enough to stand beside `||` is put in parentheses, closed where its `;` is.
+                        let Some(closer) = self.paren_closer(cons, ce_precedence >= 6) else { return false };
                         self.force(if_tok, Action::Skip);
                         self.force(open, Action::Skip);
                         self.force(bang, Action::Skip);
-                        self.force_text(close, "||");
+                        self.force_text(close, if closer.is_some() { "||(" } else { "||" });
+                        if let Some(semi) = closer {
+                            self.set_closer(semi);
+                        }
                         return true;
                     }
-                } else if test_precedence >= 6 && !keeps_parens && ce_precedence >= 7 {
+                } else if test_precedence >= 6 && !keeps_parens && ce_precedence >= 2 {
+                    let Some(closer) = self.paren_closer(cons, ce_precedence >= 7) else { return false };
                     self.force(if_tok, Action::Skip);
                     self.force(open, Action::Skip);
-                    self.force_text(close, "&&");
+                    self.force_text(close, if closer.is_some() { "&&(" } else { "&&" });
+                    if let Some(semi) = closer {
+                        self.set_closer(semi);
+                    }
                     return true;
                 }
                 false
