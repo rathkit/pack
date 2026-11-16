@@ -41,11 +41,32 @@ pub struct ServeState {
     known_ids: Mutex<std::collections::HashSet<String>>,
     /// With React Fast Refresh: the runtime of the project's `react-refresh`, as a script for the page.
     refresh_runtime: Mutex<Option<String>>,
+    /// What the coming rebuild is for, so that a module update can be sent as soon as the modules are written (see `modules_ready`).
+    coming: Mutex<Option<Coming>>,
+    /// Whether the build in progress has already sent its update, and has already taken the modules for it.
+    early: Mutex<Early>,
+    /// Closed while an update that is out is ahead of the files a page would load; files wait on it.
+    gate: (Mutex<bool>, std::sync::Condvar),
+}
+
+/// The files a rebuild was started for.
+struct Coming {
+    changed: Vec<PathBuf>,
+    /// A plugin kept the page from being told of the change.
+    suppressed: bool,
+}
+
+#[derive(Default, Clone, Copy)]
+struct Early {
+    /// The modules of the build are published (so the build must not do it again).
+    published: bool,
+    /// The page has been told.
+    sent: bool,
 }
 
 impl ServeState {
     pub fn new(cwd: PathBuf, host: Option<Arc<PluginHost>>) -> Arc<ServeState> {
-        Arc::new(ServeState { cwd, host, files: Mutex::new(HashMap::new()), entries: Mutex::new(Vec::new()), clients: Mutex::new(Vec::new()), middlewares: Mutex::new(false), last_error: Mutex::new(None), exposed: Mutex::new(false), bound_host: Mutex::new(String::new()), cors: Mutex::new(Vec::new()), modules: Mutex::new(None), update: Mutex::new(None), known_ids: Mutex::new(std::collections::HashSet::new()), refresh_runtime: Mutex::new(None) })
+        Arc::new(ServeState { cwd, host, files: Mutex::new(HashMap::new()), entries: Mutex::new(Vec::new()), clients: Mutex::new(Vec::new()), middlewares: Mutex::new(false), last_error: Mutex::new(None), exposed: Mutex::new(false), bound_host: Mutex::new(String::new()), cors: Mutex::new(Vec::new()), modules: Mutex::new(None), update: Mutex::new(None), known_ids: Mutex::new(std::collections::HashSet::new()), refresh_runtime: Mutex::new(None), coming: Mutex::new(None), early: Mutex::new(Early::default()), gate: (Mutex::new(false), std::sync::Condvar::new()) })
     }
 
     /// The finished build: files by name, and which file holds which entry.
@@ -53,6 +74,83 @@ impl ServeState {
         *self.files.lock().unwrap() = files.into_iter().collect();
         *self.entries.lock().unwrap() = entries;
         *self.last_error.lock().unwrap() = None;
+        self.open_gate();
+    }
+
+    /// A rebuild is about to start for these files. With `--hmr`, the update for pages is sent when the modules are written and not
+    /// when the whole build (source map included) is done, if the files are all modules.
+    pub fn rebuild_for(&self, changed: Vec<PathBuf>, suppressed: bool) {
+        *self.coming.lock().unwrap() = Some(Coming { changed, suppressed });
+        *self.early.lock().unwrap() = Early::default();
+    }
+
+    /// The modules of the build in progress are written. When the page can take the change as a module update, it is told now: it
+    /// does not need the build's files for that. Anything else (a reload, style sheets, an error) is sent when the build is done.
+    pub fn modules_ready(&self, modules: &[crate::bundle::HmrModule]) {
+        let Some(coming) = self.coming.lock().unwrap().take() else { return };
+        if coming.suppressed || coming.changed.is_empty() {
+            return;
+        }
+        self.publish_modules(modules);
+        self.early.lock().unwrap().published = true;
+        let ids = self.known_ids.lock().unwrap().clone();
+        // Style sheets are swapped by their own message, which needs the files; they are left to the end of the build.
+        let only_modules = coming.changed.iter().all(|p| !p.extension().is_some_and(|e| e == "css") && ids.contains(&p.to_string_lossy().into_owned()));
+        if !only_modules {
+            return;
+        }
+        let update = self.update.lock().unwrap().take();
+        if let Some(json) = update {
+            // Files wait until the build has published them, so a page that loads now does not get the code from before.
+            *self.gate.0.lock().unwrap() = true;
+            self.broadcast(&json);
+            self.early.lock().unwrap().sent = true;
+        } else {
+            // Nothing a module holds changed: that is the whole answer (as it is when the build is done).
+            self.early.lock().unwrap().sent = true;
+        }
+    }
+
+    /// Adds a page that listens for updates; for the tests under `tests/`, which hold the other end of the connection.
+    #[doc(hidden)]
+    pub fn add_listener(&self, stream: TcpStream) {
+        self.clients.lock().unwrap().push(stream);
+    }
+
+    /// Whether files wait for the build to publish them (an update is out ahead of them); for the tests under `tests/`.
+    #[doc(hidden)]
+    pub fn files_are_gated(&self) -> bool {
+        *self.gate.0.lock().unwrap()
+    }
+
+    /// Whether the modules of the build were already published by `modules_ready`.
+    pub fn modules_published_early(&self) -> bool {
+        self.early.lock().unwrap().published
+    }
+
+    /// Whether the page was already told of the build's change by `modules_ready`; asked once, at the end of the build.
+    pub fn take_early_sent(&self) -> bool {
+        let mut early = self.early.lock().unwrap();
+        let sent = early.sent;
+        *early = Early::default();
+        sent
+    }
+
+    pub fn open_gate(&self) {
+        *self.gate.0.lock().unwrap() = false;
+        self.gate.1.notify_all();
+    }
+
+    fn wait_for_files(&self) {
+        let mut closed = self.gate.0.lock().unwrap();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while *closed {
+            let left = until.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            closed = self.gate.1.wait_timeout(closed, left).unwrap().0;
+        }
     }
 
     /// The page gets the runtime of React Fast Refresh, from this file of the `react-refresh` package. It is read now and made into a
@@ -493,6 +591,7 @@ fn handle(mut stream: TcpStream, state: &Arc<ServeState>) -> std::io::Result<()>
     }
     let name = path.trim_start_matches('/');
     // An output file.
+    state.wait_for_files();
     if let Some(bytes) = state.files.lock().unwrap().get(name).cloned() {
         return respond(&mut stream, 200, &with_cors(vec![("content-type".into(), content_type(name).into()), ("cache-control".into(), "no-store".into())]), &bytes);
     }

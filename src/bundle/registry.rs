@@ -274,6 +274,9 @@ impl Bundler<'_> {
         self.plan = self.single_plan();
         let names = self.registry_names();
         let (raw, modules) = self.emit_registry(&names);
+        if let Some(on_modules) = &options.on_modules {
+            on_modules(&modules);
+        }
         let marks = std::mem::take(&mut *self.marks.lock().expect("marks"));
         let settings = crate::minify::Options { keep_top_level: false, keep_names: Some(true), ..options.minify };
         let file = self.finish_chunk(0, raw, crate::minify::Layout::default(), options, &settings, &marks)?;

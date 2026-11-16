@@ -209,6 +209,12 @@ pub struct Options {
     pub browser: bool,
     /// Shorten names and remove whitespace in the finished files.
     pub minify: crate::minify::Options,
+    /// Keep the scan of a module that has no imports from other modules of the bundle with the module (for a build that is run again
+    /// while most files are the same: watching), so the next build does not walk it again.
+    pub keep_scans: bool,
+    /// With `hmr`: called with every module as soon as they are written, before the files of the build are finished (the source
+    /// map is the longest part), so a page can be told of the change at once.
+    pub on_modules: Option<std::sync::Arc<dyn Fn(&[HmrModule]) + Send + Sync>>,
     /// Write a source map for each output file.
     pub sourcemap: SourceMapMode,
     /// Put the original files' text into the map, so it works without them.
@@ -280,7 +286,7 @@ pub enum SourceMapMode {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { splitting: false, format: Format::Esm, global_name: None, globals: Vec::new(), original_paths: false, browser: false, minify: crate::minify::Options::default(), sourcemap: SourceMapMode::None, sources_content: true, map_base: None, file_name: None, hot: false, hmr: false, react_refresh: false, entry_names: Vec::new(), federation: None, banner_js: None, footer_js: None, banner_css: None, footer_css: None, drop_console: false, drop_debugger: false, entry_template: None, chunk_template: None, out_extensions: Vec::new(), legal_comments: crate::legal::LegalComments::Eof, target: crate::target::Target::ESNEXT, cjs_exports: CjsExports::Named, preserve_modules: false, preserve_root: None, preserve_entries: 0 }
+        Options { splitting: false, format: Format::Esm, global_name: None, globals: Vec::new(), original_paths: false, browser: false, minify: crate::minify::Options::default(), keep_scans: false, on_modules: None, sourcemap: SourceMapMode::None, sources_content: true, map_base: None, file_name: None, hot: false, hmr: false, react_refresh: false, entry_names: Vec::new(), federation: None, banner_js: None, footer_js: None, banner_css: None, footer_css: None, drop_console: false, drop_debugger: false, entry_template: None, chunk_template: None, out_extensions: Vec::new(), legal_comments: crate::legal::LegalComments::Eof, target: crate::target::Target::ESNEXT, cjs_exports: CjsExports::Named, preserve_modules: false, preserve_root: None, preserve_entries: 0 }
     }
 }
 
@@ -368,7 +374,7 @@ struct ChunkPlan {
     root_chunk: HashMap<ModuleId, usize>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
 struct Helpers {
     esm: bool,
     decorate: bool,
@@ -392,6 +398,28 @@ struct Helpers {
     es5_iter: bool,
     es5_generator: bool,
     es5_class: bool,
+}
+
+impl Helpers {
+    /// Every helper `other` needs, this one needs too.
+    fn or(&mut self, other: &Helpers) {
+        macro_rules! merge {
+            ($($field:ident),*) => { $(self.$field |= other.$field;)* };
+        }
+        merge!(esm, decorate, std_decorators, metadata, to_default, to_ns, require_shim, path_shim, spread, class_private, async_fn, for_await, async_gen, es5_object, es5_template, es5_array, es5_iter, es5_generator, es5_class);
+    }
+}
+
+/// How many scans were taken from the module they were kept with instead of being made again, over the life of the process (for tests).
+pub static REUSED_SCANS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// What the scan of a module that was kept with it (`Memo::scan`) holds: the scan's result, what must be true for it to stand, and what
+/// the scan did to the bundler besides (the keys it registered, in order, and the helpers it asked for).
+struct ScanMemo {
+    salt: u64,
+    code: Code,
+    journal: Vec<(Key, Option<ModuleId>)>,
+    helpers: Helpers,
 }
 
 struct Bundler<'a> {
@@ -458,6 +486,25 @@ struct Bundler<'a> {
     cuts: Vec<Vec<(u32, u32, &'static str)>>,
     /// The output is minified, so the bodies of big CommonJS modules may be cut for the minifier (see `nest_plan`).
     nesting: bool,
+    /// Scans of modules that are kept from one build to the next are kept with them (`Options::keep_scans`).
+    keep_scans: bool,
+    /// What goes into every scan's validity that is the same for all modules of the build.
+    scan_salt: u64,
+    /// The keys registered since the scan of a module began, in order, when it is being recorded.
+    journal: Option<Vec<(Key, Option<ModuleId>)>>,
+    /// Scans to hand back to their modules when the bundler is done: the module, and what the scan stands on.
+    scans_to_keep: Vec<(ModuleId, u64, Vec<(Key, Option<ModuleId>)>, Helpers)>,
+}
+
+impl Drop for Bundler<'_> {
+    fn drop(&mut self) {
+        // The code is only read once it is made, so what was kept (or just made) goes back to the module for the next build.
+        for (id, salt, journal, helpers) in self.scans_to_keep.drain(..) {
+            if let Some(code) = self.code.remove(&id) {
+                *self.graph.module(id).memo.scan.lock().unwrap() = Some(Box::new(ScanMemo { salt, code, journal, helpers }));
+            }
+        }
+    }
 }
 
 /// A stretch of a chunk's text, `start..end`, that `mark` accounts for.
@@ -593,6 +640,10 @@ impl<'a> Bundler<'a> {
             markable: Vec::new(),
             cuts: Vec::new(),
             nesting: false,
+            keep_scans: false,
+            scan_salt: 0,
+            journal: None,
+            scans_to_keep: Vec::new(),
                 }
     }
 
@@ -634,6 +685,11 @@ impl<'a> Bundler<'a> {
         self.tla_possible = !self.target.supports(crate::target::Feature::TopLevelAwait) && self.target.supports(crate::target::Feature::Generator) && !self.splitting && !options.hmr && (self.format == Format::Esm || (self.format == Format::Iife && self.global_name.is_none()));
         // Scan every module that will be emitted, collecting edits and the names they need.
         let included: Vec<ModuleId> = graph.modules.iter().filter(|m| self.included(m.id)).map(|m| m.id).collect();
+        self.keep_scans = options.keep_scans && self.federation.is_none() && !self.registry;
+        if self.keep_scans {
+            self.scan_salt = self.compute_scan_salt();
+            crate::minify::next_build();
+        }
         for id in included {
             self.scan(id);
         }
@@ -751,7 +807,7 @@ impl<'a> Bundler<'a> {
         // Frameworks that use decorators read class names at run time (Nest builds its module
         // tokens from them), so shortening them breaks those programs unless asked for.
         let keep_names = options.minify.keep_names.unwrap_or(graph.decorator_metadata || graph.experimental_decorators);
-        let settings = crate::minify::Options { keep_top_level: self.format == Format::Iife, keep_names: Some(keep_names), legacy: !self.target.supports(crate::target::Feature::Template), ..options.minify };
+        let settings = crate::minify::Options { keep_top_level: self.format == Format::Iife, keep_names: Some(keep_names), legacy: !self.target.supports(crate::target::Feature::Template) || !self.target.supports(crate::target::Feature::OptionalCatch), ..options.minify };
         let marks = std::mem::take(&mut *self.marks.lock().expect("marks"));
         // The chunks are independent from here on, so with several they are finished side by side.
         let finish = |c: usize, (raw, layout): (String, crate::minify::Layout)| self.finish_chunk(c, raw, layout, options, &settings, &marks);
@@ -2313,6 +2369,9 @@ impl<'a> Bundler<'a> {
     // ---- scanning ------------------------------------------------------------------------
 
     fn register(&mut self, key: Key, from: Option<ModuleId>) {
+        if let Some(journal) = &mut self.journal {
+            journal.push((key.clone(), from));
+        }
         let refs = self.key_refs.entry(key.clone()).or_default();
         if refs.is_empty() {
             self.keys.push(key.clone());
@@ -2405,9 +2464,77 @@ impl<'a> Bundler<'a> {
             self.code.insert(id, Code::Wrapped { edits: Vec::new(), json: true, require_cases: None });
             return;
         };
+        let key = (self.keep_scans && !module.edges.iter().any(|e| matches!(e, Edge::Module(_)))).then(|| self.scan_digest(module));
+        if let Some(salt) = key {
+            // A scan kept from the last build stands if nothing it depends on changed.
+            let kept = module.memo.scan.lock().unwrap().take();
+            match kept.map(|b| b.downcast::<ScanMemo>()) {
+                Some(Ok(memo)) if memo.salt == salt => {
+                    let ScanMemo { code, journal, helpers, .. } = *memo;
+                    for (key, from) in &journal {
+                        self.register(key.clone(), *from);
+                    }
+                    self.helpers.or(&helpers);
+                    self.code.insert(id, code);
+                    self.scans_to_keep.push((id, salt, journal, helpers));
+                    REUSED_SCANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return;
+                }
+                _ => {}
+            }
+        }
+        // To keep the scan, what it does to the bundler is recorded: it must not have used the counters that number temporaries, made an
+        // error, or added an alias, which are the bundle's and not the module's.
+        let before = key.map(|_| (self.temp_count, self.temps.len(), self.errors.len(), self.alias_values.len(), std::mem::take(&mut self.helpers)));
+        if key.is_some() {
+            self.journal = Some(Vec::new());
+        }
         let mut scanner = Scanner { bundler: self, module, places: None, private_scopes: Vec::new(), private_refs: HashMap::new(), chain_members: HashSet::new(), call_callees: HashSet::new(), ast: &parsed.ast, semantic: &parsed.semantic, edits: Vec::new(), statement_starts: HashSet::new(), shorthand: HashSet::new(), skip: HashSet::new(), written: HashSet::new(), fn_depth: 0, async_ctx: Vec::new(), site_next: HashMap::new(), has_tla: false, needs_require: false, top_decl: None, in_wrapper: false, name_hint: None, shared_names: None, es5: Default::default() };
         let code = if module.kind == ModuleKind::Esm && scanner.bundler.registry { scanner.scan_registry(id) } else if module.kind == ModuleKind::Esm { scanner.scan_esm(id) } else { scanner.scan_wrapped(id) };
         self.code.insert(id, code);
+        if let (Some(salt), Some((temp_count, temps, errors, aliases, outer))) = (key, before) {
+            let journal = self.journal.take().unwrap_or_default();
+            let made = std::mem::replace(&mut self.helpers, outer);
+            self.helpers.or(&made);
+            if (temp_count, temps, errors, aliases) == (self.temp_count, self.temps.len(), self.errors.len(), self.alias_values.len()) {
+                self.scans_to_keep.push((id, salt, journal, made));
+            }
+        }
+    }
+
+    /// What a scan of `module` stands on besides its text: the build's settings, the module's imports (where each was found), and what
+    /// tree shaking left of it. A module with no imports of other modules reads nothing else.
+    fn scan_digest(&self, module: &Module) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.scan_salt.hash(&mut h);
+        module.id.index().hash(&mut h);
+        format!("{:?}", module.kind).hash(&mut h);
+        for edge in &module.edges {
+            match edge {
+                Edge::Module(id) => (0u8, id.index()).hash(&mut h),
+                Edge::External(spec) => (1u8, spec).hash(&mut h),
+                Edge::Unresolved => 2u8.hash(&mut h),
+            }
+        }
+        let shake = &self.shaken.modules[module.id.index()];
+        (shake.included, shake.demand_known, &shake.live).hash(&mut h);
+        let mut demanded: Vec<usize> = shake.demanded.iter().map(|s| s.index()).collect();
+        demanded.sort_unstable();
+        demanded.hash(&mut h);
+        h.finish()
+    }
+
+    /// The settings of the build that every scan depends on.
+    fn compute_scan_salt(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let graph = self.graph;
+        (self.original_paths, self.browser, self.hot, self.registry, self.react_refresh, self.drop_console, self.drop_debugger, self.legacy).hash(&mut h);
+        (self.preserve, self.preserve_entries, self.splitting, self.mapping, self.tla_possible, self.nesting).hash(&mut h);
+        format!("{:?}", (self.target, self.cjs_exports, self.format, &self.global_name, &self.globals, &self.preserve_root, &self.out_extensions, &self.entry_names)).hash(&mut h);
+        format!("{:?}", (&graph.jsx, graph.decorator_metadata, graph.experimental_decorators, &graph.defines, &graph.pure_calls)).hash(&mut h);
+        h.finish()
     }
 
     /// What each root makes available to whoever loads it.
@@ -3303,28 +3430,25 @@ impl Bundler<'_> {
     /// Final names for everything that needs one.
     fn allocate_names(&self) -> HashMap<Key, String> {
         let graph = self.graph;
-        let mut globals: HashSet<String> = RESERVED.iter().map(|s| s.to_string()).collect();
-        let mut nested: HashMap<ModuleId, HashSet<String>> = HashMap::new();
+        let mut globals: HashSet<&str> = RESERVED.iter().copied().collect();
+        let mut nested: HashMap<ModuleId, &HashSet<String>> = HashMap::new();
         for module in &graph.modules {
             if !self.included(module.id) {
                 continue;
             }
             let Some(parsed) = module.parsed.as_ref() else { continue };
-            for &node in parsed.semantic.unresolved() {
-                if let NodeKind::Ident(name) = parsed.ast[node].kind {
-                    globals.insert(parsed.ast.atom(name).to_string());
+            // What a module uses is worked out once for as long as the module is kept.
+            let used = module.memo.names.get_or_init(|| {
+                let root = parsed.semantic.root_scope();
+                let wrapped = module.kind != ModuleKind::Esm;
+                crate::graph::ModuleNames {
+                    unresolved: parsed.semantic.unresolved().iter().filter_map(|&node| if let NodeKind::Ident(name) = parsed.ast[node].kind { Some(parsed.ast.atom(name).to_string()) } else { None }).collect(),
+                    // What an inner scope declares can capture a reference to a bundle-level name.
+                    nested: parsed.semantic.symbols().filter(|(_, s)| wrapped || s.scope != root).map(|(_, s)| parsed.ast.atom(s.name).to_string()).collect(),
                 }
-            }
-            // What an inner scope declares can capture a reference to a bundle-level name.
-            let root = parsed.semantic.root_scope();
-            let wrapped = module.kind != ModuleKind::Esm;
-            let names: HashSet<String> = parsed
-                .semantic
-                .symbols()
-                .filter(|(_, s)| wrapped || s.scope != root)
-                .map(|(_, s)| parsed.ast.atom(s.name).to_string())
-                .collect();
-            nested.insert(module.id, names);
+            });
+            globals.extend(used.unresolved.iter().map(String::as_str));
+            nested.insert(module.id, &used.nested);
         }
         let mut names: HashMap<Key, String> = HashMap::new();
         let mut taken: HashSet<String> = HashSet::new();
@@ -3337,7 +3461,7 @@ impl Bundler<'_> {
             let name = loop {
                 let candidate = if n == 1 { base.clone() } else { format!("{base}{n}") };
                 n += 1;
-                if taken.contains(&candidate) || globals.contains(&candidate) {
+                if taken.contains(&candidate) || globals.contains(candidate.as_str()) {
                     continue;
                 }
                 let captured = refs.iter().flatten().any(|r| {

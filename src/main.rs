@@ -4,7 +4,30 @@ use std::time::Instant;
 use rathkit_pack::lexer::{Kind, Kw, Lexer, Punct};
 use rathkit_pack::parser::{ParseOptions, parse};
 
+/// glibc's allocator grows the heap in steps of 128 KB (a system call each, and fresh pages for each step) and gives the top of
+/// it back to the system whenever more than that is free. A build is short, allocates a lot and in several threads, so those calls
+/// were a good part of its time. Steps of 2 MB and keeping what was taken (up to 256 MB) save them. Memory use is the same: the
+/// extra is address space that is not touched, and the system takes it all back when the process ends. (Raising the threshold at
+/// which big blocks get a mapping of their own was faster still, but kept more memory in use, so it is left alone.)
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn tune_allocator() {
+    unsafe extern "C" {
+        fn mallopt(param: i32, value: i32) -> i32;
+    }
+    const M_TRIM_THRESHOLD: i32 = -1;
+    const M_TOP_PAD: i32 = -2;
+    // SAFETY: `mallopt` only sets allocator parameters; a value it refuses is ignored.
+    unsafe {
+        mallopt(M_TOP_PAD, 2 << 20);
+        mallopt(M_TRIM_THRESHOLD, 256 << 20);
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn tune_allocator() {}
+
 fn main() -> ExitCode {
+    tune_allocator();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.split_first() {
         Some((cmd, _)) if cmd == "--version" || cmd == "-V" => {
@@ -1192,6 +1215,8 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     if watch {
         // Watching builds again and again: modules whose files did not change are kept between builds.
         options.cache = Some(std::sync::Arc::new(rathkit_pack::graph::ModuleCache::default()));
+        bundle_options.keep_scans = true;
+        rathkit_pack::minify::keep_pieces(true);
     }
     let serve_state = if serve {
         // Maps are served from memory and name the files relative to the project.
@@ -1831,22 +1856,26 @@ fn run_build(job: &Job) -> Outcome {
             }
         }
     };
-    outcome.watched = graph.modules.iter().map(|m| m.path.clone()).filter(|p| p.is_file()).collect();
-    // What the resolver read about packages (`exports`, `sideEffects`, `type`) decides how modules are built.
-    let mut package_dirs: Vec<&std::path::Path> = graph.modules.iter().filter_map(|m| m.package.as_ref().map(|p| p.dir.as_path())).collect();
-    package_dirs.sort();
-    package_dirs.dedup();
-    outcome.watched.extend(package_dirs.into_iter().map(|d| d.join("package.json")).filter(|p| p.is_file()));
-    // A file that failed to parse is not in the graph, and is the one to watch for the fix.
-    for d in &graph.diagnostics {
-        if let Some(file) = &d.file {
-            if file.is_file() && !outcome.watched.contains(file) {
-                outcome.watched.push(file.clone());
+    // What a watching run follows. A build that is the whole run (see the end of this function) has no use for the list, and
+    // making it asks the file system about every module.
+    if job.watch || job.serve.is_some() || job.options.cache.is_some() || job.host.is_some() || job.more_builds {
+        outcome.watched = graph.modules.iter().map(|m| m.path.clone()).filter(|p| p.is_file()).collect();
+        // What the resolver read about packages (`exports`, `sideEffects`, `type`) decides how modules are built.
+        let mut package_dirs: Vec<&std::path::Path> = graph.modules.iter().filter_map(|m| m.package.as_ref().map(|p| p.dir.as_path())).collect();
+        package_dirs.sort();
+        package_dirs.dedup();
+        outcome.watched.extend(package_dirs.into_iter().map(|d| d.join("package.json")).filter(|p| p.is_file()));
+        // A file that failed to parse is not in the graph, and is the one to watch for the fix.
+        for d in &graph.diagnostics {
+            if let Some(file) = &d.file {
+                if file.is_file() && !outcome.watched.contains(file) {
+                    outcome.watched.push(file.clone());
+                }
             }
         }
+        outcome.watched.extend(job.workers.watched.lock().unwrap().drain(..));
+        outcome.watched.extend(graph.watch_dirs.iter().cloned());
     }
-    outcome.watched.extend(job.workers.watched.lock().unwrap().drain(..));
-    outcome.watched.extend(graph.watch_dirs.iter().cloned());
     if let Some(host) = plugin_host {
         outcome.watched.extend(host.watch_files());
         let failure = graph.diagnostics.iter().find(|d| d.severity == Severity::Error).map(|d| d.message.clone());
@@ -1972,6 +2001,10 @@ fn run_build(job: &Job) -> Outcome {
     if let Some(federation) = &options.federation {
         federation.remember(&bundle_options);
     }
+    if let (Some(state), true) = (&job.serve, bundle_options.hmr) {
+        let state = state.clone();
+        bundle_options.on_modules = Some(std::sync::Arc::new(move |modules| state.modules_ready(modules)));
+    }
     let mut result = rathkit_pack::bundle::bundle(&graph, &linked, &shaken, &bundle_options);
     if let Ok(output) = &mut result {
         // What the workers copy goes beside the rest.
@@ -2029,7 +2062,7 @@ fn run_build(job: &Job) -> Outcome {
                 }
                 let entries = output.chunks.iter().filter(|c| c.is_entry).filter_map(|c| c.facade_module.as_ref().map(|m| (std::path::PathBuf::from(m), c.file.clone()))).collect();
                 state.publish(files, entries);
-                if let Some(modules) = &output.hmr {
+                if let Some(modules) = output.hmr.as_ref().filter(|_| !state.modules_published_early()) {
                     state.publish_modules(modules);
                 }
                 outcome.ok = true;
@@ -2167,6 +2200,8 @@ fn catch_interrupt() {
     }
     extern "C" fn on_interrupt(_: i32) {
         INTERRUPTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        // A wait on file events ends at once (this is a signal handler: the call only writes a byte to a pipe).
+        rathkit_pack::watch::interrupt();
     }
     // SIGINT and SIGTERM.
     unsafe {
@@ -2268,6 +2303,7 @@ fn watch_loop(job: std::sync::Arc<Job>) -> Done {
         cache.reuse_resolutions(true);
     }
     let mut tick: u32 = 0;
+    let mut last_full = Instant::now();
     while !INTERRUPTED.load(Ordering::SeqCst) {
         if let Some(n) = notifier.as_mut() {
             // Folders of files the last build read; a new one may have changed before it was watched, so it is looked at in full once.
@@ -2288,21 +2324,24 @@ fn watch_loop(job: std::sync::Arc<Job>) -> Done {
         let full_look;
         if let Some(n) = notifier.as_mut() {
             tick = tick.wrapping_add(1);
-            let wake = if synced { n.wait(100) } else { rathkit_pack::watch::Wake::Overflow };
+            // Nothing to do until a file event or the next full look is due; a signal ends the wait (see `catch_interrupt`).
+            let wake = if synced { n.wait(last_full.elapsed().as_millis().min(2000).abs_diff(2000).max(1) as i32) } else { rathkit_pack::watch::Wake::Overflow };
             synced = true;
             match wake {
                 rathkit_pack::watch::Wake::Timeout => {
                     // Events are trusted, but not blindly: everything is looked at every 2 seconds.
-                    if tick % 20 != 0 {
+                    if last_full.elapsed() < std::time::Duration::from_millis(2000) {
                         continue;
                     }
+                    last_full = Instant::now();
                     full_look = true;
                 }
                 rathkit_pack::watch::Wake::Overflow => full_look = true,
                 rathkit_pack::watch::Wake::Paths(mut paths) => {
                     // A save is often several writes: take what follows until it is quiet.
                     let quiet_from = Instant::now();
-                    while quiet_from.elapsed() < std::time::Duration::from_millis(50) {
+                    // Writers that have closed their files are done: nothing is waited for then.
+                    while quiet_from.elapsed() < std::time::Duration::from_millis(50) && !n.settled_among(|p| stamps.contains_key(p) || p.parent().is_some_and(|d| stamps.contains_key(d))) {
                         match n.wait(4) {
                             rathkit_pack::watch::Wake::Paths(more) => paths.extend(more),
                             _ => break,
@@ -2401,10 +2440,24 @@ fn watch_loop(job: std::sync::Arc<Job>) -> Done {
         }
         let started = Instant::now();
         began = std::time::SystemTime::now();
-        outcome = run_build(&job);
         if let Some(state) = &job.serve {
+            state.rebuild_for(changed.iter().map(|(p, _)| p.clone()).collect(), suppressed);
+        }
+        // With file events every change was heard: a module whose file is not among those that changed is not looked at again.
+        if let (Some(cache), Some(_)) = (&job.options.cache, &notifier) {
+            cache.changes_are_known(Some(changed.iter().map(|(p, _)| p.clone()).collect()));
+        }
+        outcome = run_build(&job);
+        if let Some(cache) = &job.options.cache {
+            cache.changes_are_known(None);
+        }
+        if let Some(state) = &job.serve {
+            // Whatever way the build ended, files are served again.
+            state.open_gate();
+            let told = state.take_early_sent();
             match &outcome.error {
                 Some(message) => state.broadcast_error(message),
+                None if told => {}
                 None if outcome.ok && !suppressed && state.hmr_active() => {
                     // Modules are replaced in the page; style sheets are swapped; any other file reloads it.
                     let (update, ids) = state.hmr_state().unwrap_or_default();

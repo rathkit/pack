@@ -68,6 +68,27 @@ pub struct Module {
     pub stamp: Option<Stamp>,
     /// Where each request of the module was found, for builds that reuse modules and the places they found (watching with file events).
     pub targets: Option<Vec<Target>>,
+    /// What the bundler works out from this module alone and keeps for the next build while the module itself is kept.
+    pub memo: Memo,
+}
+
+/// What the bundler keeps with a module (see `bundle.rs`). It goes when the module does: a module that is read again starts empty.
+#[derive(Default)]
+pub struct Memo {
+    /// The scan of the module: its edits and what registering them did; opaque here.
+    pub scan: Mutex<Option<Box<dyn std::any::Any + Send>>>,
+    /// The names the module uses, which the bundler avoids when it names what it moves to the top level.
+    pub names: std::sync::OnceLock<ModuleNames>,
+    /// The parts tree shaking cuts the module into when nothing from outside it is known (`shake::keep_everything`), with the
+    /// definitions of the build they were made under.
+    pub parts: std::sync::OnceLock<(String, crate::shake::ModuleShake)>,
+}
+
+pub struct ModuleNames {
+    /// The names of the module's free references (globals).
+    pub unresolved: Vec<String>,
+    /// The names an inner scope of the module declares (all of its names, for a module that is wrapped).
+    pub nested: std::collections::HashSet<String>,
 }
 
 /// A file's modification time and size.
@@ -82,6 +103,11 @@ pub fn file_stamp(path: &Path) -> Option<Stamp> {
 #[derive(Default)]
 pub struct ModuleCache {
     modules: Mutex<HashMap<PathBuf, Module>>,
+    /// What resolvers have learned about the file system, for as long as `reuse_resolutions` holds.
+    resolver_memo: Mutex<Arc<crate::resolve::ResolverMemo>>,
+    /// The files that changed since the last build, when the watcher hears of every change: any other module is as it was, without a look
+    /// at its file.
+    changed: Mutex<Option<std::collections::HashSet<PathBuf>>>,
     /// Whether a module that has not changed also keeps where its imports were found. That holds while every change to the
     /// folders involved (a file made, removed or renamed; a `package.json`) is heard of, and `forget_resolutions` is called for it.
     reuse_resolutions: std::sync::atomic::AtomicBool,
@@ -94,6 +120,30 @@ impl ModuleCache {
             Some(m) if m.stamp == Some(stamp) => modules.remove(path),
             _ => None,
         }
+    }
+
+    /// The memo for the resolver of a build: the last one's while resolutions are reused, else a new one.
+    fn memo_for_build(&self) -> Arc<crate::resolve::ResolverMemo> {
+        let mut memo = self.resolver_memo.lock().unwrap();
+        if !self.reuse_resolutions.load(std::sync::atomic::Ordering::Relaxed) {
+            *memo = Arc::default();
+        }
+        memo.clone()
+    }
+
+    /// The next build is for these changes, all of which the watcher heard of: a module whose file is not among them is not looked at.
+    /// Asked for again before every build.
+    pub fn changes_are_known(&self, changed: Option<std::collections::HashSet<PathBuf>>) {
+        *self.changed.lock().unwrap() = changed;
+    }
+
+    /// The stamp a kept module has, when its file is known not to have changed.
+    fn trusted_stamp(&self, path: &Path) -> Option<Stamp> {
+        let changed = self.changed.lock().unwrap();
+        if changed.as_ref()?.contains(path) {
+            return None;
+        }
+        self.modules.lock().unwrap().get(path)?.stamp
     }
 
     /// Keeps the modules of a finished build (those read from disk without plugins).
@@ -114,12 +164,14 @@ impl ModuleCache {
 
     /// Something was made, removed or renamed: imports are looked up again.
     pub fn forget_resolutions(&self) {
+        *self.resolver_memo.lock().unwrap() = Arc::default();
         for module in self.modules.lock().unwrap().values_mut() {
             module.targets = None;
         }
     }
 
     pub fn clear(&self) {
+        *self.resolver_memo.lock().unwrap() = Arc::default();
         self.modules.lock().unwrap().clear();
     }
 }
@@ -173,6 +225,8 @@ pub struct Graph {
     pub pure_calls: Vec<String>,
     /// Directories read for `import.meta.glob`: a file added to one changes the build.
     pub watch_dirs: Vec<PathBuf>,
+    /// The graph was built with a cache: its modules may be kept for another build, with what is worked out about them.
+    pub keeps_modules: bool,
 }
 
 impl Graph {
@@ -247,7 +301,10 @@ pub fn build(cwd: &Path, entries: &[String], options: &GraphOptions) -> Graph {
 }
 
 pub fn build_with_fs(fs: Box<dyn FileSystem>, cwd: &Path, entries: &[String], options: &GraphOptions) -> Graph {
-    let resolver = Arc::new(Resolver::with_fs(fs, options.resolve.clone()));
+    let resolver = Arc::new(match &options.cache {
+        Some(cache) => Resolver::with_memo(fs, options.resolve.clone(), cache.memo_for_build()),
+        None => Resolver::with_fs(fs, options.resolve.clone()),
+    });
     // The plugin host asks for the bundler's own resolution (`this.resolve`, and when no plugin claims a request).
     if let Some(host) = &options.plugins {
         let shared_resolver = resolver.clone();
@@ -308,6 +365,7 @@ pub fn build_with_fs(fs: Box<dyn FileSystem>, cwd: &Path, entries: &[String], op
     graph.experimental_decorators = options.experimental_decorators;
     graph.defines = options.defines.clone();
     graph.pure_calls = options.pure_calls.clone();
+    graph.keeps_modules = options.cache.is_some();
     graph
 }
 
@@ -473,7 +531,7 @@ impl<'a> Context<'a> {
             None
         });
         // Without plugins a module is a function of its file: one that has not changed is taken from the last build.
-        let stamp = if self.options.plugins.is_none() && self.options.cache.is_some() && query.is_empty() { file_stamp(path) } else { None };
+        let stamp = if self.options.plugins.is_none() && self.options.cache.is_some() && query.is_empty() { self.options.cache.as_ref().and_then(|c| c.trusted_stamp(path)).or_else(|| file_stamp(path)) } else { None };
         if let (Some(cache), Some(stamp)) = (&self.options.cache, stamp) {
             if let Some(mut module) = cache.take(path, stamp) {
                 let dir = path.parent().unwrap_or(Path::new("/"));
@@ -828,7 +886,7 @@ impl<'a> Context<'a> {
             None => package.as_ref().is_none_or(|p| p.file_has_side_effects(path)),
         });
         let stamp = if used_glob { None } else { stamp };
-        let module = Module { id: ModuleId(slot as u32), path: module_path.to_path_buf(), source, kind, parsed, record, edges: Vec::new(), package, side_effects, asset, css, stamp, targets: None };
+        let module = Module { id: ModuleId(slot as u32), path: module_path.to_path_buf(), source, kind, parsed, record, edges: Vec::new(), package, side_effects, asset, css, stamp, targets: None, memo: Memo::default() };
         Ok(Processed { module, targets, diagnostics })
     }
 
@@ -1065,7 +1123,7 @@ fn finish(shared: Shared, entry_slots: &[usize]) -> Graph {
     // Thread timing also shuffles diagnostics; sort them so the output is stable.
     diagnostics.sort_by(|a, b| (&a.file, a.pos, &a.message).cmp(&(&b.file, b.pos, &b.message)));
     diagnostics.dedup_by(|a, b| a.file == b.file && a.pos == b.pos && a.message == b.message);
-    Graph { jsx: JsxOptions::default(), decorator_metadata: false, experimental_decorators: false, defines: Default::default(), modules: result, entries, diagnostics, pure_calls: Vec::new(), watch_dirs: { watch_dirs.sort(); watch_dirs.dedup(); watch_dirs } }
+    Graph { jsx: JsxOptions::default(), decorator_metadata: false, experimental_decorators: false, defines: Default::default(), modules: result, entries, diagnostics, pure_calls: Vec::new(), watch_dirs: { watch_dirs.sort(); watch_dirs.dedup(); watch_dirs }, keeps_modules: false }
 }
 
 const NODE_BUILTINS: &[&str] = &[

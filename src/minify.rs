@@ -18,7 +18,7 @@
 use std::borrow::Cow;
 
 mod fragments;
-pub use fragments::{Layout, minify_chunk, plain_text, word_spans};
+pub use fragments::{Layout, REUSED_PIECES, forget_pieces, keep_pieces, minify_chunk, next_build, plain_text, word_spans};
 
 type HashMap<K, V> = crate::fxhash::FastMap<K, V>;
 type HashSet<K> = crate::fxhash::FastSet<K>;
@@ -883,6 +883,12 @@ fn emit(source: &str, tokens: &[Token], renames: &Renames, asi: &[bool], facts: 
             Action::Joiner => pending_asi = false,
             _ => {}
         }
+        // The end of a statement written in parentheses (`a&&(b=c);`): the `)` comes first, and then whatever the token is.
+        if plan.is_some_and(|p| p.closers[i]) {
+            out.push(')');
+            pending_asi = false;
+            whole_number = false;
+        }
         // A `;` that ends a statement just before `}` or the end of the text can go.
         let is_semi = match action {
             Action::Keep => tok.is(Punct::Semi) && !facts.empty_statements.contains(&tok.start),
@@ -940,17 +946,256 @@ fn separator_needed(last: u8, first: u8, out: &str, whole_number: bool) -> bool 
 
 // ---- checking a result ----------------------------------------------------------------------
 
+/// An `if` whose branches return, written as the conditional `e`: what pairs of nodes to compare, and `Some(None)` when the chain ends in an `else`, or
+/// `Some(Some(last))` when it goes on in the branch `last` (the statement after the `if` is what that branch returns). `None` when the shapes differ.
+fn walk(a: &parser::Parsed, b: &parser::Parsed, s: NodeId, e: NodeId, out: &mut Vec<(Side, Side)>) -> Option<Option<NodeId>> {
+    let NodeKind::If { test, cons, alt } = a.ast[s].kind else { return None };
+    let NodeKind::Conditional { test: ct, cons: cc, alt: ca } = b.ast[e].kind else { return None };
+    out.push((Side::node(test), Side::node(ct)));
+    if !branch_pairs(a, b, cons, cc, out) {
+        return None;
+    }
+    match alt {
+        None => Some(Some(ca)),
+        Some(alt) if matches!(a.ast[alt].kind, NodeKind::If { .. }) => walk(a, b, alt, ca, out),
+        Some(alt) => {
+            if !branch_pairs(a, b, alt, ca, out) {
+                return None;
+            }
+            Some(None)
+        }
+    }
+}
+
+/// A branch of an `if` that returns (`return a;`, perhaps in a block) as what the conditional `e` has in its place: the value, or, when the branch is
+/// `{ b(); return c; }` that went with a sequence, the parts of the sequence `(b(), c)`.
+fn branch_pairs(a: &parser::Parsed, b: &parser::Parsed, s: NodeId, e: NodeId, out: &mut Vec<(Side, Side)>) -> bool {
+    let single = match a.ast[s].kind {
+        NodeKind::Return(Some(arg)) => Some(arg),
+        NodeKind::Block(list) if a.ast.list(list).len() == 1 => match a.ast[a.ast.list(list)[0]].kind {
+            NodeKind::Return(Some(arg)) => Some(arg),
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some(arg) = single {
+        out.push((Side::node(arg), Side::node(e)));
+        return true;
+    }
+    let NodeKind::Block(list) = a.ast[s].kind else { return false };
+    let items = a.ast.list(list);
+    let Some((&last, before)) = items.split_last() else { return false };
+    let mut from = Vec::new();
+    for &item in before {
+        match a.ast[item].kind {
+            NodeKind::ExprStmt(x) if !a.ast[item].has(flags::DIRECTIVE) => flatten_sequence(&a.ast, x, &mut from),
+            // An `if` that is an expression of its own is one part of the sequence.
+            NodeKind::If { .. } => from.push(item),
+            _ => return false,
+        }
+    }
+    let NodeKind::Return(Some(arg)) = a.ast[last].kind else { return false };
+    flatten_sequence(&a.ast, arg, &mut from);
+    let mut to = Vec::new();
+    flatten_sequence(&b.ast, e, &mut to);
+    if from.len() != to.len() || from.len() < 2 {
+        return false;
+    }
+    out.extend(from.into_iter().zip(to).map(|(x, y)| (Side::node(x), Side::node(y))));
+    true
+}
+
+/// An arrow function body `{ a(); if (b) return c; return d; }` written as the expression `(a(), b ? c : d)`: pushes the pairs to compare (the statements
+/// before the returns with the parts of the sequence, the returns with the conditional that ends it). Whether the shapes match.
+fn arrow_joined(a: &parser::Parsed, b: &parser::Parsed, items: &[NodeId], expr: NodeId, out: &mut Vec<(Side, Side)>) -> bool {
+    // The statements before the first `if` that returns, which are the parts of a sequence.
+    let returns = |s: NodeId| matches!(a.ast[s].kind, NodeKind::If { cons, .. } if matches!(a.ast[cons].kind, NodeKind::Return(_)) || matches!(a.ast[cons].kind, NodeKind::Block(l) if a.ast.list(l).last().is_some_and(|&x| matches!(a.ast[x].kind, NodeKind::Return(_)))));
+    let Some(at) = items.iter().position(|&s| returns(s)) else { return false };
+    let mut from = Vec::new();
+    for &s in &items[..at] {
+        match a.ast[s].kind {
+            NodeKind::ExprStmt(e) if !a.ast[s].has(flags::DIRECTIVE) => flatten_sequence(&a.ast, e, &mut from),
+            NodeKind::If { .. } => from.push(s),
+            _ => return false,
+        }
+    }
+    let mut to = Vec::new();
+    flatten_sequence(&b.ast, expr, &mut to);
+    if to.len() != from.len() + 1 {
+        return false;
+    }
+    let sides: Vec<Side> = items[at..].iter().map(|&s| Side::node(s)).collect();
+    let Some((pairs, extra)) = join_returns_model(a, b, &sides, 0, to[from.len()]) else { return false };
+    if 1 + extra != sides.len() {
+        return false;
+    }
+    out.extend(from.into_iter().zip(to.iter().copied()).map(|(x, y)| (Side::node(x), Side::node(y))));
+    out.extend(pairs);
+    true
+}
+
+/// An `if` with nothing in either branch (`{}`).
+fn empty_if(a: &parser::Parsed, cons: NodeId, alt: Option<NodeId>) -> bool {
+    let empty = |s: NodeId| matches!(a.ast[s].kind, NodeKind::Block(list) if a.ast.list(list).is_empty());
+    empty(cons) && alt.is_none_or(empty)
+}
+
+/// The `if` at `items[at]` and the statements after it, written as the `return` of the conditional `joined`: the pairs to compare, and how many statements
+/// after the `if` it took. `None` when the shapes differ.
+fn join_returns_model(a: &parser::Parsed, b: &parser::Parsed, items: &[Side], at: usize, joined: NodeId) -> Option<(Vec<(Side, Side)>, usize)> {
+    let item = items.get(at)?;
+    if item.declarators.is_some() {
+        return None;
+    }
+    let i = at + 1;
+    let NodeKind::If { test, cons, alt } = a.ast[item.id].kind else { return None };
+    let NodeKind::Conditional { test: ct, cons: cc, alt: ca_ } = b.ast[joined].kind else { return None };
+    // `if (a) return 1; else if (b) return 2; return 3;`: the `else if` chain goes on in the branch, the return after it ends it.
+    if let Some(alt_if) = alt.filter(|x| matches!(a.ast[*x].kind, NodeKind::If { .. })) {
+        let mut pairs = vec![(Side::node(test), Side::node(ct))];
+        if branch_pairs(a, b, cons, cc, &mut pairs) {
+            let extra = match walk(a, b, alt_if, ca_, &mut pairs) {
+                Some(None) => Some(0),
+                Some(Some(mut target)) => {
+                    // What follows is a return, or another `if` that returns (which goes on in the last branch).
+                    let mut taken = 0;
+                    loop {
+                        match items.get(i + taken) {
+                            Some(next) if next.declarators.is_none() => match a.ast[next.id].kind {
+                                NodeKind::Return(Some(arg)) => {
+                                    pairs.push((Side::node(arg), Side::node(target)));
+                                    break Some(taken + 1);
+                                }
+                                NodeKind::If { .. } => match walk(a, b, next.id, target, &mut pairs) {
+                                    Some(None) => break Some(taken + 1),
+                                    Some(Some(more)) => {
+                                        target = more;
+                                        taken += 1;
+                                    }
+                                    None => break None,
+                                },
+                                _ => break None,
+                            },
+                            _ => break None,
+                        }
+                    }
+                }
+                None => None,
+            };
+            if let Some(extra) = extra {
+                return Some((pairs, extra));
+            }
+        }
+    }
+    let mut both = vec![(Side::node(test), Side::node(ct))];
+    if branch_pairs(a, b, cons, cc, &mut both) {
+        let extra = match alt {
+            Some(alt) => branch_pairs(a, b, alt, ca_, &mut both).then_some(0),
+            None => items.get(i).and_then(|next| match a.ast[next.id].kind {
+                NodeKind::Return(Some(arg)) if next.declarators.is_none() => {
+                    both.push((Side::node(arg), Side::node(ca_)));
+                    Some(1)
+                }
+                _ => None,
+            }),
+        };
+        if let Some(extra) = extra {
+            return Some((both, extra));
+        }
+    }
+    // `if (a) return 1; if (b) return 2; return 3;`: the conditional goes on in its last branch.
+    if alt.is_none() {
+        let mut pairs = vec![(Side::node(test), Side::node(ct))];
+        let (mut k, mut target) = (i, ca_);
+        if branch_pairs(a, b, cons, cc, &mut pairs) {
+            let done = loop {
+                let Some(next) = items.get(k) else { break false };
+                if next.declarators.is_some() {
+                    break false;
+                }
+                match a.ast[next.id].kind {
+                    NodeKind::Return(Some(arg)) => {
+                        pairs.push((Side::node(arg), Side::node(target)));
+                        k += 1;
+                        break true;
+                    }
+                    NodeKind::If { .. } => match walk(a, b, next.id, target, &mut pairs) {
+                        Some(None) => {
+                            k += 1;
+                            break true;
+                        }
+                        Some(Some(more)) => {
+                            target = more;
+                            k += 1;
+                        }
+                        None => match guarded_run(a, b, items, k, target, &mut pairs) {
+                            Some(end) => {
+                                k = end;
+                                break true;
+                            }
+                            None => break false,
+                        },
+                    },
+                    NodeKind::ExprStmt(_) => match guarded_run(a, b, items, k, target, &mut pairs) {
+                        Some(end) => {
+                            k = end;
+                            break true;
+                        }
+                        None => break false,
+                    },
+                    _ => break false,
+                }
+            };
+            if done {
+                return Some((pairs, k - i));
+            }
+        }
+    }
+    None
+}
+
+/// `if (a) return b; c(); d(); return e;` is `return a ? b : (c(), d(), e);`: the statements from `from` on, up to a return, are the parts of the sequence
+/// `target`. The pairs to compare, and where the statements end (after the return).
+fn guarded_run(a: &parser::Parsed, b: &parser::Parsed, items: &[Side], from: usize, target: NodeId, out: &mut Vec<(Side, Side)>) -> Option<usize> {
+    let mut parts = Vec::new();
+    let mut m = from;
+    while let Some(item) = items.get(m).filter(|item| item.declarators.is_none()) {
+        match a.ast[item.id].kind {
+            NodeKind::ExprStmt(e) if !a.ast[item.id].has(flags::DIRECTIVE) => flatten_sequence(&a.ast, e, &mut parts),
+            // An `if` that is an expression of its own is one part of the sequence.
+            NodeKind::If { .. } => parts.push(item.id),
+            _ => break,
+        }
+        m += 1;
+    }
+    if m == from {
+        return None;
+    }
+    let last = items.get(m).filter(|item| item.declarators.is_none())?;
+    let NodeKind::Return(Some(arg)) = a.ast[last.id].kind else { return None };
+    flatten_sequence(&a.ast, arg, &mut parts);
+    let mut to = Vec::new();
+    flatten_sequence(&b.ast, target, &mut to);
+    if parts.len() != to.len() {
+        return None;
+    }
+    out.extend(parts.into_iter().zip(to).map(|(x, y)| (Side::node(x), Side::node(y))));
+    Some(m + 1)
+}
+
 /// One side of a pair being compared: a node, or (when declarations were merged) the
 /// declarators of a run of `var`/`let`/`const` statements standing for one statement.
 #[derive(Clone)]
 struct Side {
     id: NodeId,
     declarators: Option<Vec<NodeId>>,
+    /// A `return` that stands for a declaration and the `return` after it (`let n = x; return n;`): what it returns instead of the name.
+    returns: Option<NodeId>,
 }
 
 impl Side {
     fn node(id: NodeId) -> Side {
-        Side { id, declarators: None }
+        Side { id, declarators: None, returns: None }
     }
 }
 
@@ -1020,13 +1265,15 @@ fn guard_pairs(a: &parser::Parsed, b: &parser::Parsed, test: NodeId, cons: NodeI
         _ => plain(cons),
     };
     let NodeKind::Binary { op: op @ (LogOr | LogAnd), left, right } = b.ast[ey].kind else { return None };
-    if !jump || rest.is_empty() || rest.iter().any(|&r| !matches!(a.ast[r].kind, NodeKind::ExprStmt(_)) || a.ast[r].has(flags::DIRECTIVE)) {
+    if !jump || rest.is_empty() || rest.iter().any(|&r| !matches!(a.ast[r].kind, NodeKind::ExprStmt(_) | NodeKind::If { .. }) || a.ast[r].has(flags::DIRECTIVE)) {
         return None;
     }
     let mut from = Vec::new();
     for &r in rest {
-        if let NodeKind::ExprStmt(e) = a.ast[r].kind {
-            flatten_sequence(&a.ast, e, &mut from);
+        match a.ast[r].kind {
+            NodeKind::ExprStmt(e) => flatten_sequence(&a.ast, e, &mut from),
+            // An `if` that is an expression of its own is one part of the sequence.
+            _ => from.push(r),
         }
     }
     let mut to = Vec::new();
@@ -1045,13 +1292,22 @@ fn guard_pairs(a: &parser::Parsed, b: &parser::Parsed, test: NodeId, cons: NodeI
 }
 
 /// a statement list count as one declaration (the minifier joins them).
-fn children(parsed: &parser::Parsed, side: &Side, syntax: bool, original: bool) -> Vec<Side> {
+fn children(parsed: &parser::Parsed, side: &Side, syntax: bool, original: bool, legacy: bool) -> Vec<Side> {
     let ast = &parsed.ast;
     if let Some(list) = &side.declarators {
         return list.iter().map(|&c| Side::node(c)).collect();
     }
+    if let Some(value) = side.returns {
+        return vec![Side::node(value)];
+    }
     let mut kids = Vec::new();
     ast.for_each_child(side.id, |c| kids.push(c));
+    // `catch (e)` is `catch` when nothing uses `e`.
+    if let (true, true, false, NodeKind::Catch { param: Some(param), body }) = (syntax, original, legacy, ast[side.id].kind) {
+        if crate::compress::catch_param_unused(ast, &parsed.semantic, param, body) {
+            kids.retain(|k| *k != param);
+        }
+    }
     if let (true, true, NodeKind::Switch { cases, .. }) = (syntax, original, ast[side.id].kind) {
         // `case 1: default:` is `default:`.
         let gone = crate::compress::redundant_cases(ast, cases);
@@ -1063,10 +1319,22 @@ fn children(parsed: &parser::Parsed, side: &Side, syntax: bool, original: bool) 
     }
     let mut out: Vec<Side> = Vec::new();
     let mut run_kind = None;
-    for c in kids {
+    let mut index = 0;
+    while index < kids.len() {
+        let c = kids[index];
+        index += 1;
         // Statements the minifier removes leave their neighbors next to each other.
         if original && removable(parsed, c) {
             continue;
+        }
+        // `let n = x; return n;` is `return x;`.
+        if let (true, Some(&next)) = (original, kids.get(index)) {
+            if let Some(value) = crate::compress::inline_returned(ast, &parsed.semantic, c, next) {
+                out.push(Side { id: next, declarators: None, returns: Some(value) });
+                run_kind = None;
+                index += 1;
+                continue;
+            }
         }
         if let NodeKind::VarDecl { kind, decls } = ast[c].kind {
             // A `const` nobody assigns to is written `let`.
@@ -1076,7 +1344,7 @@ fn children(parsed: &parser::Parsed, side: &Side, syntax: bool, original: bool) 
                 out.last_mut().and_then(|s| s.declarators.as_mut()).expect("a run").extend(own);
             } else {
                 run_kind = Some(kind);
-                out.push(Side { id: c, declarators: Some(own) });
+                out.push(Side { id: c, declarators: Some(own), returns: None });
             }
         } else {
             run_kind = None;
@@ -1136,6 +1404,8 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                 (NodeKind::Bool(v), _) => truth(&b.ast, y) == Some(*v) && matches!(ny.kind, NodeKind::Unary { .. }),
                 (NodeKind::Ident(_), _) => (is_undefined(&a, x) && is_void_zero(&b.ast, y)) || (is_global_infinity(&a, x) && is_one_over_zero(&b.ast, y)),
                 (NodeKind::Str(sa), NodeKind::PropName(pb)) => a.ast.atom(*sa) == b.ast.atom(*pb),
+                // The same text in the quote that needs the fewest escapes.
+                (NodeKind::Str(sa), NodeKind::Str(sb)) => a.ast.atom(*sa) == b.ast.atom(*sb),
                 // A string written as a template with nothing in it to fill in: the same text.
                 (NodeKind::Str(sa), NodeKind::Template { quasis, exprs }) => {
                     b.ast.list(*exprs).is_empty()
@@ -1158,8 +1428,27 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                     _ => None,
                 }
             };
+            // `if (a) {} else {}` is `a`: an expression statement, a part of a sequence, or the end of a conditional.
+            if let NodeKind::If { test, cons, alt } = nx.kind {
+                if empty_if(&a, cons, alt) && !matches!(ny.kind, NodeKind::Block(_) | NodeKind::If { .. } | NodeKind::Return(_) | NodeKind::Throw(_) | NodeKind::Empty) {
+                    let target = match ny.kind {
+                        NodeKind::ExprStmt(e) => e,
+                        _ => y,
+                    };
+                    // Comparing with a literal tells nothing when the result is not used.
+                    let value = crate::compress::strict_comparison_with_literal(&a.ast, test).map_or(test, |(left, _)| left);
+                    stack.push((Side::node(value), Side::node(target)));
+                    continue;
+                }
+            }
+            // The expression an `if` became: the one of an expression statement, or a part of a sequence (an `if` joined to the statements around it).
+            let if_target = match ny.kind {
+                NodeKind::ExprStmt(e) => Some(e),
+                NodeKind::Binary { op: crate::ast::BinOp::LogAnd | crate::ast::BinOp::LogOr, .. } | NodeKind::Conditional { .. } => Some(y),
+                _ => None,
+            };
             match (&nx.kind, &ny.kind) {
-                (NodeKind::If { test, cons, alt }, NodeKind::ExprStmt(ey)) => match (&b.ast[*ey].kind, alt) {
+                (NodeKind::If { test, cons, alt }, _) if if_target.is_some() => match (&b.ast[if_target.expect("a target")].kind, alt) {
                     (NodeKind::Binary { op: crate::ast::BinOp::LogAnd, left, right }, None) => {
                         if let Some(ce) = sole(&a, *cons) {
                             stack.push((Side::node(*test), Side::node(*left)));
@@ -1185,6 +1474,8 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                             for &item in a.ast.list(list) {
                                 match a.ast[item].kind {
                                     NodeKind::ExprStmt(e) if !a.ast[item].has(flags::DIRECTIVE) => flatten_sequence(&a.ast, e, &mut from),
+                                    // An `if` that is an expression of its own is one part of the sequence.
+                                    NodeKind::If { .. } => from.push(item),
                                     _ => return None,
                                 }
                             }
@@ -1194,6 +1485,13 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                         };
                         // An `else if` written as the last branch of the conditional: `a?b:c?d:e`.
                         fn chain(a: &parser::Parsed, b: &parser::Parsed, s: NodeId, e: NodeId, out: &mut Vec<(NodeId, NodeId)>) -> bool {
+                            // The end of the chain is `if (a) {} else {}`, which is `a`.
+                            if let NodeKind::If { test, cons, alt } = a.ast[s].kind {
+                                if empty_if(a, cons, alt) {
+                                    out.push((crate::compress::strict_comparison_with_literal(&a.ast, test).map_or(test, |(left, _)| left), e));
+                                    return true;
+                                }
+                            }
                             let single = |s: NodeId| -> Option<NodeId> {
                                 match a.ast[s].kind {
                                     NodeKind::ExprStmt(x) => Some(x),
@@ -1210,6 +1508,22 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                                     true
                                 } else if matches!(a.ast[s].kind, NodeKind::If { .. }) {
                                     chain(a, b, s, e, out)
+                                } else if let NodeKind::Block(list) = a.ast[s].kind {
+                                    // Several expression statements: the parts of a sequence.
+                                    let mut from = Vec::new();
+                                    for &item in a.ast.list(list) {
+                                        match a.ast[item].kind {
+                                            NodeKind::ExprStmt(x) if !a.ast[item].has(flags::DIRECTIVE) => flatten_sequence(&a.ast, x, &mut from),
+                                            NodeKind::If { .. } => from.push(item),
+                                            _ => return false,
+                                        }
+                                    }
+                                    let mut to = Vec::new();
+                                    flatten_sequence(&b.ast, e, &mut to);
+                                    from.len() == to.len() && {
+                                        out.extend(from.into_iter().zip(to));
+                                        true
+                                    }
                                 } else {
                                     false
                                 }
@@ -1294,6 +1608,8 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                         let last = i + 1 == items.len();
                         match (&a.ast[s].kind, &ny.kind) {
                             (NodeKind::ExprStmt(e), _) if !a.ast[s].has(flags::DIRECTIVE) => flatten_sequence(&a.ast, *e, &mut from),
+                            // An `if` that is an expression of its own is one part of the sequence.
+                            (NodeKind::If { .. }, _) if !last || matches!(ny.kind, NodeKind::ExprStmt(_)) => from.push(s),
                             (NodeKind::Return(Some(e)), NodeKind::Return(_)) if last => flatten_sequence(&a.ast, *e, &mut from),
                             (NodeKind::Throw(e), NodeKind::Throw(_)) if last => flatten_sequence(&a.ast, *e, &mut from),
                             _ => return Err(format!("block at {} became {:?}", nx.span.start, ny.kind)),
@@ -1312,28 +1628,22 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                 // `if (c) return a; else return b;` that stands alone (the body of an `else`) written as `return c ? a : b;`, and an `else if` that is
                 // joined the same way is the conditional in its place.
                 (NodeKind::If { alt: Some(_), .. }, NodeKind::Return(Some(joined))) => {
-                    fn pairs(a: &parser::Parsed, b: &parser::Parsed, s: NodeId, e: NodeId, out: &mut Vec<(NodeId, NodeId)>) -> bool {
+                    fn pairs(a: &parser::Parsed, b: &parser::Parsed, s: NodeId, e: NodeId, out: &mut Vec<(Side, Side)>) -> bool {
                         match a.ast[s].kind {
-                            NodeKind::Return(Some(arg)) => {
-                                out.push((arg, e));
-                                true
-                            }
-                            NodeKind::Block(list) if a.ast.list(list).len() == 1 => pairs(a, b, a.ast.list(list)[0], e, out),
+                            NodeKind::Block(list) if matches!(a.ast.list(list), [only] if matches!(a.ast[*only].kind, NodeKind::If { .. })) => pairs(a, b, a.ast.list(list)[0], e, out),
                             NodeKind::If { test, cons, alt: Some(alt) } => match b.ast[e].kind {
                                 NodeKind::Conditional { test: ct, cons: cc, alt: ca } => {
-                                    out.push((test, ct));
+                                    out.push((Side::node(test), Side::node(ct)));
                                     pairs(a, b, cons, cc, out) && pairs(a, b, alt, ca, out)
                                 }
                                 _ => false,
                             },
-                            _ => false,
+                            _ => branch_pairs(a, b, s, e, out),
                         }
                     }
                     let mut found = Vec::new();
                     if matches!(b.ast[*joined].kind, NodeKind::Conditional { .. }) && pairs(&a, &b, x, *joined, &mut found) {
-                        for (from, to) in found {
-                            stack.push((Side::node(from), Side::node(to)));
-                        }
+                        stack.extend(found);
                         continue;
                     }
                 }
@@ -1405,8 +1715,8 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
             }
             _ => {}
         }
-        let mut ca = children(&a, &sx, syntax, true);
-        let mut cb = children(&b, &sy, syntax, false);
+        let mut ca = children(&a, &sx, syntax, true, options.legacy);
+        let mut cb = children(&b, &sy, syntax, false, options.legacy);
         if syntax {
             match (&nx.kind, &ny.kind) {
                 // `=> { return x; }` and `=> x`.
@@ -1414,10 +1724,15 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                     if let Some(last) = ca.pop() {
                         let body = &a.ast[last.id];
                         match body.kind {
-                            NodeKind::Block(list) if a.ast.list(list).len() == 1 => match a.ast[a.ast.list(list)[0]].kind {
-                                NodeKind::Return(Some(arg)) => ca.push(Side::node(arg)),
-                                _ => return Err(format!("arrow at {} lost its block", nx.span.start)),
-                            },
+                            NodeKind::Block(list) if a.ast.list(list).len() == 1 && matches!(a.ast[a.ast.list(list)[0]].kind, NodeKind::Return(Some(_))) => {
+                                let NodeKind::Return(Some(arg)) = a.ast[a.ast.list(list)[0]].kind else { unreachable!() };
+                                ca.push(Side::node(arg));
+                            }
+                            // `{ a(); if (b) return c; return d; }` and `(a(), b ? c : d)`: the statements before the returns are parts of a sequence, and the
+                            // returns are the conditional that is its last part.
+                            NodeKind::Block(list) if cb.last().is_some_and(|expr| arrow_joined(&a, &b, a.ast.list(list), expr.id, &mut stack)) => {
+                                cb.pop();
+                            }
                             // `{ a(); return b; }` and `(a(), b)`: the statements become the parts of a sequence.
                             NodeKind::Block(list) => {
                                 let Some(joined) = cb.pop() else { return Err(format!("arrow at {} lost its body", nx.span.start)) };
@@ -1426,6 +1741,8 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                                     match a.ast[s].kind {
                                         NodeKind::ExprStmt(e) if !a.ast[s].has(flags::DIRECTIVE) => flatten_sequence(&a.ast, e, &mut from),
                                         NodeKind::Return(Some(e)) => flatten_sequence(&a.ast, e, &mut from),
+                                        // An `if` that is an expression of its own is one part of the sequence.
+                                        NodeKind::If { .. } => from.push(s),
                                         _ => return Err(format!("arrow at {} lost its block", nx.span.start)),
                                     }
                                 }
@@ -1482,118 +1799,27 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                 }
                 // `if (c) return a; return b;` and `if (c) return a; else return b;` written as `return c ? a : b;`.
                 if in_list && item.declarators.is_none() {
-                    if let (NodeKind::If { test, cons, alt }, NodeKind::Return(Some(joined))) = (&a.ast[item.id].kind, &b.ast[other.id].kind) {
-                        if let NodeKind::Conditional { test: ct, cons: cc, alt: ca_ } = &b.ast[*joined].kind {
-                            let returned = |s: NodeId| -> Option<NodeId> {
-                                match a.ast[s].kind {
-                                    NodeKind::Return(Some(arg)) => Some(arg),
-                                    NodeKind::Block(list) if a.ast.list(list).len() == 1 => match a.ast[a.ast.list(list)[0]].kind {
-                                        NodeKind::Return(Some(arg)) => Some(arg),
-                                        _ => None,
-                                    },
-                                    _ => None,
-                                }
-                            };
-                            // `if (a) return 1; else if (b) return 2; return 3;`: the `else if` chain goes on in the branch, the return after it ends it.
-                            if let Some(alt_if) = alt.filter(|x| matches!(a.ast[*x].kind, NodeKind::If { .. })) {
-                                fn walk(a: &parser::Parsed, b: &parser::Parsed, s: NodeId, e: NodeId, out: &mut Vec<(Side, Side)>) -> Option<Option<NodeId>> {
-                                    let ret = |s: NodeId| -> Option<NodeId> {
-                                        match a.ast[s].kind {
-                                            NodeKind::Return(Some(arg)) => Some(arg),
-                                            NodeKind::Block(list) if a.ast.list(list).len() == 1 => match a.ast[a.ast.list(list)[0]].kind {
-                                                NodeKind::Return(Some(arg)) => Some(arg),
-                                                _ => None,
-                                            },
-                                            _ => None,
-                                        }
-                                    };
-                                    let NodeKind::If { test, cons, alt } = a.ast[s].kind else { return None };
-                                    let NodeKind::Conditional { test: ct, cons: cc, alt: ca } = b.ast[e].kind else { return None };
-                                    out.push((Side::node(test), Side::node(ct)));
-                                    out.push((Side::node(ret(cons)?), Side::node(cc)));
-                                    match alt {
-                                        None => Some(Some(ca)),
-                                        Some(alt) if matches!(a.ast[alt].kind, NodeKind::If { .. }) => walk(a, b, alt, ca, out),
-                                        Some(alt) => {
-                                            out.push((Side::node(ret(alt)?), Side::node(ca)));
-                                            Some(None)
-                                        }
-                                    }
-                                }
-                                let mut pairs = Vec::new();
-                                if let Some(first) = returned(*cons) {
-                                    pairs.push((Side::node(*test), Side::node(*ct)));
-                                    pairs.push((Side::node(first), Side::node(*cc)));
-                                    let rest = walk(&a, &b, alt_if, *ca_, &mut pairs);
-                                    let extra = match rest {
-                                        Some(None) => Some(0),
-                                        Some(Some(target)) => match ca.get(i) {
-                                            Some(next) if next.declarators.is_none() => match a.ast[next.id].kind {
-                                                NodeKind::Return(Some(arg)) => {
-                                                    pairs.push((Side::node(arg), Side::node(target)));
-                                                    Some(1)
-                                                }
-                                                _ => None,
-                                            },
-                                            _ => None,
-                                        },
-                                        None => None,
-                                    };
-                                    if let Some(extra) = extra {
-                                        aligned.extend(pairs);
-                                        i += extra;
-                                        j += 1;
-                                        continue;
-                                    }
-                                }
-                            }
-                            let second = match alt {
-                                Some(alt) => returned(*alt).map(|arg| (arg, 0)),
-                                None => ca.get(i).and_then(|next| match a.ast[next.id].kind {
-                                    NodeKind::Return(Some(arg)) if next.declarators.is_none() => Some((arg, 1)),
-                                    _ => None,
-                                }),
-                            };
-                            if let (Some(first), Some((second, extra))) = (returned(*cons), second) {
-                                aligned.push((Side::node(*test), Side::node(*ct)));
-                                aligned.push((Side::node(first), Side::node(*cc)));
-                                aligned.push((Side::node(second), Side::node(*ca_)));
-                                i += extra;
-                                j += 1;
-                                continue;
-                            }
-                            // `if (a) return 1; if (b) return 2; return 3;`: the conditional goes on in its last branch.
-                            if alt.is_none() {
-                                if let Some(first) = returned(*cons) {
-                                    let mut pairs = vec![(Side::node(*test), Side::node(*ct)), (Side::node(first), Side::node(*cc))];
-                                    let (mut k, mut target) = (i, *ca_);
-                                    let done = loop {
-                                        let Some(next) = ca.get(k) else { break false };
-                                        if next.declarators.is_some() {
-                                            break false;
-                                        }
-                                        match a.ast[next.id].kind {
-                                            NodeKind::Return(Some(arg)) => {
-                                                pairs.push((Side::node(arg), Side::node(target)));
-                                                k += 1;
-                                                break true;
-                                            }
-                                            NodeKind::If { test: t2, cons: c2, alt: None } => {
-                                                let (Some(r2), NodeKind::Conditional { test: ct2, cons: cc2, alt: ca2 }) = (returned(c2), &b.ast[target].kind) else { break false };
-                                                pairs.push((Side::node(t2), Side::node(*ct2)));
-                                                pairs.push((Side::node(r2), Side::node(*cc2)));
-                                                target = *ca2;
-                                                k += 1;
-                                            }
-                                            _ => break false,
-                                        }
-                                    };
-                                    if done {
-                                        aligned.extend(pairs);
-                                        i = k;
-                                        j += 1;
-                                        continue;
-                                    }
+                    if let NodeKind::Return(Some(joined)) = &b.ast[other.id].kind {
+                        if let Some((pairs, extra)) = join_returns_model(&a, &b, &ca, i - 1, *joined) {
+                            aligned.extend(pairs);
+                            i += extra;
+                            j += 1;
+                            continue;
+                        }
+                    }
+                }
+                // `if (a) return; else if (b) return 1; return 2;` is `if (a) return; else return b ? 1 : 2;`: the chain after the `else` is a conditional.
+                if in_list && item.declarators.is_none() {
+                    if let (NodeKind::If { test, cons, alt: Some(alt) }, NodeKind::If { test: t2, cons: c2, alt: Some(alt2) }) = (&a.ast[item.id].kind, &b.ast[other.id].kind) {
+                        if let (NodeKind::If { .. }, NodeKind::Return(Some(joined))) = (&a.ast[*alt].kind, &b.ast[*alt2].kind) {
+                            let mut pairs = vec![(Side::node(*test), Side::node(*t2)), (Side::node(*cons), Side::node(*c2))];
+                            if let Some(Some(target)) = walk(&a, &b, *alt, *joined, &mut pairs) {
+                                if let Some(NodeKind::Return(Some(arg))) = ca.get(i).filter(|n| n.declarators.is_none()).map(|n| a.ast[n.id].kind) {
+                                    pairs.push((Side::node(arg), Side::node(target)));
+                                    aligned.extend(pairs);
+                                    i += 1;
+                                    j += 1;
+                                    continue;
                                 }
                             }
                         }
@@ -1695,7 +1921,7 @@ mod tests {
     #[test]
     fn a_body_of_expression_statements_is_one_sequence() {
         assert_eq!(syntax("function f(a, b) { if (a) { b(); a(); } }"), "function f(a,b){if(a)b(),a()}");
-        assert_eq!(syntax("function f(a, b) { if (a) { b(); return a(); } return 1 }"), "function f(a,b){if(a)return b(),a();return 1}");
+        assert_eq!(syntax("function f(a, b) { if (a) { b(); return a(); } return 1 }"), "function f(a,b){return a?(b(),a()):1}");
         assert_eq!(syntax("function f(a, b) { if (a) { b(); throw new Error('x'); } }"), "function f(a,b){if(a)throw b(),new Error('x')}");
         assert_eq!(syntax("function f(a, b) { for (let i = 0; i < 3; i++) { a(i); b(i) } d(); }"), "function f(a,b){for(let i=0;i<3;i++)a(i),b(i);d()}");
         // Not when a statement is not an expression, or a line break stands for a `;` that has no token to become a comma.
@@ -1719,6 +1945,150 @@ mod tests {
         // A statement in between, or a missing final return, leaves the run as it was.
         assert_eq!(syntax("function f(a, b) { if (a) return 1; g(); if (b) return 2; return 3; }"), "function f(a,b){if(a)return 1;g();return b?2:3}");
         assert_eq!(syntax("function f(a, b) { if (a) return 1; if (b) return 2; g(); }"), "function f(a,b){if(a)return 1;if(b)return 2;g()}");
+    }
+
+    #[test]
+    fn a_string_takes_the_quote_that_needs_the_fewest_escapes() {
+        assert_eq!(syntax(r#"x = "say \"hi\"" + y + "\"b\"";"#), r#"x='say "hi"'+y+'"b"'"#);
+        assert_eq!(syntax(r#"x = 'it\'s' + "it's";"#), r#"x="it's"+"it's""#);
+        // A tie keeps the quote it has; a string that has both quotes takes the one it has fewer of.
+        assert_eq!(syntax(r#"x = 'a"b\'c' + "a\"b'c\"d";"#), r#"x='a"b\'c'+'a"b\'c"d'"#);
+        // Other escapes stay as they are, and a backslash in front of the quote is its own escape.
+        assert_eq!(syntax(r#"x = f("\\\"\n" + "a");"#), r#"x=f('\\"\n'+"a")"#);
+        // A directive keeps its quotes.
+        assert_eq!(syntax(r#"function f() { "use \"x\""; }"#), r#"function f(){"use \"x\""}"#);
+    }
+
+    #[test]
+    fn a_catch_binding_nothing_uses_is_left_out() {
+        assert_eq!(syntax("try { f() } catch (e) { g() }"), "try{f()}catch{g()}");
+        // Used, assigned, destructured, or reachable by an `eval` or a `var` of its own name: kept.
+        assert_eq!(syntax("try { f() } catch (e) { g(e) }"), "try{f()}catch(e){g(e)}");
+        assert_eq!(syntax("try { f() } catch (e) { e = 1; g() }"), "try{f()}catch(e){e=1;g()}");
+        assert_eq!(syntax("try { f() } catch ({ message }) { g() }"), "try{f()}catch({message}){g()}");
+        assert_eq!(syntax("try { f() } catch (e) { eval('e') }"), "try{f()}catch(e){eval('e')}");
+        assert_eq!(syntax("try { f() } catch (e) { var e = 2; g() }"), "try{f()}catch(e){var e=2;g()}");
+        // es5 has no catch without a binding.
+        let legacy = Options { whitespace: true, syntax: true, legacy: true, ..Options::default() };
+        verify("try { f() } catch (e) { g() }", &legacy).unwrap();
+        assert_eq!(minify("try { f() } catch (e) { g() }", &legacy).unwrap(), "try{f()}catch(e){g()}");
+    }
+
+    #[test]
+    fn an_if_that_is_an_expression_joins_the_statements_around_it() {
+        assert_eq!(syntax("function f(a, b, c) { if (a) { b(); if (c) b(); } }"), "function f(a,b,c){if(a)b(),c&&b()}");
+        assert_eq!(syntax("function f(a, b, c) { for (;;) { a(); if (b) c(); else a(); } }"), "function f(a,b,c){for(;;)a(),b?c():a()}");
+        assert_eq!(syntax("function f(a, b, c) { if (a) { if (b) { c(); b(); } else { b(); c(); } a(); } else b(); }"), "function f(a,b,c){a?(b?(c(),b()):(b(),c()),a()):b()}");
+        // The braces of an inner block that goes do not leave a second `;` behind.
+        assert_eq!(syntax("function f(a, b, c) { if (a) { b(); if (c) { b(); } } else { c(); } }"), "function f(a,b,c){a?(b(),c&&b()):c()}");
+        // An `if` that stays a statement keeps its place.
+        assert_eq!(syntax("function f(a, b, c) { if (a) { b(); if (c) return 1; } }"), "function f(a,b,c){if(a){b();if(c)return 1}}");
+    }
+
+    #[test]
+    fn an_else_if_chain_may_end_in_a_sequence() {
+        assert_eq!(
+            syntax("function f(a, b, c, d) { if (a) b(); else if (c) d(); else { b(); d(); } }"),
+            "function f(a,b,c,d){a?b():c?d():(b(),d())}"
+        );
+        assert_eq!(
+            syntax("function f(a, b, c, d) { if (a) { b(); c(); } else if (c) d(); else { b(); d(); } }"),
+            "function f(a,b,c,d){a?(b(),c()):c?d():(b(),d())}"
+        );
+    }
+
+    #[test]
+    fn returns_after_an_else_if_chain_and_a_return_of_nothing_are_checked() {
+        // The `else if` goes on as the conditional in a branch; a return of nothing keeps its own `if`.
+        assert_eq!(
+            syntax("function f(a, b, c) { if (a) { return void 0; } else if (b) { return 1; } return c; }"),
+            "function f(a,b,c){if(a)return;else return b?1:c}"
+        );
+        assert_eq!(
+            syntax("function f(a, b, c, d) { if (a) { return 0; } if (b) { return 1; } else { return c; } }"),
+            "function f(a,b,c,d){return a?0:b?1:c}"
+        );
+        assert_eq!(
+            syntax("function f(a, b, c, d) { if (a) { return 0; } if (b) { return 1; } else if (c) { return 2; } return d; }"),
+            "function f(a,b,c,d){return a?0:b?1:c?2:d}"
+        );
+    }
+
+    #[test]
+    fn a_guard_before_expressions_that_include_an_if_is_one_expression() {
+        assert_eq!(
+            syntax("function f(a, b, c) { for (const x of a) { if (b(x)) continue; if (c) delete a[x]; } }"),
+            "function f(a,b,c){for(let x of a)b(x)||(c&&delete a[x])}"
+        );
+        assert_eq!(
+            syntax("function f(a, b, c) { if (!a) return; b(); if (c) b(c); else a(); }"),
+            "function f(a,b,c){a&&(b(),c?b(c):a())}"
+        );
+        // A statement that is not an expression stops it.
+        assert_eq!(syntax("function f(a, b) { if (a) return; b(); if (b) return 1; }"), "function f(a,b){if(a)return;b();if(b)return 1}");
+    }
+
+    #[test]
+    fn a_guard_return_with_statements_before_the_last_return_is_one_conditional() {
+        assert_eq!(syntax("function f(a, b, n) { if (a) return n; b(n); return n; }"), "function f(a,b,n){return a?n:(b(n),n)}");
+        assert_eq!(syntax("function f(a, b, c, n) { if (a) return 1; if (b) return 2; c(n); c(a); return 3; }"), "function f(a,b,c,n){return a?1:b?2:(c(n),c(a),3)}");
+        assert_eq!(syntax("function f(a, b, c) { if (a) return 1; if (b) c(); else a(); return 3; }"), "function f(a,b,c){return a?1:(b?c():a(),3)}");
+        // Not when what follows the last return is a statement (the parenthesis ends where the `;` was), or something in between is not an expression.
+        assert_eq!(syntax("function f(a, b) { if (a) return 1; b(); return 2; function g() {} }"), "function f(a,b){if(a)return 1;b();return 2;function g(){}}");
+        assert_eq!(syntax("function f(a, b) { if (a) return 1; var c = b(); return c; }"), "function f(a,b){if(a)return 1;return b()}");
+        assert_eq!(syntax("function f(a, b) { if (a) return 1; b(); return 2 }"), "function f(a,b){if(a)return 1;b();return 2}");
+    }
+
+    #[test]
+    fn a_name_that_is_only_returned_is_not_declared() {
+        assert_eq!(syntax("function f(a) { let n = a.map(x => x + 1); return n; }"), "function f(a){return a.map(x=>x+1)}");
+        assert_eq!(syntax("function f(a) { const n = a(); return n; }"), "function f(a){return a()}");
+        assert_eq!(syntax("function f(a) { var r = 1; var n = a(r); return n; }"), "function f(a){var r=1;return a(r)}");
+        // Read twice, written again, used before, a function or class (which would lose its name), or something else in between: kept.
+        assert_eq!(syntax("function f(a) { let n = a(); return n || n; }"), "function f(a){let n=a();return n||n}");
+        assert_eq!(syntax("function f(a) { let n = a(); n = 2; return n; }"), "function f(a){let n=a();n=2;return n}");
+        assert_eq!(syntax("function f(a) { const n = () => 1; return n; }"), "function f(a){let n=()=>1;return n}");
+        assert_eq!(syntax("function f(a) { let n = a(); a(); return n; }"), "function f(a){let n=a();a();return n}");
+        assert_eq!(syntax("function f(a) { let n = a(() => n); return n; }"), "function f(a){let n=a(()=>n);return n}");
+        assert_eq!(syntax("function f(a) { let n = a(); return eval('n'); }"), "function f(a){let n=a();return eval('n')}");
+    }
+
+    #[test]
+    fn an_if_with_nothing_in_it_is_its_condition() {
+        assert_eq!(syntax("function f(a, b) { if (a) {} else {} b(); }"), "function f(a,b){a;b()}");
+        assert_eq!(syntax("function f(a, b) { if (a.x === 'y') {} b(); }"), "function f(a,b){a.x;b()}");
+        assert_eq!(syntax("function f(a, b) { if (a !== 3) {} else {} b(); }"), "function f(a,b){a;b()}");
+        // At the end of an else-if chain it is the last branch of the conditional.
+        assert_eq!(
+            syntax("function f(a, b, c) { if (a) b(); else if (c.t === 'p') b(1); else if (c.t === 'q') {} else {} }"),
+            "function f(a,b,c){a?b():c.t==='p'?b(1):c.t}"
+        );
+        // A body with something in it, or a condition that is not a comparison with a literal only, stays whole.
+        assert_eq!(syntax("function f(a, b) { if (a) {} else { b(); } }"), "function f(a,b){if(a){}else b()}");
+        assert_eq!(syntax("function f(a, b) { if (a == 'y') {} b(); }"), "function f(a,b){a=='y';b()}");
+    }
+
+    #[test]
+    fn a_guard_that_returns_a_sequence_is_part_of_the_conditional() {
+        assert_eq!(syntax("function f(a, b, c) { if (a) { b(); return c; } return b; }"), "function f(a,b,c){return a?(b(),c):b}");
+        assert_eq!(syntax("function f(a, b, c) { if (a) { b(); c(); return a; } if (c) { return b; } return c; }"), "function f(a,b,c){return a?(b(),c(),a):c?b:c}");
+        assert_eq!(syntax("function f(a, b, c) { if (a) { b(); if (c) c(); return b; } else { return c; } }"), "function f(a,b,c){return a?(b(),c&&c(),b):c}");
+        assert_eq!(syntax("function f(a, b, c) { if (a) { if (b) { c(); return 1; } else { return 2; } } return 3; }"), "function f(a,b,c){if(a)return b?(c(),1):2;return 3}");
+        // A sequence that does not end in a return keeps its `if`.
+        assert_eq!(syntax("function f(a, b, c) { if (a) { b(); c(); } return b; }"), "function f(a,b,c){if(a)b(),c();return b}");
+    }
+
+    #[test]
+    fn an_arrow_body_that_returns_through_ifs_is_an_expression() {
+        assert_eq!(syntax("const f = (a, b, c) => { if (a) return b; return c; };"), "let f=(a,b,c)=>a?b:c");
+        assert_eq!(syntax("const f = (a, b) => { if (a) return 1; if (b) { return 2 } return {}; };"), "let f=(a,b)=>a?1:b?2:{}");
+        assert_eq!(syntax("const f = (a, b) => { if (a) { return 1; } else { return b; } };"), "let f=(a,b)=>a?1:b");
+        assert_eq!(syntax("const f = (a, b, c) => { c(); if (a) return b; return c; };"), "let f=(a,b,c)=>(c(),a?b:c)");
+        assert_eq!(syntax("const f = (a, b) => { if (a) b(); return b; };"), "let f=(a,b)=>(a&&b(),b)");
+        assert_eq!(syntax("const f = (a, b) => { if (a) b.x = 1; return b; };"), "let f=(a,b)=>(a&&(b.x=1),b)");
+        // A statement that is not an expression, or a return of nothing, keeps its block.
+        assert_eq!(syntax("const f = (a, b) => { if (a) return; return b; };"), "let f=(a,b)=>{if(a)return;return b}");
+        assert_eq!(syntax("const f = (a, b) => { let c = b(); if (a) return c; return 1; };"), "let f=(a,b)=>{let c=b();return a?c:1}");
     }
 
     #[test]
@@ -1766,9 +2136,18 @@ mod tests {
     fn conditions_become_expressions() {
         assert_eq!(syntax("if (a) b(); if (!a) b(); if (a) b(); else c()"), "a&&b();a||b();a?b():c()");
         assert_eq!(syntax("if (a) { b() } else { c() }"), "a?b():c()");
-        // No shorter, or not the same: left alone.
-        assert_eq!(syntax("if (a || b) c(); if (a) b = 1; if (a) b(), c()"), "if(a||b)c();if(a)b=1;if(a)b(),c()");
+        // An assignment is put in parentheses (as long as the statement it replaces, but a comma or a chain can join it); a condition that binds
+        // too loosely, or a sequence, is left alone.
+        assert_eq!(syntax("if (a || b) c(); if (a) b = 1; if (a) b(), c()"), "if(a||b)c();a&&(b=1);if(a)b(),c()");
+        assert_eq!(syntax("if (!a) b = 1; if (a) { b = 1 } c()"), "a||(b=1);a&&(b=1);c()");
         assert_eq!(syntax("if (a) b(); else if (c) d()"), "a?b():c&&d()");
+    }
+
+    #[test]
+    fn a_body_with_an_assignment_is_in_parentheses_to_join_a_chain() {
+        assert_eq!(syntax("function f(a, b, c, i) { if (a) i.x = !1; else if (b) i.x = c; }"), "function f(a,b,c,i){a?i.x=!1:b&&(i.x=c)}");
+        assert_eq!(syntax("function f(a, b, c, i) { for (const x of a) { if (b) i.x = 1; if (!c) i.y = 2; } }"), "function f(a,b,c,i){for(let x of a)b&&(i.x=1),c||(i.y=2)}");
+        assert_eq!(syntax("function f(a, i) { if (a) { i.x = 1 } return i }"), "function f(a,i){a&&(i.x=1);return i}");
     }
 
     #[test]
@@ -1794,7 +2173,7 @@ mod tests {
         assert_eq!(syntax("function f(a, b) { if (!a) return; b(); }"), "function f(a,b){a&&b()}");
         assert_eq!(syntax("function f(a, b) { x(); if (a === 1) return; b = 2; }"), "function f(a,b){x();a===1||(b=2)}");
         assert_eq!(syntax("function f(a, b) { for (const x of a) { if (x.skip) continue; b(x); } }"), "function f(a,b){for(let x of a)x.skip||b(x)}");
-        assert_eq!(syntax("function f(a, b) { for (const x of a) { if (!x) continue; b(x); b(x + 1); } }"), "function f(a,b){for(let x of a)x&&(b(x),b(x+1));}");
+        assert_eq!(syntax("function f(a, b) { for (const x of a) { if (!x) continue; b(x); b(x + 1); } }"), "function f(a,b){for(let x of a)x&&(b(x),b(x+1))}");
         assert_eq!(syntax("function f(a, b) { for (const x of a) { g(x); if (!x) continue; b(x); } }"), "function f(a,b){for(let x of a){g(x);x&&b(x)}}");
         // Not when something other than expressions follows, with a value, with a label, or where `return` would not be the end.
         assert_eq!(syntax("function f(a, b) { if (a) return; let c = 1; b(c); }"), "function f(a,b){if(a)return;let c=1;b(c)}");

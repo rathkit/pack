@@ -27,7 +27,7 @@ use crate::purity::Purity;
 use crate::semantic::SymbolId;
 
 /// A top-level statement of an ES module.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Part {
     pub stmt: NodeId,
     /// Module-level symbols the statement declares.
@@ -50,7 +50,7 @@ pub enum Use {
     Member(SymbolId, String),
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct ModuleShake {
     /// The module is part of the bundle.
     pub included: bool,
@@ -86,7 +86,20 @@ impl Shaken {
 /// Keeps everything: every module and every statement. For comparing a bundle with and
 /// without shaking.
 pub fn keep_everything(graph: &Graph) -> Shaken {
-    let mut modules: Vec<ModuleShake> = graph.modules.iter().map(|m| build_parts(graph, m.id, None)).collect();
+    // Without the linker's help a module's parts depend on the module alone (and the build's definitions), so a module that is kept
+    // from a build to the next keeps them (watching, and the development server, which does not shake).
+    let settings = format!("{:?}", (&graph.defines, &graph.pure_calls));
+    let mut modules: Vec<ModuleShake> = graph
+        .modules
+        .iter()
+        .map(|m| {
+            if !graph.keeps_modules {
+                return build_parts(graph, m.id, None);
+            }
+            let kept = m.memo.parts.get_or_init(|| (settings.clone(), build_parts(graph, m.id, None)));
+            if kept.0 == settings { kept.1.clone() } else { build_parts(graph, m.id, None) }
+        })
+        .collect();
     for module in &mut modules {
         module.included = true;
         module.live = vec![true; module.parts.len()];
@@ -102,7 +115,10 @@ pub fn shake(graph: &Graph, linked: &Linked) -> Shaken {
 /// `entry_exports` false: nobody reads what the entries export (an iife with no global name), so only their effects are kept.
 pub fn shake_entries(graph: &Graph, linked: &Linked, entry_exports: bool) -> Shaken {
     let enums = EnumTable::build(graph);
-    let mut modules: Vec<ModuleShake> = graph.modules.iter().map(|m| build_parts(graph, m.id, Some((&enums, linked)))).collect();
+    // Each module's parts depend on nothing the others make, so a big program is split up side by side.
+    let build = |i: usize| build_parts(graph, graph.modules[i].id, Some((&enums, linked)));
+    let n = graph.modules.len();
+    let mut modules: Vec<ModuleShake> = if crate::par::worth_it(n, graph.modules.iter().map(|m| m.source.len()).sum()) { crate::par::map(n, build) } else { (0..n).map(build).collect() };
     let mut by_symbol: Vec<HashMap<SymbolId, Vec<usize>>> = Vec::with_capacity(modules.len());
     for module in &modules {
         let mut map: HashMap<SymbolId, Vec<usize>> = HashMap::new();

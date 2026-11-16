@@ -24,6 +24,7 @@ pub mod literal;
 pub mod loader;
 pub mod metafile;
 pub mod module;
+pub mod par;
 pub mod parser;
 pub mod plugins;
 pub mod purity;

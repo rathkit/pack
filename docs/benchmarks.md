@@ -39,16 +39,23 @@ run the container recipe in [rathkit/pack-bench](https://github.com/rathkit/pack
   resolve packages that only have `exports`.
 - **Warm rebuild:** each tool is run in its own watch mode on a writable copy of the project, in plain and in minified mode. The
   first build is waited for, then one project file is changed 7 times and the time from writing the file to the output holding
-  the change is taken (the output file is polled every 2 ms); the median is shown. Each tool uses its default watcher. Pack polls
-  the files its build read every 80 ms and waits 40 ms more for writes to settle, so its figure includes up to 120 ms of that;
-  esbuild scans for changes in rounds, so its times vary more (the minimum and the median are in the results file); the others
-  use the operating system's file events. Parcel 2 builds in development mode when it watches and has no minified watch mode.
+  the change is taken (the output file is polled every 2 ms); the median is shown. Each tool uses its default watcher. Pack hears
+  of a change through the file events of the kernel on Linux (inotify) and starts the build as soon as the writer has closed the
+  file, or after 4 ms without news; where there are no events (macOS, Windows) it polls the files its build read every 80 ms and
+  waits 40 ms more for writes to settle, which is up to 120 ms of its figure. Pack keeps the modules of the last build whose files
+  did not change, the scan of a module that imports nothing from the bundle, and the pieces a big bundle is minified in, so a warm
+  rebuild does the work that the change needs. esbuild scans for changes in rounds, so its times vary more (the minimum and the
+  median are in the results file); the others use the operating system's file events. Parcel 2 builds in development mode when it watches and has no minified watch mode.
 - **Server start and HMR latency:** for the tools that have a development server (Pack `serve --hmr`, esbuild `--serve`, Vite,
   webpack with webpack-dev-server, rspack `serve`, Parcel 2 and 3 `serve`); rolldown and Rollup have none. No browser is used. A
   page load is imitated by asking for the page, the scripts it names and (for Vite, which does not bundle) every module they
   import, six requests at a time; the server has started when all are answered. HMR latency is from writing a change to a module
   that already accepts its own update to the update notice on the tool's own event channel (a WebSocket, or server-sent events);
-  what the page then does with it is not measured, and the notices differ in kind (the table says which). The TypeScript compiler is
+  what the page then does with it is not measured, and the notices differ in kind (the table says which). Pack's notice is the
+  update itself: it holds the code of each module that changed, and it is sent as soon as the modules are written, before the build's
+  files (the source map is the longest part) are finished. esbuild's `change` notice only says that a rebuild finished; the page then
+  fetches the output to get the change, which is not in the figure. So the cells compare an update that a page can apply with a
+  signal that it has to ask for. The TypeScript compiler is
   not served: it is a library for Node with no page, it needs `fs`, `path`, `os` and other Node modules, and each tool would have to be
   set up to stub them in its own way, so its cells say n/a. Parcel's development copy gets the same `packageExports` resolver option the
   build uses. webpack and rspack leave `node:` imports as empty externals (webpack cannot read them for a browser target, and Svelte's

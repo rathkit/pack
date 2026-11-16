@@ -209,6 +209,22 @@ fn watch_mode_rebuilds_and_tells_plugins() {
 }
 
 #[test]
+fn a_rebuild_that_keeps_what_it_can_matches_a_fresh_build() {
+    if Command::new("node").arg("--version").output().is_err() {
+        eprintln!("node not found; skipping the rebuild suite");
+        return;
+    }
+    let output = Command::new("node")
+        .arg("tools/run-rebuild.mjs")
+        .env("RATHKIT_PACK_BIN", env!("CARGO_BIN_EXE_rkp"))
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output_within()
+        .expect("run the rebuild script");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "a rebuild differs from a fresh build:\n{text}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+#[test]
 fn estree_matches_acorn() {
     if Command::new("node").arg("--version").output().is_err() {
         eprintln!("node not found; skipping the ESTree check");

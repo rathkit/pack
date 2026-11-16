@@ -311,6 +311,13 @@ impl std::error::Error for ResolveError {}
 pub struct Resolver {
     fs: Box<dyn FileSystem>,
     options: ResolveOptions,
+    memo: Arc<ResolverMemo>,
+}
+
+/// What a resolver has learned about the file system. A resolver lives for one build; a watcher that hears of every change in the folders
+/// involved hands the same memo to the next one, and starts a new one when something was made, removed or renamed.
+#[derive(Default)]
+pub struct ResolverMemo {
     /// `package.json` by directory; `Ok(None)` records a directory without one, and a file
     /// that does not parse is remembered too so it is read and reported once.
     packages: Mutex<HashMap<PathBuf, Result<Option<Arc<Package>>, ResolveError>>>,
@@ -332,7 +339,12 @@ impl Resolver {
     }
 
     pub fn with_fs(fs: Box<dyn FileSystem>, options: ResolveOptions) -> Resolver {
-        Resolver { fs, options, packages: Mutex::new(HashMap::new()), real_dirs: Mutex::new(HashMap::new()) }
+        Resolver { fs, options, memo: Arc::new(ResolverMemo::default()) }
+    }
+
+    /// A resolver that starts from what an earlier one learned.
+    pub fn with_memo(fs: Box<dyn FileSystem>, options: ResolveOptions, memo: Arc<ResolverMemo>) -> Resolver {
+        Resolver { fs, options, memo }
     }
 
     /// Resolves `specifier` as written in a file that lives in directory `from_dir`.
@@ -447,12 +459,12 @@ impl Resolver {
     fn real_path(&self, path: PathBuf) -> PathBuf {
         if let (Some(dir), Some(name)) = (path.parent(), path.file_name()) {
             if !self.fs.may_be_link(&path) {
-                let cached = self.real_dirs.lock().unwrap().get(dir).cloned();
+                let cached = self.memo.real_dirs.lock().unwrap().get(dir).cloned();
                 let real = match cached {
                     Some(real) => real,
                     None => {
                         let real = self.fs.canonicalize(dir).ok();
-                        self.real_dirs.lock().unwrap().insert(dir.to_path_buf(), real.clone());
+                        self.memo.real_dirs.lock().unwrap().insert(dir.to_path_buf(), real.clone());
                         real
                     }
                 };
@@ -481,7 +493,7 @@ impl Resolver {
     }
 
     fn read_package(&self, dir: &Path) -> Result<Option<Arc<Package>>, ResolveError> {
-        if let Some(cached) = self.packages.lock().unwrap().get(dir) {
+        if let Some(cached) = self.memo.packages.lock().unwrap().get(dir) {
             return cached.clone();
         }
         let file = dir.join("package.json");
@@ -495,7 +507,7 @@ impl Resolver {
         } else {
             Ok(None)
         };
-        self.packages.lock().unwrap().insert(dir.to_path_buf(), package.clone());
+        self.memo.packages.lock().unwrap().insert(dir.to_path_buf(), package.clone());
         package
     }
 
