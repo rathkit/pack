@@ -111,6 +111,18 @@ impl ServeState {
         }
     }
 
+    /// Adds a page that listens for updates; for the tests under `tests/`, which hold the other end of the connection.
+    #[doc(hidden)]
+    pub fn add_listener(&self, stream: TcpStream) {
+        self.clients.lock().unwrap().push(stream);
+    }
+
+    /// Whether files wait for the build to publish them (an update is out ahead of them); for the tests under `tests/`.
+    #[doc(hidden)]
+    pub fn files_are_gated(&self) -> bool {
+        *self.gate.0.lock().unwrap()
+    }
+
     /// Whether the modules of the build were already published by `modules_ready`.
     pub fn modules_published_early(&self) -> bool {
         self.early.lock().unwrap().published
@@ -665,72 +677,4 @@ fn prepare_page(html: &str, state: &ServeState) -> String {
         None => out = format!("{extra}{out}"),
     }
     out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::bundle::HmrModule;
-
-    fn module(id: &str, code: &str) -> HmrModule {
-        HmrModule { id: id.to_string(), kind: "esm", code: code.to_string(), deps: Vec::new(), specs: Vec::new(), refresh: false }
-    }
-
-    fn listener(state: &ServeState) -> TcpStream {
-        let server = TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = TcpStream::connect(server.local_addr().unwrap()).unwrap();
-        let (accepted, _) = server.accept().unwrap();
-        state.clients.lock().unwrap().push(accepted);
-        client
-    }
-
-    fn read_some(client: &mut TcpStream) -> String {
-        client.set_read_timeout(Some(std::time::Duration::from_millis(300))).unwrap();
-        let mut buf = [0u8; 4096];
-        match client.read(&mut buf) {
-            Ok(n) => String::from_utf8_lossy(&buf[..n]).into_owned(),
-            Err(_) => String::new(),
-        }
-    }
-
-    #[test]
-    fn an_update_for_modules_goes_out_before_the_build_is_done_and_files_wait_for_it() {
-        let state = ServeState::new(std::env::temp_dir(), None);
-        // The first build has no update to send.
-        state.publish_modules(&[module("/p/a.js", "1"), module("/p/b.js", "1")]);
-        let mut page = listener(&state);
-        state.rebuild_for(vec![PathBuf::from("/p/a.js")], false);
-        state.modules_ready(&[module("/p/a.js", "2"), module("/p/b.js", "1")]);
-        let said = read_some(&mut page);
-        assert!(said.contains("\"type\":\"hmr\"") && said.contains("/p/a.js") && !said.contains("/p/b.js"), "{said}");
-        assert!(state.modules_published_early());
-        assert!(*state.gate.0.lock().unwrap(), "files wait until the build has published them");
-        state.publish(Vec::new(), Vec::new());
-        assert!(!*state.gate.0.lock().unwrap());
-        assert!(state.take_early_sent());
-        // Asked once.
-        assert!(!state.take_early_sent());
-    }
-
-    #[test]
-    fn a_style_sheet_a_file_that_is_no_module_or_a_suppressed_change_is_left_to_the_end_of_the_build() {
-        for (changed, suppressed) in [("/p/style.css", false), ("/p/other.txt", false), ("/p/a.js", true)] {
-            let state = ServeState::new(std::env::temp_dir(), None);
-            state.publish_modules(&[module("/p/a.js", "1"), module("/p/style.css", "1")]);
-            let mut page = listener(&state);
-            state.rebuild_for(vec![PathBuf::from(changed)], suppressed);
-            state.modules_ready(&[module("/p/a.js", "2"), module("/p/style.css", "2")]);
-            assert_eq!(read_some(&mut page), "", "{changed}");
-            assert!(!*state.gate.0.lock().unwrap());
-            assert!(!state.take_early_sent());
-        }
-    }
-
-    #[test]
-    fn a_build_nothing_asked_for_is_not_sent_early() {
-        let state = ServeState::new(std::env::temp_dir(), None);
-        state.publish_modules(&[module("/p/a.js", "1")]);
-        state.modules_ready(&[module("/p/a.js", "2")]);
-        assert!(!state.modules_published_early());
-    }
 }
