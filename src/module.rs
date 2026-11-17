@@ -306,6 +306,30 @@ impl Builder<'_> {
         }
     }
 
+    /// Whether `sym` is declared at the top level with a value, in a statement before `before`.
+    fn initialized_before(&self, sym: SymbolId, before: NodeId) -> bool {
+        let NodeKind::Program(body) = self.ast[self.ast.root].kind else { return false };
+        for &stmt in self.ast.list(body) {
+            if stmt == before {
+                return false;
+            }
+            let decl = match self.ast[stmt].kind {
+                NodeKind::ExportNamed(export) => self.ast.export(export).decl.unwrap_or(stmt),
+                _ => stmt,
+            };
+            if let NodeKind::VarDecl { decls, .. } = self.ast[decl].kind {
+                for &d in self.ast.list(decls) {
+                    if let NodeKind::VarDeclarator { target, init: Some(_) } = self.ast[d].kind {
+                        if matches!(self.ast[target].kind, NodeKind::BindingIdent(_)) && self.semantic.symbol_of(target) == Some(sym) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
     fn export_default(&mut self, node: NodeId, value: NodeId) {
         // `export default function f() {}` and `export default class C {}` bind their name.
         let named = match self.ast[value].kind {
@@ -319,7 +343,11 @@ impl Builder<'_> {
         let aliased = match self.ast[value].kind {
             NodeKind::Ident(_) => self.semantic.symbol_of(value).filter(|&sym| {
                 let symbol = self.semantic.symbol(sym);
-                symbol.scope == self.semantic.root_scope() && (symbol.kind == SymbolKind::Const || (symbol.writes == 0 && matches!(symbol.kind, SymbolKind::Function | SymbolKind::LexicalFunction | SymbolKind::Class | SymbolKind::Import)))
+                symbol.scope == self.semantic.root_scope()
+                    && (symbol.kind == SymbolKind::Const
+                        || (symbol.writes == 0 && matches!(symbol.kind, SymbolKind::Function | SymbolKind::LexicalFunction | SymbolKind::Class | SymbolKind::Import))
+                        // A `var` or `let` that its own declaration, earlier in the file, gives its only value.
+                        || (symbol.writes == 1 && matches!(symbol.kind, SymbolKind::Var | SymbolKind::Let) && symbol.flags & crate::semantic::symbol_flags::DYNAMIC == 0 && self.initialized_before(sym, node)))
             }),
             _ => None,
         };

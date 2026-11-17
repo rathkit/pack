@@ -106,6 +106,85 @@ pub(crate) fn inline_returned(ast: &Ast, sem: &Semantic, decl: NodeId, ret: Node
     single.then_some(init)
 }
 
+/// Whether control never goes on past the statement `s`: it is a `return`, `throw`, `break` or `continue`, or a block that ends in one.
+pub(crate) fn statement_leaves(ast: &Ast, s: NodeId) -> bool {
+    match ast[s].kind {
+        NodeKind::Return(_) | NodeKind::Throw(_) | NodeKind::Break(_) | NodeKind::Continue(_) => true,
+        NodeKind::Block(list) => ast.list(list).last().is_some_and(|&last| statement_leaves(ast, last)),
+        _ => false,
+    }
+}
+
+/// Declarations `const name = 5;` (a number or a string) of a name that is read once, after the declaration, and never assigned: the declarator
+/// by the node that reads it. The reader is written as the literal and the declarator is left out.
+pub(crate) fn inlinable_constants(ast: &Ast, sem: &Semantic) -> crate::fxhash::FastMap<NodeId, NodeId> {
+    use crate::semantic::{ScopeKind, SymbolKind, scope_flags, symbol_flags};
+    let mut parent: Vec<Option<NodeId>> = vec![None; ast.node_count() + 1];
+    let mut order = Vec::new();
+    let mut stack = vec![ast.root];
+    while let Some(n) = stack.pop() {
+        order.push(n);
+        ast.for_each_child(n, |c| {
+            parent[c.index()] = Some(n);
+            stack.push(c);
+        });
+    }
+    let root = sem.root_scope();
+    let mut candidates: crate::fxhash::FastMap<crate::semantic::SymbolId, NodeId> = Default::default();
+    for &n in &order {
+        let NodeKind::VarDeclarator { target, init: Some(init) } = ast[n].kind else { continue };
+        if !matches!(ast[target].kind, NodeKind::BindingIdent(_)) || !matches!(ast[init].kind, NodeKind::Num(_) | NodeKind::Str(_)) || ast[init].has(flags::PARENTHESIZED) {
+            continue;
+        }
+        let Some(decl) = parent[n.index()] else { continue };
+        if !matches!(ast[decl].kind, NodeKind::VarDecl { .. }) {
+            continue;
+        }
+        let NodeKind::VarDecl { kind: decl_kind, .. } = ast[decl].kind else { continue };
+        // A `var` in a branch may not run before a read elsewhere (a dead `if`): only the top of a program or a function body is sure.
+        let sure = parent[decl.index()].is_some_and(|o| match ast[o].kind {
+            NodeKind::Program(_) => true,
+            NodeKind::Block(_) => decl_kind != crate::ast::VarKind::Var || parent[o.index()].is_some_and(|f| matches!(ast[f].kind, NodeKind::Function { .. })),
+            _ => false,
+        });
+        if !sure {
+            continue;
+        }
+        let Some(sym) = sem.symbol_of(target) else { continue };
+        let symbol = sem.symbol(sym);
+        let global = symbol.scope == root && sem.scope(root).kind != ScopeKind::Module;
+        if global || symbol.reads != 1 || symbol.writes != 1 || !matches!(symbol.kind, SymbolKind::Var | SymbolKind::Let | SymbolKind::Const) || symbol.flags & (symbol_flags::DYNAMIC | symbol_flags::EXPORTED) != 0 || sem.scope(symbol.scope).flags & scope_flags::HAS_EVAL != 0 {
+            continue;
+        }
+        candidates.insert(sym, n);
+    }
+    let mut out = crate::fxhash::FastMap::default();
+    if candidates.is_empty() {
+        return out;
+    }
+    for &n in &order {
+        if !matches!(ast[n].kind, NodeKind::Ident(_)) {
+            continue;
+        }
+        let Some(&declarator) = sem.symbol_of(n).and_then(|sym| candidates.get(&sym)) else { continue };
+        let NodeKind::VarDeclarator { init: Some(init), .. } = ast[declarator].kind else { continue };
+        if ast[n].span.start < ast[declarator].span.end || ast[n].has(flags::PARENTHESIZED) {
+            continue;
+        }
+        let ok = parent[n.index()].is_some_and(|p| match ast[p].kind {
+            NodeKind::ExportSpecifier { .. } | NodeKind::ImportSpecifier { .. } => false,
+            NodeKind::Property { .. } => !ast[p].has(flags::SHORTHAND),
+            // `5.x` is not a member of 5.
+            NodeKind::Member { object, .. } => object != n || !matches!(ast[init].kind, NodeKind::Num(_)),
+            _ => true,
+        });
+        if ok {
+            out.insert(declarator, n);
+        }
+    }
+    out
+}
+
 /// `a === "x"` (or `!==`) with a literal on the right: the left side and the literal. `a` is all that matters when the result is not used.
 pub(crate) fn strict_comparison_with_literal(ast: &Ast, test: NodeId) -> Option<(NodeId, NodeId)> {
     let NodeKind::Binary { op: crate::ast::BinOp::StrictEq | crate::ast::BinOp::StrictNe, left, right } = ast[test].kind else { return None };
@@ -119,7 +198,7 @@ fn self_precedence_ok(ast: &Ast, left: NodeId) -> bool {
 }
 
 pub(crate) fn plan(source: &str, ast: &Ast, sem: &Semantic, tokens: &[Token], barriers: &[u32], legacy: bool) -> Plan {
-    let mut ctx = Ctx { legacy, source, ast, sem, tokens, barriers, parent: vec![None; ast.node_count() + 1], actions: vec![Action::Keep; tokens.len()], locked: vec![false; tokens.len()], dead: Vec::new(), kept_semi: Vec::new(), done: Default::default(), visited: Default::default(), as_expr: Default::default(), inlined: Default::default(), seq_returns: Default::default(), closers: vec![false; tokens.len()], listed: Default::default(), joined_ifs: Default::default(), consumed: Default::default(), texts: Vec::new(), text_index: Default::default() };
+    let mut ctx = Ctx { legacy, source, ast, sem, tokens, barriers, parent: vec![None; ast.node_count() + 1], actions: vec![Action::Keep; tokens.len()], locked: vec![false; tokens.len()], dead: Vec::new(), kept_semi: Vec::new(), done: Default::default(), visited: Default::default(), as_expr: Default::default(), inlined: Default::default(), seq_returns: Default::default(), closers: vec![false; tokens.len()], listed: Default::default(), joined_ifs: Default::default(), consumed: Default::default(), removed: Default::default(), texts: Vec::new(), text_index: Default::default() };
     let mut order = Vec::new();
     let mut stack = vec![ast.root];
     while let Some(n) = stack.pop() {
@@ -129,6 +208,7 @@ pub(crate) fn plan(source: &str, ast: &Ast, sem: &Semantic, tokens: &[Token], ba
             stack.push(c);
         });
     }
+    ctx.inline_constants();
     for &n in &order {
         ctx.visit(n);
     }
@@ -209,11 +289,81 @@ struct Ctx<'a> {
     joined_ifs: crate::fxhash::FastSet<NodeId>,
     /// Statements that a rewrite wrote as part of the one before them (the `return` an `if` was joined with).
     consumed: crate::fxhash::FastSet<NodeId>,
+    /// Statements that are all declarations of names written at their one use (see `inlinable_constants`).
+    removed: crate::fxhash::FastSet<NodeId>,
     texts: Vec<String>,
     text_index: crate::fxhash::FastMap<String, u32>,
 }
 
 impl Ctx<'_> {
+    /// `const k = 5; f(k);` is `f(5);`: see `inlinable_constants`. The use is written as the literal and the declarator goes.
+    fn inline_constants(&mut self) {
+        let (ast, tokens) = (self.ast, self.tokens);
+        let found = inlinable_constants(ast, self.sem);
+        if found.is_empty() {
+            return;
+        }
+        let mut by_decl: crate::fxhash::FastMap<NodeId, Vec<NodeId>> = Default::default();
+        let mut ordered: Vec<(NodeId, NodeId)> = found.into_iter().collect();
+        ordered.sort_by_key(|&(d, _)| d.index());
+        let mut kept: Vec<(NodeId, NodeId)> = Vec::new();
+        for (declarator, usage) in ordered {
+            let NodeKind::VarDeclarator { init: Some(init), .. } = ast[declarator].kind else { continue };
+            let (lit, at) = (self.first_tok(ast[init].span.start), self.first_tok(ast[usage].span.start));
+            if !matches!(tokens[lit].kind, Kind::Number | Kind::String) || tokens[at].kind != Kind::Ident || self.last_tok(ast[usage].span.end) != at || self.locked[at] {
+                continue;
+            }
+            let text = self.text(lit).to_string();
+            let better = match tokens[lit].kind {
+                Kind::Number => shorten_number(&text),
+                // A template stays one (its line breaks cost one byte, not two).
+                _ if text.starts_with('`') => None,
+                _ => (if self.string_may_be_template(usage) { as_template(&text) } else { None }).or_else(|| requote(&text)),
+            }
+            .unwrap_or(text);
+            self.force_text(at, &better);
+            kept.push((declarator, usage));
+        }
+        // Group by statement (a declaration of several names) to leave out whole declarators with their commas.
+        let mut stack = vec![ast.root];
+        let mut statements: Vec<NodeId> = Vec::new();
+        let wanted: crate::fxhash::FastSet<NodeId> = kept.iter().map(|&(d, _)| d).collect();
+        while let Some(n) = stack.pop() {
+            if let NodeKind::VarDecl { decls, .. } = ast[n].kind {
+                if ast.list(decls).iter().any(|d| wanted.contains(d)) {
+                    statements.push(n);
+                }
+                continue;
+            }
+            ast.for_each_child(n, |c| stack.push(c));
+        }
+        let _ = &mut by_decl;
+        for stmt in statements {
+            let NodeKind::VarDecl { decls, .. } = ast[stmt].kind else { continue };
+            let list = ast.list(decls);
+            let gone: Vec<bool> = list.iter().map(|d| wanted.contains(d)).collect();
+            if gone.iter().all(|&g| g) {
+                let (from, to) = (self.first_tok(ast[stmt].span.start), self.last_tok(ast[stmt].span.end) + 1);
+                self.dead.push((from, to));
+                self.removed.insert(stmt);
+                continue;
+            }
+            for (k, &d) in list.iter().enumerate() {
+                if !gone[k] {
+                    continue;
+                }
+                let (start, end) = (self.first_tok(ast[d].span.start), self.last_tok(ast[d].span.end) + 1);
+                let kept_after = gone[k + 1..].iter().any(|&g| !g);
+                if kept_after {
+                    let next = self.first_tok(ast[list[k + 1]].span.start);
+                    self.dead.push((start, next));
+                } else if start > 0 && self.is(start - 1, Punct::Comma) {
+                    self.dead.push((start - 1, end));
+                }
+            }
+        }
+    }
+
     fn first_tok(&self, pos: u32) -> usize {
         self.tokens.partition_point(|t| t.start < pos)
     }
@@ -436,6 +586,39 @@ impl Ctx<'_> {
         self.inline_returned_values(items);
         self.merge_declarations(items);
         self.merge_returns(items);
+        // A block of one statement may lose its braces (a loop body, a branch), and the statements must then stay one.
+        let braces_stay = items.len() > 1 || matches!(self.ast[owner].kind, NodeKind::Program(_) | NodeKind::Case { .. }) || self.parent[owner.index()].is_some_and(|p| matches!(self.ast[p].kind, NodeKind::Function { .. }));
+        for &s in items {
+            if braces_stay && matches!(self.ast[s].kind, NodeKind::If { alt: Some(_), .. }) {
+                self.drop_else(s);
+            }
+        }
+    }
+
+    /// `if (a) return b; else c();` is `if (a) return b; c();` in a list of statements: when the first branch always leaves, the `else` is not
+    /// needed, and an `else if` that follows is then a statement of the list too.
+    fn drop_else(&mut self, s: NodeId) {
+        let ast = self.ast;
+        let mut cur = s;
+        loop {
+            self.visit_if(cur);
+            let NodeKind::If { test, cons, alt: Some(alt) } = ast[cur].kind else { return };
+            if self.as_expr.contains(&cur) || self.joined_ifs.contains(&cur) || self.done.contains(&cur) || self.consumed.contains(&cur) || self.constant(test).is_some() || !statement_leaves(ast, cons) {
+                return;
+            }
+            // What stands where the `else` was must be a statement that means the same in a list.
+            let declares = matches!(ast[alt].kind, NodeKind::Function { .. } | NodeKind::Class { .. } | NodeKind::VarDecl { .. } | NodeKind::Labeled { .. });
+            let else_tok = self.first_tok(ast[alt].span.start).wrapping_sub(1);
+            if declares || !self.kw(else_tok, Kw::Else) || self.actions[else_tok] != Action::Keep || self.locked[else_tok] {
+                return;
+            }
+            self.set(else_tok, Action::Skip);
+            if matches!(ast[alt].kind, NodeKind::If { .. }) {
+                cur = alt;
+            } else {
+                return;
+            }
+        }
     }
 
     /// The rewrites of one `if` statement, decided once (a body that is about to become a sequence decides the `if` statements in it first).
@@ -1607,7 +1790,7 @@ impl Ctx<'_> {
     fn inline_returned_values(&mut self, items: &[NodeId]) {
         let ast = self.ast;
         for pair in items.windows(2) {
-            if inline_returned(ast, self.sem, pair[0], pair[1]).is_none() {
+            if self.removed.contains(&pair[0]) || inline_returned(ast, self.sem, pair[0], pair[1]).is_none() {
                 continue;
             }
             let NodeKind::VarDecl { decls, .. } = ast[pair[0]].kind else { continue };
@@ -1646,8 +1829,8 @@ impl Ctx<'_> {
     fn merge_declarations(&mut self, items: &[NodeId]) {
         for pair in items.windows(2) {
             let (NodeKind::VarDecl { kind: mut k1, .. }, NodeKind::VarDecl { kind: mut k2, .. }) = (self.ast[pair[0]].kind, self.ast[pair[1]].kind) else { continue };
-            // A declaration that became a `return` joins nothing.
-            if self.inlined.contains(&pair[0]) || self.inlined.contains(&pair[1]) {
+            // A declaration that became a `return`, or that is not written, joins nothing.
+            if self.inlined.contains(&pair[0]) || self.inlined.contains(&pair[1]) || self.removed.contains(&pair[0]) || self.removed.contains(&pair[1]) {
                 continue;
             }
             // A `const` that is written `let` joins its neighbors.

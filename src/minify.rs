@@ -1292,7 +1292,7 @@ fn guard_pairs(a: &parser::Parsed, b: &parser::Parsed, test: NodeId, cons: NodeI
 }
 
 /// a statement list count as one declaration (the minifier joins them).
-fn children(parsed: &parser::Parsed, side: &Side, syntax: bool, original: bool, legacy: bool) -> Vec<Side> {
+fn children(parsed: &parser::Parsed, side: &Side, syntax: bool, original: bool, legacy: bool, inlined: &HashMap<NodeId, NodeId>) -> Vec<Side> {
     let ast = &parsed.ast;
     if let Some(list) = &side.declarators {
         return list.iter().map(|&c| Side::node(c)).collect();
@@ -1327,6 +1327,13 @@ fn children(parsed: &parser::Parsed, side: &Side, syntax: bool, original: bool, 
         if original && removable(parsed, c) {
             continue;
         }
+        // A declaration of names that are written where they are read: it is not there, and the statements around it are not joined.
+        if let (true, NodeKind::VarDecl { decls, .. }) = (original, ast[c].kind) {
+            if ast.list(decls).iter().all(|d| inlined.contains_key(d)) {
+                run_kind = None;
+                continue;
+            }
+        }
         // `let n = x; return n;` is `return x;`.
         if let (true, Some(&next)) = (original, kids.get(index)) {
             if let Some(value) = crate::compress::inline_returned(ast, &parsed.semantic, c, next) {
@@ -1339,7 +1346,7 @@ fn children(parsed: &parser::Parsed, side: &Side, syntax: bool, original: bool, 
         if let NodeKind::VarDecl { kind, decls } = ast[c].kind {
             // A `const` nobody assigns to is written `let`.
             let kind = if original && kind == crate::ast::VarKind::Const && crate::compress::const_is_let(ast, &parsed.semantic, c) { crate::ast::VarKind::Let } else { kind };
-            let own: Vec<NodeId> = ast.list(decls).to_vec();
+            let own: Vec<NodeId> = ast.list(decls).iter().copied().filter(|d| !(original && inlined.contains_key(d))).collect();
             if run_kind == Some(kind) {
                 out.last_mut().and_then(|s| s.declarators.as_mut()).expect("a run").extend(own);
             } else {
@@ -1367,6 +1374,9 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
     let syntax = options.syntax;
     let a = parser::parse(source, ParseOptions::new(true)).map_err(|e| format!("original: {e}"))?;
     let b = parser::parse(&minified, ParseOptions::new(true)).map_err(|e| format!("minified: {e}"))?;
+    let inlined: HashMap<NodeId, NodeId> = if syntax { crate::compress::inlinable_constants(&a.ast, &a.semantic).into_iter().collect() } else { HashMap::default() };
+    let inlined_uses: HashMap<NodeId, NodeId> = inlined.iter().map(|(&d, &u)| (u, d)).collect();
+    let no_inlined: HashMap<NodeId, NodeId> = HashMap::default();
     let mut forward: HashMap<SymbolId, SymbolId> = HashMap::default();
     let mut backward: HashMap<SymbolId, SymbolId> = HashMap::default();
     let mut private_forward: HashMap<&str, &str> = HashMap::default();
@@ -1402,6 +1412,15 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
         if syntax && sx.declarators.is_none() && sy.declarators.is_none() {
             let rewritten = match (&nx.kind, &ny.kind) {
                 (NodeKind::Bool(v), _) => truth(&b.ast, y) == Some(*v) && matches!(ny.kind, NodeKind::Unary { .. }),
+                // A name written as the literal it was declared with, where it is read.
+                (NodeKind::Ident(_), NodeKind::Num(_) | NodeKind::Str(_)) if inlined_uses.contains_key(&x) => {
+                    let NodeKind::VarDeclarator { init: Some(init), .. } = a.ast[inlined_uses[&x]].kind else { unreachable!() };
+                    match (a.ast[init].kind, ny.kind) {
+                        (NodeKind::Num(na), NodeKind::Num(nb)) => na.get().to_bits() == nb.get().to_bits(),
+                        (NodeKind::Str(sa), NodeKind::Str(sb)) => a.ast.atom(sa) == b.ast.atom(sb),
+                        _ => false,
+                    }
+                }
                 (NodeKind::Ident(_), _) => (is_undefined(&a, x) && is_void_zero(&b.ast, y)) || (is_global_infinity(&a, x) && is_one_over_zero(&b.ast, y)),
                 (NodeKind::Str(sa), NodeKind::PropName(pb)) => a.ast.atom(*sa) == b.ast.atom(*pb),
                 // The same text in the quote that needs the fewest escapes.
@@ -1715,8 +1734,8 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
             }
             _ => {}
         }
-        let mut ca = children(&a, &sx, syntax, true, options.legacy);
-        let mut cb = children(&b, &sy, syntax, false, options.legacy);
+        let mut ca = children(&a, &sx, syntax, true, options.legacy, &inlined);
+        let mut cb = children(&b, &sy, syntax, false, options.legacy, &no_inlined);
         if syntax {
             match (&nx.kind, &ny.kind) {
                 // `=> { return x; }` and `=> x`.
@@ -1825,6 +1844,18 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                         }
                     }
                 }
+                // `if (a) return b; else c();` as `if (a) return b; c();`: the `else` goes when the first branch leaves, and what was in it follows.
+                if in_list && item.declarators.is_none() {
+                    if let (NodeKind::If { test, cons, alt: Some(alt) }, NodeKind::If { test: t2, cons: c2, alt: None }) = (a.ast[item.id].kind, b.ast[other.id].kind) {
+                        if crate::compress::statement_leaves(&a.ast, cons) {
+                            aligned.push((Side::node(test), Side::node(t2)));
+                            aligned.push((Side::node(cons), Side::node(c2)));
+                            ca.insert(i, Side::node(alt));
+                            j += 1;
+                            continue;
+                        }
+                    }
+                }
                 aligned.push((item, other.clone()));
                 j += 1;
             }
@@ -1896,6 +1927,32 @@ mod tests {
         let options = Options { whitespace: true, syntax: true, ..Options::default() };
         verify(source, &options).unwrap_or_else(|e| panic!("{e}\n{source}"));
         minify(source, &options).unwrap()
+    }
+
+    #[test]
+    fn an_else_after_a_branch_that_leaves_goes() {
+        assert_eq!(syntax("function f(a) { if (a) { g(); return 1; } else { h(); } k(); }"), "function f(a){if(a)return g(),1;h();k()}");
+        assert_eq!(syntax("function f(a, b) { g(); if (a) return 1; else if (b) throw 2; else return h(a, b); }"), "function f(a,b){g();if(a)return 1;if(b)throw 2;return h(a,b)}");
+        assert_eq!(syntax("function f(a) {\n if (a) return g()\n else k = 2\n m()\n}"), "function f(a){if(a)return g();k=2;m()}");
+        // A branch that can fall through, a declaration, or a body that is one statement of a loop keeps its `else`.
+        let kept = syntax("function f(a, c) { if (a) g(); else return 1; for (;;) { if (c) break; else h(); } }");
+        assert!(kept.contains("else"), "{kept}");
+        assert!(syntax("function f(a, b) { if (a) if (b) return 1; else return 2; }").contains("else"));
+        assert!(syntax("function f(a) { for (;;) { if (a) return 1; else g(); } }").contains("else"));
+    }
+
+    #[test]
+    fn a_constant_read_once_is_written_where_it_is_read() {
+        assert_eq!(syntax("function f(x) { const k = 864e5; return x / k; } f(1);"), "function f(x){return x/864e5}f(1)");
+        assert_eq!(syntax("function f(x) { const a = 'one', b = x, c = 'two'; return [a, b, c]; } f(1);"), "function f(x){let b=x;return['one',b,'two']}f(1)");
+        // Read twice, assigned, read before the declaration, in a shorthand property, or by a member of a number: not touched.
+        assert!(syntax("function f(x) { const k = 5; return k + k + x; } f(1);").contains("let"));
+        assert!(syntax("function f(x) { let k = 5; k = x; return k; } f(1);").contains("let"));
+        assert!(syntax("function f(x) { const k = 5; return { k }; } f(1);").contains("let"));
+        assert!(syntax("function f(x) { const k = 5; return k.toFixed(x); } f(1);").contains("let"));
+        assert!(syntax("function f(x) { const g = () => k; const k = 5; return g(); } f(1);").contains("let"));
+        // Several declarations of one statement, some of them gone.
+        assert_eq!(syntax("function f(x) { var a = 1, b = x, c = 2; return a + b + c; } f(1);"), "function f(x){var b=x;return 1+b+2}f(1)");
     }
 
     #[test]
@@ -2002,7 +2059,7 @@ mod tests {
         // The `else if` goes on as the conditional in a branch; a return of nothing keeps its own `if`.
         assert_eq!(
             syntax("function f(a, b, c) { if (a) { return void 0; } else if (b) { return 1; } return c; }"),
-            "function f(a,b,c){if(a)return;else return b?1:c}"
+            "function f(a,b,c){if(a)return;return b?1:c}"
         );
         assert_eq!(
             syntax("function f(a, b, c, d) { if (a) { return 0; } if (b) { return 1; } else { return c; } }"),
@@ -2043,7 +2100,7 @@ mod tests {
     fn a_name_that_is_only_returned_is_not_declared() {
         assert_eq!(syntax("function f(a) { let n = a.map(x => x + 1); return n; }"), "function f(a){return a.map(x=>x+1)}");
         assert_eq!(syntax("function f(a) { const n = a(); return n; }"), "function f(a){return a()}");
-        assert_eq!(syntax("function f(a) { var r = 1; var n = a(r); return n; }"), "function f(a){var r=1;return a(r)}");
+        assert_eq!(syntax("function f(a) { var r = g(); var n = a(r); return n; }"), "function f(a){var r=g();return a(r)}");
         // Read twice, written again, used before, a function or class (which would lose its name), or something else in between: kept.
         assert_eq!(syntax("function f(a) { let n = a(); return n || n; }"), "function f(a){let n=a();return n||n}");
         assert_eq!(syntax("function f(a) { let n = a(); n = 2; return n; }"), "function f(a){let n=a();n=2;return n}");
@@ -2126,7 +2183,7 @@ mod tests {
         assert_eq!(syntax("if (a) { b() } else { c() }"), "a?b():c()");
         assert_eq!(syntax("if (a) { if (b) c() } else d()"), "if(a){b&&c()}else d()");
         assert_eq!(syntax("if (a) { for (;;) { if (b) c() } } else d()"), "if(a){for(;;)b&&c()}else d()");
-        assert_eq!(syntax("if (a) { let x = 1; f(x) }"), "if(a){let x=1;f(x)}");
+        assert_eq!(syntax("if (a) { let x = h(); f(x) }"), "if(a){let x=h();f(x)}");
         assert_eq!(syntax("if (a) { let x = 1 }"), "if(a){let x=1}");
         assert_eq!(syntax("for (;;) { x() }\ny()"), "for(;;)x();y()");
         assert_eq!(syntax("do { x() } while (y)"), "do x();while(y)");
@@ -2176,7 +2233,7 @@ mod tests {
         assert_eq!(syntax("function f(a, b) { for (const x of a) { if (!x) continue; b(x); b(x + 1); } }"), "function f(a,b){for(let x of a)x&&(b(x),b(x+1))}");
         assert_eq!(syntax("function f(a, b) { for (const x of a) { g(x); if (!x) continue; b(x); } }"), "function f(a,b){for(let x of a){g(x);x&&b(x)}}");
         // Not when something other than expressions follows, with a value, with a label, or where `return` would not be the end.
-        assert_eq!(syntax("function f(a, b) { if (a) return; let c = 1; b(c); }"), "function f(a,b){if(a)return;let c=1;b(c)}");
+        assert_eq!(syntax("function f(a, b) { if (a) return; let c = g(); b(c); }"), "function f(a,b){if(a)return;let c=g();b(c)}");
         assert_eq!(syntax("function f(a, b) { if (a) return 1; b(); }"), "function f(a,b){if(a)return 1;b()}");
         assert_eq!(syntax("function f(a, b) { for (const x of a) { if (x) return; b(x); } }"), "function f(a,b){for(let x of a){if(x)return;b(x)}}");
         assert_eq!(syntax("function f(a, b) { l: for (const x of a) { if (x) continue l; b(x); } }"), "function f(a,b){l:for(let x of a){if(x)continue l;b(x)}}");
