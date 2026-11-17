@@ -36,7 +36,7 @@ const ROLLUP_BUILT_IN: &[(&str, &str)] = &[
     ("@rollup/plugin-typescript", "TypeScript is read as it is"),
 ];
 
-/// Finds the tools of the project in `dir`, in the order esbuild, Vite, webpack, Rollup.
+/// Finds the tools of the project in `dir`, in the order esbuild, Vite, webpack, Rollup, rspack.
 pub fn detect(dir: &Path) -> Vec<Finding> {
     let package = std::fs::read_to_string(dir.join("package.json")).ok().and_then(|t| Json::parse(&t).ok());
     let mut found = Vec::new();
@@ -44,6 +44,7 @@ pub fn detect(dir: &Path) -> Vec<Finding> {
     found.extend(vite(dir, package.as_ref()));
     found.extend(webpack(dir, package.as_ref()));
     found.extend(rollup(dir, package.as_ref()));
+    found.extend(rspack(dir, package.as_ref()));
     found
 }
 
@@ -192,9 +193,14 @@ fn rewrite_esbuild_commands(script: &str) -> (String, bool) {
 }
 
 fn vite(dir: &Path, package: Option<&Json>) -> Option<Finding> {
-    let config = config_file(dir, "vite.config");
+    let mut config = config_file(dir, "vite.config");
+    // A vite.config that only configures Vitest (`from 'vitest/config'`) is a test setup, not a build.
+    if config.as_ref().and_then(|c| std::fs::read_to_string(dir.join(c)).ok()).is_some_and(|t| imports_of(&t).iter().any(|m| m == "vitest/config") && !t.contains("build:") && !t.contains("plugins:")) {
+        config = None;
+    }
     let mut evidence: Vec<String> = config.iter().cloned().collect();
-    if has_dependency(package, "vite") {
+    // `vite` in the dependencies alone (a library that tests with Vitest) is a build only when there is a page to build.
+    if has_dependency(package, "vite") && (config.is_some() || dir.join("index.html").is_file()) {
         evidence.push("dependency vite".to_string());
     }
     if evidence.is_empty() {
@@ -338,16 +344,29 @@ fn rollup(dir: &Path, package: Option<&Json>) -> Option<Finding> {
     let text = config.as_ref().and_then(|c| std::fs::read_to_string(dir.join(c)).ok()).unwrap_or_default();
     let mut finding = Finding { tool: "rollup", evidence, commands: Vec::new(), notes: Vec::new() };
     let mut build = "rkp bundle".to_string();
+    let mut no_input = false;
+    let mut input_name = None;
     match literal_after(&text, "input") {
-        Some(input) => build.push_str(&format!(" {}", input.trim_start_matches("./"))),
-        None => finding.notes.push("name the entries on the command line (the config's input is not a plain string)".to_string()),
+        Some(input) => {
+            input_name = Some(input.trim_start_matches("./").to_string());
+            build.push_str(&format!(" {}", input.trim_start_matches("./")));
+        }
+        None => {
+            finding.notes.push("the config's input is not a plain string (or there is no config): no command is written; run `rkp bundle ENTRY... --outfile FILE` with the entries of the config".to_string());
+            no_input = true;
+        }
     }
     // The settings of `output: { ... }`, and not the `name` or `format` of a plugin written beside it.
     let output = text.find("output").map(|i| &text[i..text[i..].find('}').map_or(text.len(), |e| i + e)]).unwrap_or("");
     match (literal_after(output, "dir"), literal_after(output, "file")) {
         (_, Some(file)) => build.push_str(&format!(" --outfile {file}")),
         (Some(dir), None) => build.push_str(&format!(" --outdir {dir} --splitting")),
-        _ => {}
+        _ => {
+            // A config that builds the file name or the output list in code: without an output `rkp bundle` prints the bundle and writes nothing.
+            let stem = input_name.as_deref().and_then(|i| i.rsplit('/').next()).map(|n| n.rsplit_once('.').map_or(n, |(a, _)| a).to_string()).unwrap_or_else(|| "index".to_string());
+            build.push_str(&format!(" --outfile dist/{stem}.js"));
+            finding.notes.push("the output file is not a plain string in the config: --outfile dist/... is a stand-in, set the file you publish".to_string());
+        }
     }
     match literal_after(output, "format").as_deref() {
         Some("cjs" | "commonjs") => build.push_str(" --format=cjs"),
@@ -384,7 +403,36 @@ fn rollup(dir: &Path, package: Option<&Json>) -> Option<Finding> {
         finding.notes.push("output.manualChunks is not supported".to_string());
     }
     finding.notes.push("add --platform=browser for a page (it makes process.env.NODE_ENV \"production\"), and the values given to @rollup/plugin-replace as --define:NAME=VALUE (docs/migrate/rollup.md)".to_string());
+    if !no_input {
+        finding.commands.push(("build:rkp".to_string(), build));
+    }
+    Some(finding)
+}
+
+/// rspack: its config is webpack's, so the command is webpack's with the output folder.
+fn rspack(dir: &Path, package: Option<&Json>) -> Option<Finding> {
+    let config = config_file(dir, "rspack.config");
+    let mut evidence: Vec<String> = config.iter().cloned().collect();
+    if has_dependency(package, "@rspack/core") || has_dependency(package, "@rspack/cli") {
+        evidence.push("dependency @rspack/core".to_string());
+    }
+    if evidence.is_empty() {
+        return None;
+    }
+    let text = config.as_ref().and_then(|c| std::fs::read_to_string(dir.join(c)).ok()).unwrap_or_default();
+    let mut finding = Finding { tool: "rspack", evidence, commands: Vec::new(), notes: Vec::new() };
+    let entry = literal_after(&text, "main").or_else(|| literal_after(&text, "entry")).map(|e| e.trim_start_matches("./").to_string());
+    let mut build = "rkp bundle".to_string();
+    match entry.or_else(|| dir.join("src/index.js").is_file().then(|| "src/index.js".to_string())) {
+        Some(e) => build.push_str(&format!(" {e}")),
+        None => finding.notes.push("the entry is not a plain string in the config: name it on the command line".to_string()),
+    }
+    if let Some(c) = &config {
+        build.push_str(&format!(" --config {c}"));
+    }
+    build.push_str(" --outdir dist");
     finding.commands.push(("build:rkp".to_string(), build));
+    finding.notes.push("rspack's config is read like webpack's (docs/migrate/webpack.md); mode and output are on the command above".to_string());
     Some(finding)
 }
 
@@ -392,7 +440,7 @@ fn rollup(dir: &Path, package: Option<&Json>) -> Option<Finding> {
 pub fn report(dir: &Path, found: &[Finding]) -> String {
     let mut out = String::new();
     if found.is_empty() {
-        out.push_str(&format!("{}: no esbuild, Vite, webpack or Rollup found (no config file, dependency or script)\n", dir.display()));
+        out.push_str(&format!("{}: no esbuild, Vite, webpack, Rollup or rspack found (no config file, dependency or script)\n", dir.display()));
         return out;
     }
     for f in found {
@@ -403,7 +451,7 @@ pub fn report(dir: &Path, found: &[Finding]) -> String {
         for note in &f.notes {
             out.push_str(&format!("  note: {note}\n"));
         }
-        out.push_str(&format!("  guide: docs/migrate/{}.md\n", f.tool));
+        out.push_str(&format!("  guide: docs/migrate/{}.md\n", if f.tool == "rspack" { "webpack" } else { f.tool }));
     }
     out
 }

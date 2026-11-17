@@ -154,6 +154,47 @@ fn a_project_with_none_of_them_says_so() {
     std::fs::create_dir_all(&dir).unwrap();
     let out = rkp(&dir, &["migrate"]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&out.stdout).contains("no esbuild, Vite, webpack or Rollup found"));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("no esbuild, Vite, webpack, Rollup or rspack found"));
     assert_eq!(rkp(&dir, &["migrate", "--bogus"]).status.code(), Some(2));
+}
+
+#[test]
+fn vitest_only_and_inputless_projects_get_no_build_command() {
+    let base = std::env::temp_dir().join(format!("rkp-migrate-corpus-{}", std::process::id()));
+    // vite as a dependency of the test setup, no page, no config: not a Vite build.
+    let lib = base.join("lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::write(lib.join("package.json"), "{\"devDependencies\":{\"vite\":\"1\"}}").unwrap();
+    assert_eq!(rkp(&lib, &["migrate"]).status.code(), Some(1));
+    // vite.config that only configures Vitest.
+    std::fs::write(lib.join("vite.config.ts"), "import { defineConfig } from \"vitest/config\";\nexport default defineConfig({ test: {} });\n").unwrap();
+    assert_eq!(rkp(&lib, &["migrate"]).status.code(), Some(1));
+    // rollup without a plain input: no command that would print the usage text.
+    let roll = base.join("roll");
+    std::fs::create_dir_all(&roll).unwrap();
+    std::fs::write(roll.join("package.json"), "{\"devDependencies\":{\"rollup\":\"1\"}}").unwrap();
+    let out = stdout(&rkp(&roll, &["migrate"]));
+    assert!(out.starts_with("rollup (") && !out.contains("build:rkp"), "{out}");
+}
+
+#[test]
+fn rspack_is_found() {
+    let dir = std::env::temp_dir().join(format!("rkp-migrate-rspack-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("package.json"), "{\"scripts\":{}}").unwrap();
+    std::fs::write(dir.join("rspack.config.js"), "export default { entry: { main: './index.js' } };\n").unwrap();
+    let out = stdout(&rkp(&dir, &["migrate"]));
+    assert!(out.starts_with("rspack (rspack.config.js)"), "{out}");
+    assert!(out.contains("build:rkp: rkp bundle index.js --config rspack.config.js --outdir dist"), "{out}");
+}
+
+#[test]
+fn rollup_with_the_output_built_in_code_gets_an_outfile() {
+    let dir = std::env::temp_dir().join(format!("rkp-migrate-rollup-code-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("package.json"), "{\"scripts\":{}}").unwrap();
+    std::fs::write(dir.join("rollup.config.js"), "const output = (file) => ({ input: 'index.js', output: { name: 'X', file } });\nexport default [output('x.js')];\n").unwrap();
+    std::fs::write(dir.join("index.js"), "export const x = 1;\n").unwrap();
+    let out = stdout(&rkp(&dir, &["migrate"]));
+    assert!(out.contains("build:rkp: rkp bundle index.js --global-name=X --outfile dist/index.js") || out.contains("--outfile dist/index.js"), "{out}");
 }
