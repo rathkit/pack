@@ -1,5 +1,5 @@
 //! The persistent cache through the command line: a warm build writes what a cold one writes, a damaged or stale entry is ignored,
-//! and `RATHKIT_CACHE=off` leaves the folder alone.
+//! and the cache is used only when `RATHKIT_CACHE=on` (`off` and no setting leave the folder alone).
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -13,11 +13,24 @@ fn scratch(name: &str) -> PathBuf {
 fn build(dir: &Path, cache: &Path, extra: &[&str], envs: &[(&str, &str)]) -> Vec<u8> {
     let out = dir.join("out.js");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rkp"));
-    cmd.args(["bundle", dir.join("main.js").to_str().unwrap(), "--outfile", out.to_str().unwrap(), "--no-config", "--minify"]).args(extra).env("RATHKIT_CACHE_DIR", cache).env_remove("RATHKIT_CACHE");
+    cmd.args(["bundle", dir.join("main.js").to_str().unwrap(), "--outfile", out.to_str().unwrap(), "--no-config", "--minify"]).args(extra).env("RATHKIT_CACHE_DIR", cache).env("RATHKIT_CACHE", "on");
     for (k, v) in envs {
         cmd.env(k, v);
     }
     let r = cmd.output().unwrap();
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    std::fs::read(&out).unwrap()
+}
+
+/// A build with the cache folder named but no RATHKIT_CACHE setting at all.
+fn build_unset(dir: &Path, cache: &Path) -> Vec<u8> {
+    let out = dir.join("unset.js");
+    let r = Command::new(env!("CARGO_BIN_EXE_rkp"))
+        .args(["bundle", dir.join("main.js").to_str().unwrap(), "--outfile", out.to_str().unwrap(), "--no-config", "--minify"])
+        .env("RATHKIT_CACHE_DIR", cache)
+        .env_remove("RATHKIT_CACHE")
+        .output()
+        .unwrap();
     assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
     std::fs::read(&out).unwrap()
 }
@@ -36,8 +49,11 @@ fn cold_warm_damaged_and_off() {
     }
     std::fs::write(dir.join("main.js"), &text).unwrap();
 
+    let unset = build_unset(&dir, &cache);
+    assert!(entries(&cache).is_empty(), "with no setting the cache writes nothing");
     let off = build(&dir, &cache, &[], &[("RATHKIT_CACHE", "off")]);
     assert!(entries(&cache).is_empty(), "the off switch writes nothing");
+    assert_eq!(unset, off);
     let cold = build(&dir, &cache, &[], &[]);
     assert_eq!(cold, off);
     assert_eq!(entries(&cache).len(), 1);

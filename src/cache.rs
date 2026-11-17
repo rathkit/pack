@@ -7,7 +7,8 @@
 //! ignored and written again; nothing here can fail a build.
 //!
 //! Where: `RATHKIT_CACHE_DIR`, else `$XDG_CACHE_HOME/rathkit/minify`, else `~/.cache/rathkit/minify` (`%LOCALAPPDATA%\rathkit\minify`
-//! on Windows). Off: `RATHKIT_CACHE=off` (or `0`, `false`, `no`). The folder is kept under a size limit, oldest entries first.
+//! on Windows). It is off unless asked, because it writes outside the project: `RATHKIT_CACHE=on` (or `1`, `true`, `yes`) turns it on.
+//! The folder is kept under a size limit, oldest entries first.
 
 use crate::minify::{Anchor, Layout, Options};
 use std::path::PathBuf;
@@ -19,7 +20,7 @@ const LIMIT_BYTES: u64 = 512 << 20;
 const MIN_SOURCE: usize = 16 * 1024;
 
 fn enabled() -> bool {
-    !matches!(std::env::var("RATHKIT_CACHE").as_deref(), Ok("off" | "0" | "false" | "no"))
+    matches!(std::env::var("RATHKIT_CACHE").as_deref(), Ok("on" | "1" | "true" | "yes"))
 }
 
 /// The cache folder, if there is one to use.
