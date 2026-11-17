@@ -13,6 +13,9 @@ The commands of the guides are run by `node tools/run-migrate.mjs`, on every cha
 when the guides were written: esbuild 0.28.2, Vite 8.3.5, webpack 5.112.2, Rollup 4.67.5, `rkp` 0.3.0-beta.0. The list of every esbuild
 option and what `rkp` does with it is [docs/esbuild-conformance.md](../esbuild-conformance.md).
 
+`rkp migrate` looks at a project, says which of these tools it uses and prints the commands of the guide for it; `rkp migrate --write`
+adds them to the scripts of package.json under new names (`build:rkp`) and leaves the existing scripts alone.
+
 Things that are the same in every guide:
 
 - `rkp bundle ENTRY... [options]` writes one file (`--outfile`) or, with `--splitting`, a folder (`--outdir`). With neither, the output

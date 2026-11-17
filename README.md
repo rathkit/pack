@@ -198,6 +198,12 @@ rkp bundle src/main.ts --outfile dist/app.mjs
 - `--watch` builds again when a file the build read changes (and plugins' `addWatchFile` files): plugins hear it. On Linux it hears of changes through file events (inotify); elsewhere it polls the files every 80 ms.
   through `watchChange`, a changed config starts everything again, and Ctrl-C ends it cleanly. Modules whose files
   did not change are kept between builds (no reading, parsing or scanning again; without plugins).
+- `rkp migrate [DIR] [--write]` says which of esbuild, Vite, webpack and Rollup a project uses (a config file, a dependency, a
+  package.json script that runs `esbuild`, or a file that imports it) and prints the `rkp` commands that do the same build, with notes
+  on what does not carry over, as in [docs/migrate/](docs/migrate/README.md). The config files are read as text for the plain strings the
+  commands need (`outDir`, `entry`, `output.file`, `format`): what is not a plain string is left to `--config`, which reads the file
+  for real. `--write` adds the commands to the `scripts` of package.json as `build:rkp` and `dev:rkp` (`build:rkp-vite`, ... when there
+  are several tools; an esbuild script `x` becomes `x:rkp`), and never changes a script that is there.
 - `rkp serve ENTRY... [--port N] [--host H]` is a development server with the same options as `bundle`.
   The build stays in memory (with source maps) and is served over HTTP, together with your `index.html` (its entry
   `<script src>` is pointed at the built file; the style sheets and the reload client are added), `public/` and
@@ -375,6 +381,7 @@ rkp serve ENTRY... [--port N] [--host H] [the options above] [--define KEY=VALUE
     [--jsx automatic|classic] [--jsx-import-source S] [--jsx-factory F] [--jsx-fragment F]
     [--experimental-decorators] [--decorator-metadata] [--strict-null-checks] [--original-paths] [--platform-browser] [--mode M] [--env-dir D] [--env-prefix P]... [--no-env-files]
 rkp analyze META.json [--outfile REPORT.html]
+rkp migrate [DIR] [--write]
 ```
 
 `tsconfig.json` is found automatically and supplies `paths`, `baseUrl`, `jsx`,

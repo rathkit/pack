@@ -1,0 +1,555 @@
+//! `rkp migrate [DIR] [--write]`: which of esbuild, Vite, webpack and Rollup a project uses, and the `rkp` commands that do the same build.
+//!
+//! Configuration files are JavaScript, which is not run here: the literals the commands need (`outDir: 'build'`, `entry: './src/a.js'`,
+//! `format: 'cjs'`) are read from the text of the file, and what is not a literal is left to `--config`, which reads the file for real
+//! (docs/migrate/ says which parts of each config `rkp` reads itself). The commands are the ones of the guides in docs/migrate/.
+
+use crate::json::Json;
+use std::path::Path;
+
+/// One tool found in the project and what replaces its commands.
+#[derive(Debug, PartialEq)]
+pub struct Finding {
+    pub tool: &'static str,
+    /// Where it was seen: the config file, a package.json script or a dependency.
+    pub evidence: Vec<String>,
+    /// `(script name, command)`: the script to add to package.json and the `rkp` command it runs.
+    pub commands: Vec<(String, String)>,
+    pub notes: Vec<String>,
+}
+
+const CONFIG_EXTENSIONS: &[&str] = &["js", "mjs", "cjs", "ts", "mts", "cts"];
+/// esbuild options that `rkp bundle` stops with an error on (docs/esbuild-conformance.md: the rows that are gaps).
+const ESBUILD_GAPS: &[&str] = &[
+    "--outbase", "--supported:", "--mangle-props", "--reserve-props", "--mangle-quoted", "--mangle-cache", "--line-limit", "--charset=ascii", "--sourcemap=both", "--source-root",
+    "--sourcefile", "--drop-labels", "--ignore-annotations", "--jsx=preserve", "--jsx-side-effects", "--analyze", "--abs-paths", "--log-override", "--servedir", "--serve=",
+    "--serve-fallback", "--certfile", "--keyfile", "--stdin", "--watch=forever",
+];
+/// Rollup plugins whose work `rkp` does itself, and the option that stands for it.
+const ROLLUP_BUILT_IN: &[(&str, &str)] = &[
+    ("@rollup/plugin-node-resolve", "resolving is built in"),
+    ("@rollup/plugin-commonjs", "CommonJS is read as it is; the plugin does not run here"),
+    ("@rollup/plugin-replace", "--define:NAME=VALUE"),
+    ("@rollup/plugin-terser", "--minify"),
+    ("@rollup/plugin-json", "JSON is read as it is"),
+    ("@rollup/plugin-alias", "--alias:NAME=PATH"),
+    ("@rollup/plugin-typescript", "TypeScript is read as it is"),
+];
+
+/// Finds the tools of the project in `dir`, in the order esbuild, Vite, webpack, Rollup.
+pub fn detect(dir: &Path) -> Vec<Finding> {
+    let package = std::fs::read_to_string(dir.join("package.json")).ok().and_then(|t| Json::parse(&t).ok());
+    let mut found = Vec::new();
+    found.extend(esbuild(dir, package.as_ref()));
+    found.extend(vite(dir, package.as_ref()));
+    found.extend(webpack(dir, package.as_ref()));
+    found.extend(rollup(dir, package.as_ref()));
+    found
+}
+
+fn has_dependency(package: Option<&Json>, name: &str) -> bool {
+    package.is_some_and(|p| ["dependencies", "devDependencies"].iter().any(|k| p.get(k).and_then(|d| d.get(name)).is_some()))
+}
+
+fn config_file(dir: &Path, stem: &str) -> Option<String> {
+    CONFIG_EXTENSIONS.iter().map(|e| format!("{stem}.{e}")).find(|f| dir.join(f).is_file())
+}
+
+/// The first string written after `key:` in the text (`'dist'`, `"dist"` or a template without `${`), where `key` is a whole word.
+pub fn literal_after(text: &str, key: &str) -> Option<String> {
+    let mut from = 0;
+    while let Some(at) = text[from..].find(key) {
+        let start = from + at;
+        let end = start + key.len();
+        from = end;
+        let word_before = text[..start].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '$' || c == '.');
+        if word_before {
+            continue;
+        }
+        let rest = text[end..].trim_start();
+        let Some(rest) = rest.strip_prefix(':').or_else(|| rest.strip_prefix('=')) else { continue };
+        let rest = rest.trim_start();
+        let Some(quote) = rest.chars().next().filter(|c| matches!(c, '\'' | '"' | '`')) else { continue };
+        let body = &rest[1..];
+        let close = body.find(quote)?;
+        let value = &body[..close];
+        if value.contains("${") {
+            continue;
+        }
+        return Some(value.to_string());
+    }
+    None
+}
+
+/// Whether `key: true` is written in the text.
+fn flag_after(text: &str, key: &str) -> bool {
+    let mut from = 0;
+    while let Some(at) = text[from..].find(key) {
+        let start = from + at;
+        from = start + key.len();
+        if text[..start].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            continue;
+        }
+        if let Some(rest) = text[from..].trim_start().strip_prefix(':') {
+            if rest.trim_start().starts_with("true") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// The module names a config file imports (`from 'x'`, `require('x')`).
+fn imports_of(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for marker in ["from '", "from \"", "require('", "require(\""] {
+        let quote = marker.chars().last().unwrap();
+        let mut from = 0;
+        while let Some(at) = text[from..].find(marker) {
+            let begin = from + at + marker.len();
+            from = begin;
+            if let Some(close) = text[begin..].find(quote) {
+                out.push(text[begin..begin + close].to_string());
+            }
+        }
+    }
+    out
+}
+
+fn esbuild(dir: &Path, package: Option<&Json>) -> Option<Finding> {
+    let mut finding = Finding { tool: "esbuild", evidence: Vec::new(), commands: Vec::new(), notes: Vec::new() };
+    if has_dependency(package, "esbuild") {
+        finding.evidence.push("dependency esbuild".to_string());
+    }
+    // package.json scripts that run the command line: `esbuild ...` at the start of a command.
+    for (name, value) in package.and_then(|p| p.get("scripts")).and_then(Json::as_object).unwrap_or(&[]) {
+        let Some(script) = value.as_str() else { continue };
+        let (rewritten, changed) = rewrite_esbuild_commands(script);
+        if !changed {
+            continue;
+        }
+        finding.evidence.push(format!("script {name}"));
+        finding.commands.push((format!("{name}:rkp"), rewritten));
+        for gap in ESBUILD_GAPS.iter().filter(|g| script.contains(*g)) {
+            finding.notes.push(format!("script {name}: {} is not supported by rkp (see docs/esbuild-conformance.md)", gap.trim_end_matches([':', '='])));
+        }
+        if !script.contains("--bundle") {
+            finding.notes.push(format!("script {name}: esbuild without --bundle only transforms files; rkp always bundles"));
+        }
+    }
+    // Files that call the JavaScript API.
+    let mut files: Vec<_> = std::fs::read_dir(dir).into_iter().flatten().flatten().filter_map(|e| e.file_name().into_string().ok()).filter(|n| CONFIG_EXTENSIONS.iter().any(|x| n.ends_with(&format!(".{x}")))).collect();
+    files.sort();
+    for file in files {
+        let Ok(text) = std::fs::read_to_string(dir.join(&file)) else { continue };
+        if !imports_of(&text).iter().any(|m| m == "esbuild") {
+            continue;
+        }
+        finding.evidence.push(format!("API in {file}"));
+        finding.notes.push(format!("{file}: import from '@rathkit/pack' in place of 'esbuild'; the options keep their names"));
+        for (call, what) in [("context(", "context"), ("transform(", "transform"), ("transformSync(", "transformSync"), ("buildSync(", "buildSync"), ("write: false", "write: false"), ("stdin:", "stdin"), ("mangleProps", "mangleProps")] {
+            if text.contains(call) {
+                finding.notes.push(format!("{file}: {what} is not in @rathkit/pack (see docs/esbuild-conformance.md)"));
+            }
+        }
+    }
+    (!finding.evidence.is_empty()).then_some(finding)
+}
+
+/// A script with each command that starts with `esbuild` made `rkp bundle`, and whether one was.
+fn rewrite_esbuild_commands(script: &str) -> (String, bool) {
+    let mut out = String::new();
+    let mut changed = false;
+    let mut command_start = true;
+    let mut rest = script;
+    while !rest.is_empty() {
+        if command_start {
+            let trimmed = rest.trim_start();
+            out.push_str(&rest[..rest.len() - trimmed.len()]);
+            rest = trimmed;
+            if let Some(after) = rest.strip_prefix("esbuild").filter(|a| a.starts_with(' ') || a.is_empty()) {
+                out.push_str("rkp bundle");
+                rest = after;
+                changed = true;
+            }
+            command_start = false;
+            continue;
+        }
+        let separator = ["&&", "||", ";", "|"].iter().filter_map(|s| rest.find(s).map(|i| (i, s.len()))).min();
+        match separator {
+            Some((i, len)) => {
+                out.push_str(&rest[..i + len]);
+                rest = &rest[i + len..];
+                command_start = true;
+            }
+            None => {
+                out.push_str(rest);
+                break;
+            }
+        }
+    }
+    (out, changed)
+}
+
+fn vite(dir: &Path, package: Option<&Json>) -> Option<Finding> {
+    let config = config_file(dir, "vite.config");
+    let mut evidence: Vec<String> = config.iter().cloned().collect();
+    if has_dependency(package, "vite") {
+        evidence.push("dependency vite".to_string());
+    }
+    if evidence.is_empty() {
+        return None;
+    }
+    let text = config.as_ref().and_then(|c| std::fs::read_to_string(dir.join(c)).ok()).unwrap_or_default();
+    let mut finding = Finding { tool: "vite", evidence, commands: Vec::new(), notes: Vec::new() };
+    let page = std::fs::read_to_string(dir.join("index.html")).ok();
+    let mut build = "rkp bundle index.html".to_string();
+    if let Some(c) = &config {
+        build.push_str(&format!(" --config {c}"));
+    }
+    build.push_str(&format!(" --outdir {}", literal_after(&text, "outDir").unwrap_or_else(|| "dist".to_string())));
+    build.push_str(" --minify");
+    if flag_after(&text, "sourcemap") {
+        build.push_str(" --sourcemap");
+    }
+    if let Some(base) = literal_after(&text, "base").filter(|b| b != "/") {
+        build.push_str(&format!(" --public-path={base}"));
+    }
+    if page.is_none() {
+        finding.notes.push("there is no index.html here: give the page (or the script) that Vite was given".to_string());
+    }
+    finding.commands.push(("build:rkp".to_string(), build));
+    // `rkp serve` takes the script, and serves index.html with it pointed at the build.
+    if let Some(script) = page.as_deref().and_then(first_module_script) {
+        let mut serve = format!("rkp serve {script}");
+        if let Some(c) = &config {
+            serve.push_str(&format!(" --config {c}"));
+        }
+        serve.push_str(" --hmr");
+        finding.commands.push(("dev:rkp".to_string(), serve));
+    } else {
+        finding.notes.push("no <script type=\"module\" src> in index.html: `rkp serve SCRIPT --hmr` needs the script".to_string());
+    }
+    if text.contains("lib:") {
+        finding.notes.push("build.lib: a library is `rkp bundle ENTRY --format esm,cjs` (README: library mode), not a page".to_string());
+    }
+    if text.contains("ssr:") {
+        finding.notes.push("build.ssr is not supported".to_string());
+    }
+    finding.notes.push("build.outDir, base, minify and sourcemap are not read from the config: they are on the command above (docs/migrate/vite.md)".to_string());
+    Some(finding)
+}
+
+/// The `src` of the first `<script type="module" src="...">` of a page, as a path of the project.
+fn first_module_script(html: &str) -> Option<String> {
+    let mut from = 0;
+    while let Some(at) = html[from..].find("<script") {
+        let start = from + at;
+        let end = start + html[start..].find('>')?;
+        from = end;
+        let tag = &html[start..end];
+        if !tag.contains("type=\"module\"") && !tag.contains("type='module'") {
+            continue;
+        }
+        let src_at = tag.find("src=")? + 4;
+        let quote = tag[src_at..].chars().next().filter(|c| matches!(c, '"' | '\''))?;
+        let value = &tag[src_at + 1..];
+        let src = &value[..value.find(quote)?];
+        return Some(src.trim_start_matches('/').trim_start_matches("./").to_string());
+    }
+    None
+}
+
+fn webpack(dir: &Path, package: Option<&Json>) -> Option<Finding> {
+    let config = config_file(dir, "webpack.config");
+    let mut evidence: Vec<String> = config.iter().cloned().collect();
+    if has_dependency(package, "webpack") {
+        evidence.push("dependency webpack".to_string());
+    }
+    if evidence.is_empty() {
+        return None;
+    }
+    let text = config.as_ref().and_then(|c| std::fs::read_to_string(dir.join(c)).ok()).unwrap_or_default();
+    let mut finding = Finding { tool: "webpack", evidence, commands: Vec::new(), notes: Vec::new() };
+    // The entry: a plain string, webpack's default when the config names none, or the config's own (then it is read from the file).
+    let entry = match literal_after(&text, "entry") {
+        Some(entry) => Some(entry.trim_start_matches("./").to_string()),
+        None if text.contains("entry") => {
+            finding.notes.push("the entry is read from the config; name it on the command line when it is not a plain string".to_string());
+            None
+        }
+        None => {
+            finding.notes.push("the config names no entry: webpack's default src/index.js is used".to_string());
+            Some("src/index.js".to_string())
+        }
+    };
+    let mut build = "rkp bundle".to_string();
+    if let Some(entry) = &entry {
+        build.push_str(&format!(" {entry}"));
+    }
+    if let Some(c) = &config {
+        build.push_str(&format!(" --config {c}"));
+    }
+    if literal_after(&text, "target").is_none_or(|t| t.starts_with("web")) {
+        build.push_str(" --platform=browser");
+    }
+    if literal_after(&text, "mode").is_none_or(|m| m == "production") {
+        build.push_str(" --minify");
+    }
+    if literal_after(&text, "devtool").is_some_and(|d| d.contains("source-map")) {
+        build.push_str(if literal_after(&text, "devtool").is_some_and(|d| d.contains("inline")) { " --sourcemap=inline" } else { " --sourcemap" });
+    }
+    // output: { path: path.resolve(__dirname, 'dist'), filename: 'main.js' }
+    let output = text.find("output").map(|i| &text[i..text[i..].find('}').map_or(text.len(), |e| i + e)]).unwrap_or("");
+    let folder = output.find("__dirname,").and_then(|i| literal_after(&format!("x:{}", &output[i + "__dirname,".len()..]), "x")).or_else(|| literal_after(output, "path")).unwrap_or_else(|| "dist".to_string());
+    let filename = literal_after(output, "filename").unwrap_or_else(|| "main.js".to_string());
+    if filename.contains('[') {
+        finding.notes.push(format!("output.filename {filename}: a name with a hash is --entry-names=[name]-[hash] (with --outdir and --splitting)"));
+        build.push_str(&format!(" --outfile {}/main.js", folder.trim_end_matches('/')));
+    } else {
+        build.push_str(&format!(" --outfile {}/{filename}", folder.trim_end_matches('/')));
+    }
+    finding.commands.push(("build:rkp".to_string(), build));
+    let mut serve = "rkp serve".to_string();
+    if let Some(entry) = &entry {
+        serve.push_str(&format!(" {entry}"));
+    }
+    if let Some(c) = &config {
+        serve.push_str(&format!(" --config {c}"));
+    }
+    serve.push_str(" --hmr");
+    finding.commands.push(("dev:rkp".to_string(), serve));
+    if text.contains("splitChunks") {
+        finding.notes.push("optimization.splitChunks is ignored; dynamic import() makes chunks with --splitting --outdir".to_string());
+    }
+    finding.notes.push("mode, output and devtool are not read from the config: they are on the command above (docs/migrate/webpack.md)".to_string());
+    Some(finding)
+}
+
+fn rollup(dir: &Path, package: Option<&Json>) -> Option<Finding> {
+    let config = config_file(dir, "rollup.config");
+    let mut evidence: Vec<String> = config.iter().cloned().collect();
+    if has_dependency(package, "rollup") {
+        evidence.push("dependency rollup".to_string());
+    }
+    if evidence.is_empty() {
+        return None;
+    }
+    let text = config.as_ref().and_then(|c| std::fs::read_to_string(dir.join(c)).ok()).unwrap_or_default();
+    let mut finding = Finding { tool: "rollup", evidence, commands: Vec::new(), notes: Vec::new() };
+    let mut build = "rkp bundle".to_string();
+    match literal_after(&text, "input") {
+        Some(input) => build.push_str(&format!(" {}", input.trim_start_matches("./"))),
+        None => finding.notes.push("name the entries on the command line (the config's input is not a plain string)".to_string()),
+    }
+    // The settings of `output: { ... }`, and not the `name` or `format` of a plugin written beside it.
+    let output = text.find("output").map(|i| &text[i..text[i..].find('}').map_or(text.len(), |e| i + e)]).unwrap_or("");
+    match (literal_after(output, "dir"), literal_after(output, "file")) {
+        (_, Some(file)) => build.push_str(&format!(" --outfile {file}")),
+        (Some(dir), None) => build.push_str(&format!(" --outdir {dir} --splitting")),
+        _ => {}
+    }
+    match literal_after(output, "format").as_deref() {
+        Some("cjs" | "commonjs") => build.push_str(" --format=cjs"),
+        Some("iife") => build.push_str(" --format=iife"),
+        Some("es" | "esm" | "module") | None => {}
+        Some(other) => finding.notes.push(format!("output.format '{other}' is not supported (esm, cjs and iife are); iife with --global-name is the form for a page")),
+    }
+    if let Some(name) = literal_after(output, "name") {
+        build.push_str(&format!(" --global-name={name}"));
+    }
+    if literal_after(output, "sourcemap").is_some_and(|s| s == "inline") {
+        build.push_str(" --sourcemap=inline");
+    } else if flag_after(output, "sourcemap") {
+        build.push_str(" --sourcemap");
+    }
+    let modules = imports_of(&text);
+    if modules.iter().any(|m| m == "@rollup/plugin-terser" || m == "rollup-plugin-terser") {
+        build.push_str(" --minify");
+    }
+    let mut kept = Vec::new();
+    for module in modules.iter().filter(|m| m.starts_with("@rollup/plugin-") || m.starts_with("rollup-plugin-") || m.contains("rollup-plugin")) {
+        match ROLLUP_BUILT_IN.iter().find(|(n, _)| n == module) {
+            Some((_, what)) => finding.notes.push(format!("{module}: not needed ({what})")),
+            None => kept.push(module.clone()),
+        }
+    }
+    if !kept.is_empty() {
+        finding.notes.push(format!("plugins to keep, in rathkit.config.mjs as `export default {{ plugins: [...] }}` (found by name): {}", kept.join(", ")));
+    }
+    if text.contains("plugins") && kept.is_empty() {
+        finding.notes.push("plugins written in the config stay: put them in rathkit.config.mjs as `export default { plugins: [...] }` (found by name)".to_string());
+    }
+    if text.contains("manualChunks") {
+        finding.notes.push("output.manualChunks is not supported".to_string());
+    }
+    finding.notes.push("add --platform=browser for a page (it makes process.env.NODE_ENV \"production\"), and the values given to @rollup/plugin-replace as --define:NAME=VALUE (docs/migrate/rollup.md)".to_string());
+    finding.commands.push(("build:rkp".to_string(), build));
+    Some(finding)
+}
+
+/// The text printed for the findings.
+pub fn report(dir: &Path, found: &[Finding]) -> String {
+    let mut out = String::new();
+    if found.is_empty() {
+        out.push_str(&format!("{}: no esbuild, Vite, webpack or Rollup found (no config file, dependency or script)\n", dir.display()));
+        return out;
+    }
+    for f in found {
+        out.push_str(&format!("{} ({})\n", f.tool, f.evidence.join(", ")));
+        for (name, command) in &f.commands {
+            out.push_str(&format!("  {name}: {command}\n"));
+        }
+        for note in &f.notes {
+            out.push_str(&format!("  note: {note}\n"));
+        }
+        out.push_str(&format!("  guide: docs/migrate/{}.md\n", f.tool));
+    }
+    out
+}
+
+/// Adds the commands as scripts to the package.json of `dir` (named `NAME:rkp`, with the tool in the name when there are several tools),
+/// never changing a script that is there. Returns what was added and what was left.
+pub fn write(dir: &Path, found: &[Finding]) -> Result<Vec<String>, String> {
+    let path = dir.join("package.json");
+    let mut text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let existing: Vec<String> = Json::parse(&text)
+        .map_err(|e| format!("{}: {e}", path.display()))?
+        .get("scripts")
+        .and_then(Json::as_object)
+        .map(|s| s.iter().map(|(k, _)| k.clone()).collect())
+        .unwrap_or_default();
+    let several = found.len() > 1;
+    let mut log = Vec::new();
+    let mut added: Vec<(String, String)> = Vec::new();
+    for f in found {
+        for (name, command) in &f.commands {
+            let name = match (several, name.strip_suffix(":rkp")) {
+                (true, Some(base)) => format!("{base}:rkp-{}", f.tool),
+                _ => name.clone(),
+            };
+            if existing.contains(&name) || added.iter().any(|(n, _)| *n == name) {
+                log.push(format!("left {name}: a script of that name is there"));
+            } else {
+                log.push(format!("added {name}"));
+                added.push((name, command.clone()));
+            }
+        }
+    }
+    if added.is_empty() {
+        return Ok(log);
+    }
+    text = insert_scripts(&text, &added, !existing.is_empty())?;
+    Json::parse(&text).map_err(|e| format!("the edited package.json is not valid ({e}); nothing was written"))?;
+    std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(log)
+}
+
+/// The package.json text with the scripts put first in the `scripts` object (made when there is none). An object written on one line is
+/// written again with one script to a line; otherwise nothing that was there is touched.
+fn insert_scripts(text: &str, scripts: &[(String, String)], has_scripts: bool) -> Result<String, String> {
+    let quote = |s: &str| Json::String(s.to_string()).to_string();
+    // The indent of the file: that of its first indented line, two spaces when it has none.
+    let unit: String = text.lines().find(|l| l.starts_with([' ', '\t'])).map(|l| l.chars().take_while(|c| *c == ' ' || *c == '\t').collect()).unwrap_or_else(|| "  ".to_string());
+    let entry = |level: usize, name: &str, command: &str| format!("{}{}: {}", unit.repeat(level), quote(name), quote(command));
+    if !has_scripts {
+        let open = text.find('{').ok_or("package.json is not an object")?;
+        let lines: Vec<String> = scripts.iter().map(|(n, c)| entry(2, n, c)).collect();
+        let insert = format!("\n{unit}\"scripts\": {{\n{}\n{unit}}},", lines.join(",\n"));
+        return Ok(format!("{}{}{}", &text[..open + 1], insert, &text[open + 1..]));
+    }
+    let key = text.find("\"scripts\"").ok_or("package.json has no top-level \"scripts\" to add to")?;
+    let open = key + text[key..].find('{').ok_or("package.json: \"scripts\" is not an object")?;
+    let after = &text[open + 1..];
+    if after.trim_start_matches([' ', '\t']).starts_with(['\n', '\r']) {
+        // One script to a line already: new lines go first, with the indent of the line that follows.
+        let body_empty = after.trim_start().starts_with('}');
+        let line_indent: String = after.trim_start_matches(['\r', '\n']).chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+        let line_indent = if line_indent.is_empty() { unit.repeat(2) } else { line_indent };
+        let mut insert = String::new();
+        for (i, (name, command)) in scripts.iter().enumerate() {
+            let last = i + 1 == scripts.len();
+            insert.push_str(&format!("\n{line_indent}{}: {}{}", quote(name), quote(command), if last && body_empty { "" } else { "," }));
+        }
+        return Ok(format!("{}{}{}", &text[..open + 1], insert, &text[open + 1..]));
+    }
+    // On one line: written again, the new scripts first and the old ones as they were.
+    let parsed = Json::parse(text).map_err(|e| e.to_string())?;
+    let old = parsed.get("scripts").and_then(Json::as_object).ok_or("package.json: \"scripts\" is not an object")?;
+    let close = matching_brace(text, open).ok_or("package.json: \"scripts\" is not closed")?;
+    let mut lines: Vec<String> = scripts.iter().map(|(n, c)| entry(2, n, c)).collect();
+    for (name, value) in old {
+        lines.push(format!("{}{}: {}", unit.repeat(2), quote(name), value));
+    }
+    Ok(format!("{}{{\n{}\n{unit}}}{}", &text[..open], lines.join(",\n"), &text[close + 1..]))
+}
+
+/// The index of the `}` that closes the `{` at `open`, skipping strings.
+fn matching_brace(text: &str, open: usize) -> Option<usize> {
+    let (mut depth, mut in_string, mut escaped) = (0usize, false, false);
+    for (i, c) in text[open..].char_indices() {
+        match (in_string, c) {
+            (true, _) if escaped => escaped = false,
+            (true, '\\') => escaped = true,
+            (true, '"') => in_string = false,
+            (true, _) => {}
+            (false, '"') => in_string = true,
+            (false, '{') => depth += 1,
+            (false, '}') => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(open + i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn literals_are_read_from_config_text() {
+        let text = "export default { build: { outDir: 'build', other: x }, base: \"/app/\", entry: `./a.js`, nested.outDir: 'no', xoutDir: 'no' }";
+        assert_eq!(literal_after(text, "outDir").as_deref(), Some("build"));
+        assert_eq!(literal_after(text, "base").as_deref(), Some("/app/"));
+        assert_eq!(literal_after(text, "entry").as_deref(), Some("./a.js"));
+        assert_eq!(literal_after(text, "other"), None);
+        assert_eq!(literal_after("a: `x${y}`", "a"), None);
+        assert!(flag_after("{ sourcemap: true }", "sourcemap") && !flag_after("{ sourcemap: false }", "sourcemap"));
+    }
+
+    #[test]
+    fn esbuild_commands_become_rkp_commands() {
+        assert_eq!(rewrite_esbuild_commands("esbuild a.js --bundle && echo esbuild x; esbuild b.js"), ("rkp bundle a.js --bundle && echo esbuild x; rkp bundle b.js".to_string(), true));
+        assert_eq!(rewrite_esbuild_commands("node build.mjs"), ("node build.mjs".to_string(), false));
+        assert!(!rewrite_esbuild_commands("esbuild-wasm a.js").1);
+    }
+
+    #[test]
+    fn the_first_module_script_of_a_page() {
+        assert_eq!(first_module_script("<script src=\"x.js\"></script><script type=\"module\" src=\"/src/main.ts\"></script>").as_deref(), Some("src/main.ts"));
+        assert_eq!(first_module_script("<p>none</p>"), None);
+    }
+
+    #[test]
+    fn scripts_are_inserted_in_package_json_text() {
+        let with = "{\n  \"name\": \"a\",\n  \"scripts\": {\n    \"build\": \"x\"\n  }\n}\n";
+        let out = insert_scripts(with, &[("build:rkp".into(), "rkp bundle \"a\"".into())], true).unwrap();
+        assert!(Json::parse(&out).is_ok(), "{out}");
+        assert!(out.contains("    \"build:rkp\": \"rkp bundle \\\"a\\\"\",\n    \"build\": \"x\""));
+        let without = "{\n  \"name\": \"a\"\n}\n";
+        let out = insert_scripts(without, &[("b:rkp".into(), "c".into())], false).unwrap();
+        assert!(Json::parse(&out).is_ok(), "{out}");
+        let empty = "{\"scripts\": {}}";
+        assert!(Json::parse(&insert_scripts(empty, &[("b:rkp".into(), "c".into())], true).unwrap()).is_ok());
+        let inline = "{\n  \"scripts\": { \"dev\": \"vite {x}\", \"build\": \"vite build\" },\n  \"n\": 1\n}\n";
+        let out = insert_scripts(inline, &[("b:rkp".into(), "c".into())], true).unwrap();
+        let parsed = Json::parse(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
+        assert_eq!(parsed.get("scripts").and_then(Json::as_object).unwrap().len(), 3);
+        assert_eq!(parsed.get("n").and_then(Json::as_f64), Some(1.0));
+    }
+}

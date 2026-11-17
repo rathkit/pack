@@ -78,15 +78,57 @@ fn real_main() -> ExitCode {
         Some((cmd, rest)) if cmd == "check" => check_command(rest),
         // A page for reading a metafile: `rkp analyze META.json [--outfile REPORT.html]` (src/analyze.rs).
         Some((cmd, rest)) if cmd == "analyze" => analyze_command(rest),
+        // Which tool a project builds with, and the equivalent commands: `rkp migrate [DIR] [--write]` (src/migrate.rs).
+        Some((cmd, rest)) if cmd == "migrate" => migrate_command(rest),
         Some((cmd, files)) if cmd == "--graph" && !files.is_empty() => graph(files),
         Some((cmd, files)) if cmd == "--resolve-dump" && !files.is_empty() => resolve_dump(files),
         Some((cmd, files)) if cmd == "--ts-verdicts" && !files.is_empty() => ts_verdicts(files),
         Some((cmd, files)) if cmd == "--link-dump" && !files.is_empty() => link_dump(files),
         _ => {
-            eprintln!("usage: rkp bundle <entry>... | serve <entry>... | analyze <meta.json> | check <file.ts>... | --version\n       rkp --lex-check|--parse-check|--parse-verdicts|--script-verdicts|--bench <file.js>... (development aids)\n       rkp --scopes <file.js>\n       rkp bundle <entry.js>... [--outfile FILE | --outdir DIR --splitting] [--format esm|cjs|iife] [--no-treeshake] [--define KEY=VALUE]... [--loader .ext=NAME]... [--jsx automatic|classic] [--external NAME]... [--condition NAME]...\n       rkp --graph <entry.js>... [--quiet] [--threads N] [--external NAME]... [--condition NAME]...");
+            eprintln!("usage: rkp bundle <entry>... | serve <entry>... | analyze <meta.json> | migrate [dir] [--write] | check <file.ts>... | --version\n       rkp --lex-check|--parse-check|--parse-verdicts|--script-verdicts|--bench <file.js>... (development aids)\n       rkp --scopes <file.js>\n       rkp bundle <entry.js>... [--outfile FILE | --outdir DIR --splitting] [--format esm|cjs|iife] [--no-treeshake] [--define KEY=VALUE]... [--loader .ext=NAME]... [--jsx automatic|classic] [--external NAME]... [--condition NAME]...\n       rkp --graph <entry.js>... [--quiet] [--threads N] [--external NAME]... [--condition NAME]...");
             ExitCode::from(2)
         }
     }
+}
+
+/// `rkp migrate [DIR] [--write]`: the tools of a project (esbuild, Vite, webpack, Rollup) and the `rkp` commands that replace them; `--write`
+/// adds them to the scripts of package.json under new names.
+fn migrate_command(args: &[String]) -> ExitCode {
+    let (mut dir, mut write) = (None, false);
+    for arg in args {
+        match arg.as_str() {
+            "--write" => write = true,
+            a if a.starts_with("--") => {
+                eprintln!("error: rkp migrate: unknown option {a}");
+                return ExitCode::from(2);
+            }
+            _ if dir.is_none() => dir = Some(arg.clone()),
+            _ => {
+                eprintln!("error: rkp migrate takes one folder");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let dir = std::path::PathBuf::from(dir.unwrap_or_else(|| ".".to_string()));
+    if !dir.is_dir() {
+        eprintln!("error: {}: not a folder", dir.display());
+        return ExitCode::from(2);
+    }
+    let found = rathkit_pack::migrate::detect(&dir);
+    print!("{}", rathkit_pack::migrate::report(&dir, &found));
+    if found.is_empty() {
+        return ExitCode::from(1);
+    }
+    if write {
+        match rathkit_pack::migrate::write(&dir, &found) {
+            Ok(log) => log.iter().for_each(|line| println!("{line}")),
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::from(1);
+            }
+        }
+    }
+    ExitCode::SUCCESS
 }
 
 /// `rkp analyze META.json [--outfile REPORT.html]`: the HTML report of a metafile, on the standard output unless a file is named.

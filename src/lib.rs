@@ -11,6 +11,7 @@ pub mod federation;
 pub mod fxhash;
 pub mod legal;
 pub mod lexer;
+pub mod migrate;
 pub mod minify;
 pub mod browserslist;
 pub mod bundle;
