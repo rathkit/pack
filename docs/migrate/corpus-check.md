@@ -1,0 +1,48 @@
+# rkp migrate on the corpus projects
+
+Roadmap 4.6 ("works on the corpus projects"). Method: the 63 projects of `corpus/projects.json` at their pinned commits (clones made by tools/run-corpus.mjs, dependencies installed with pnpm --ignore-scripts); on each, `rkp migrate DIR` was run; the printed `build:rkp` command was then run in a copy of the project (node_modules hard-linked, build output and `out` left out), and `rkp migrate DIR --write` was run in a copy to check that no script or other field of package.json that existed before was changed. The corpus runner's own command for the project (`build` in projects.json) is shown for comparison. Built: ok means rkp exited with 0 and wrote its output (the page and the files were not loaded in a browser here; the corpus runner does that for its own commands).
+
+Summary: 63 projects; 34 have one of the tools; 28 printed a command that builds; none of the 34 --write runs changed an existing script or field.
+
+Bugs this check found and fixed (tests in tests/migrate_command.rs): a vite.config that only configures Vitest or vite as a dependency of a library with no page printed a Vite command; Rollup configs with an input that is not a plain string printed the usage text as the command; a Rollup config that builds its output file in code printed a command that writes nothing; Vite base read from a variable was dropped without a word; rspack was not detected.
+
+Known differences from the corpus runner's command (not bugs of migrate; the guide says so): migrate adds --minify for Vite and does not carry --public-path when base is not a plain string (vite-react-ts-less takes it from VITE_BASE_PATH; the note says to add it); the library projects are built by the runner with --format esm --outfile out/NAME.mjs, which no config of theirs states.
+
+| Project | Detected | rkp migrate command | Built | --write |
+|---|---|---|---|---|
+| vue3-realworld | vite | `rkp bundle index.html --config vite.config.ts --outdir dist --minify` | ok | unchanged |
+| zustand | esbuild+rollup | none (rollup config input is a variable (createConfig); esbuild only as a dependency (via rollup-plugin-esbuild)) | not run (no command) | unchanged |
+| dayjs | rollup | none (rollup is a dependency, the config is build/rollup.config.js (only the root is looked at)) | not run (no command) | unchanged |
+| marked | esbuild | none (esbuild API script (esbuild.config.js): a note to import from @rathkit/pack, no command line to run) | not run (no command) | unchanged |
+| conduit-react | vite | `rkp bundle index.html --config vite.config.ts --outdir dist --minify` | ok | unchanged |
+| vue-naive-admin | vite | `rkp bundle index.html --config vite.config.js --outdir dist --minify` | ok | unchanged |
+| vite-template-react-ts | vite | `rkp bundle index.html --config vite.config.ts --outdir dist --minify` | ok | unchanged |
+| vite-template-vue-ts | vite | `rkp bundle index.html --config vite.config.ts --outdir dist --minify` | ok | unchanged |
+| vite-template-svelte-ts | vite | `rkp bundle index.html --config vite.config.ts --outdir dist --minify` | ok | unchanged |
+| vite-template-preact-ts | vite | `rkp bundle index.html --config vite.config.ts --outdir dist --minify` | ok | unchanged |
+| vite-template-solid-ts | vite | `rkp bundle index.html --config vite.config.ts --outdir dist --minify` | ok | unchanged |
+| vite-template-lit-ts | vite | `rkp bundle index.html --outdir dist --minify` | ok | unchanged |
+| rspack-code-splitting | rspack | `rkp bundle index.js --config rspack.config.js --outdir dist` | ok | unchanged |
+| rspack-html-webpack-plugin | rspack | `rkp bundle src/index.js --config rspack.config.js --outdir dist` | ok | unchanged |
+| valtio | esbuild+rollup | none (same as zustand) | not run (no command) | unchanged |
+| rbush | rollup | `rkp bundle index.js --outfile dist/index.js --global-name=RBush --minify` | ok | unchanged |
+| d3-array | rollup | `rkp bundle src/index.js --outfile dist/index.js --minify` | ok | unchanged |
+| d3-hierarchy | rollup | `rkp bundle src/index.js --outfile dist/index.js --minify` | ok | unchanged |
+| preact | rollup | none (rollup only as a dependency, no config file in the root) | not run (no command) | unchanged |
+| signals | esbuild | none (esbuild only as a dependency; no command) | not run (no command) | unchanged |
+| underscore | rollup | `rkp bundle modules/index-all.js --outfile dist/index-all.js` | ok | unchanged |
+| solid-template-basic | vite | `rkp bundle index.html --config vite.config.ts --outdir dist --minify` | ok | unchanged |
+| solid-template-router | vite | `rkp bundle index.html --config vite.config.ts --outdir dist --minify` | ok | unchanged |
+| solid-template-sass | vite | `rkp bundle index.html --config vite.config.ts --outdir dist --minify` | ok | unchanged |
+| redux-vite-template | vite | `rkp bundle index.html --config vite.config.ts --outdir dist --minify` | ok | unchanged |
+| mui-vite-ts | vite | `rkp bundle index.html --config vite.config.ts --outdir dist --minify` | ok | unchanged |
+| tanstack-query-basic | vite | `rkp bundle index.html --config vite.config.ts --outdir dist --minify` | ok | unchanged |
+| vitesse-lite | vite | `rkp bundle index.html --config vite.config.ts --outdir dist --minify` | ok | unchanged |
+| element-plus-starter | vite | `rkp bundle index.html --config vite.config.ts --outdir dist --minify` | ok | unchanged |
+| tanstack-query-simple | vite | `rkp bundle index.html --config vite.config.ts --outdir dist --minify` | ok | unchanged |
+| solid-template-unocss | vite | `rkp bundle index.html --config vite.config.ts --outdir dist --minify` | ok | unchanged |
+| vite-playground-tailwind-v3 | vite | `rkp bundle index.html --config vite.config.ts --outdir dist --minify` | ok | unchanged |
+| vite-react-ts-less | vite | `rkp bundle index.html --config vite.config.ts --outdir dist --minify` | ok | unchanged |
+| sass-postcss-no-config | vite | `rkp bundle index.html --config vite.config.js --outdir dist --minify` | ok | unchanged |
+
+Not detected (`rkp migrate` exits 1 and says so), 29 projects: mitt, nanoid, immer, clsx, ky, commander, semver, kleur, picocolors, json-server, defu, ufo, pathe, destr, scule, citty, consola, jotai, nanostores, ms, dequal, p-limit, p-map, chalk, ansi-styles, cac, flatbush, htm, uPlot. None has a config or build dependency of esbuild, Vite, webpack, Rollup or rspack; nanoid, immer, pathe, citty, jotai and cac list `vite` or a vite.config only for Vitest, which is what the detection should skip, and kleur builds with its own script.
