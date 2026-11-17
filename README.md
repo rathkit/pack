@@ -13,11 +13,13 @@ Site: <https://rathkit.com>
 Measured on 15 workloads in three modes (45 cases: the TypeScript compiler, three.js, lodash-es, React, rxjs, date-fns, Zod, D3,
 Preact, Vue, Solid and Svelte apps, a monorepo-style TypeScript app, two generated apps; plain, minified, minified with a source map),
 the whole command took the least memory in every case and less time than rolldown, rspack, Vite, webpack, Rollup and Parcel 2 (where it built) in
-every case. Against esbuild it took less time in 43 of the 45 cases; esbuild was faster in the other two, by 1.8 ms or less. Parcel 3
-took less time in 42 cases and was faster in the three lodash-es cases, where it kept none of the exports, so those are not the same
-work. Output sizes are about equal, and others are smaller in some cases. In watch mode a rebuild of Pack is not the fastest (Parcel 3 and
-esbuild are quicker on most workloads), and its development server starts fastest on most workloads but is slower to announce an
-HMR update on most workloads; there is no type-check figure for Pack, because it has no checker yet. The method, the machine, the versions and every
+every case. Against esbuild it took less time and memory in all 45 cases, and its minified output was smaller in raw bytes and in gzip in every
+minified case (esbuild is smaller in two plain cases, React by gzip and Zod by size). Parcel 3 took less time in 42 cases and was faster in the
+three lodash-es cases, where it kept none of the exports, so those are not the same work. Other tools are smaller minified on some workloads
+(rolldown, rspack, webpack, Rollup and Parcel 2 on several; the table lists them). In watch mode a warm rebuild of Pack is faster than
+esbuild's in all 30 cases and than every tool's except Parcel 3 and, on the TypeScript compiler, Parcel 2; its HMR latency is lower than esbuild's,
+webpack's and, on 13 of 14 workloads, rspack's, and higher than Vite's and, on most workloads, Parcel's. On Linux Pack hears of a change
+through the kernel's file events; macOS and Windows still poll. The type-check column has no figure for Pack's own checker yet. The method, the machine, the versions and every
 table: [docs/benchmarks.md](docs/benchmarks.md). One machine, one day: run
 the container recipe in [rathkit/pack-bench](https://github.com/rathkit/pack-bench) for yours.
 
