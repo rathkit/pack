@@ -528,7 +528,7 @@ const adaptEsbuild = async (plugin) => {
   const pluginData = new Map(); // id -> pluginData from the callback that resolved it
   const resolveDirs = new Map();
   const initialOptions = {
-    entryPoints: cli.entries ?? [], bundle: true, outdir: cli.outdir, outfile: cli.outfile, format: cli.format ?? 'esm', platform: cli.platformBrowser ? 'browser' : 'node',
+    entryPoints: cli.entries ?? [], bundle: true, outdir: cli.outdir, outfile: cli.outfile, format: cli.format === 'es' ? 'esm' : (cli.format ?? 'esm'), platform: cli.platformBrowser ? 'browser' : 'node',
     minify: !!cli.minify, minifyWhitespace: !!cli.minify, minifyIdentifiers: !!cli.minify, minifySyntax: !!cli.minify, sourcemap: !!cli.sourcemap, define: configOptions.define ?? {},
     external: cli.external ?? [], loader: Object.fromEntries((cli.loaders ?? []).map(([e, l]) => [e, l])), plugins: [], absWorkingDir: root, write: true, metafile: false, splitting: !!cli.splitting,
   };

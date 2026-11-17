@@ -14,6 +14,7 @@ pub mod lexer;
 pub mod minify;
 pub mod browserslist;
 pub mod bundle;
+pub mod cli_compat;
 pub mod checker;
 pub(crate) mod compress;
 pub mod glob;

@@ -623,6 +623,14 @@ fn link_dump(entries: &[String]) -> ExitCode {
 
 /// `rkp bundle ENTRY... [--outfile FILE]`: builds one ES module file from the entries.
 fn bundle_command(args: &[String], serve: bool) -> ExitCode {
+    // esbuild's spellings (`--outfile=FILE`, `--external:NAME`, ...) are rewritten into the ones below (src/cli_compat.rs).
+    let args = &match rathkit_pack::cli_compat::esbuild_spellings(args) {
+        Ok(args) => args,
+        Err(message) => {
+            eprintln!("error: {message}");
+            return ExitCode::from(2);
+        }
+    };
     loop {
         match bundle_once(args, serve) {
             Done::Exit(code) => return code,
@@ -637,6 +645,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     let mut options = GraphOptions::default();
     let mut outfile: Option<String> = None;
     let mut treeshake = true;
+    let mut allow_overwrite = false;
     let mut hmr = false;
     let mut react_refresh: Option<bool> = None;
     let mut https = false;
@@ -679,6 +688,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
         match arg.as_str() {
             "--outfile" => outfile = it.next().cloned(),
             "--no-treeshake" => treeshake = false,
+            "--allow-overwrite" => allow_overwrite = true,
             // --hmr (serve): modules are replaced in the running page instead of reloading it.
             "--hmr" => hmr = true,
             // --react-refresh / --no-react-refresh (with --hmr): components keep their state; by default on when the project has react-refresh.
@@ -1377,7 +1387,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
         return Done::Exit(ExitCode::from(2));
     }
     let exports_target = write_exports.clone();
-    let job = std::sync::Arc::new(Job { cwd, entries, options, bundle_options, treeshake, outfile, outdir, host: plugin_host, config_file, watch, serve: serve_state, bind: (host_name, port), restart_files, workers, pages, metafile, dts: dts.then(|| (dts_dir, tsconfig_path.clone(), dts_bundle)), https: https.then(|| (https_cert, https_key)), more_builds: exports_target.is_some() });
+    let job = std::sync::Arc::new(Job { allow_overwrite, cwd, entries, options, bundle_options, treeshake, outfile, outdir, host: plugin_host, config_file, watch, serve: serve_state, bind: (host_name, port), restart_files, workers, pages, metafile, dts: dts.then(|| (dts_dir, tsconfig_path.clone(), dts_bundle)), https: https.then(|| (https_cert, https_key)), more_builds: exports_target.is_some() });
     if let Some(host) = &job.host {
         // Child compilers of webpack plugins build one entry as a script that sets a global.
         let for_children = job.clone();
@@ -1407,6 +1417,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
 
 /// Everything one build needs, fixed once the command line and the config are read.
 struct Job {
+    allow_overwrite: bool,
     cwd: std::path::PathBuf,
     entries: Vec<String>,
     options: rathkit_pack::graph::GraphOptions,
@@ -1613,6 +1624,7 @@ fn run_formats(job: &Job, formats: &[rathkit_pack::bundle::Format]) -> Outcome {
             }
         }
         let run = Job {
+            allow_overwrite: job.allow_overwrite,
             cwd: job.cwd.clone(),
             entries,
             options: job.options.clone(),
@@ -2145,6 +2157,21 @@ fn run_build(job: &Job) -> Outcome {
             cache.store(graph);
         }
         return outcome;
+    }
+    // A build that would write over one of its own input files stops, as esbuild does (`--allow-overwrite` says it is meant).
+    if let (Ok(output), false) = (&result, job.allow_overwrite) {
+        let real = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| rathkit_pack::graph::absolute(cwd, &p.to_string_lossy()));
+        let mut planned: Vec<std::path::PathBuf> = Vec::new();
+        match (&outdir, &outfile) {
+            (Some(dir), _) => planned.extend(output.files.iter().map(|f| std::path::Path::new(dir).join(&f.name))),
+            (None, Some(file)) => planned.push(std::path::PathBuf::from(file)),
+            _ => {}
+        }
+        let planned: Vec<std::path::PathBuf> = planned.iter().map(|p| real(p)).collect();
+        if let Some(module) = graph.modules.iter().find(|m| planned.contains(&real(&m.path))) {
+            eprintln!("error: refusing to overwrite the input file {} (pass --allow-overwrite to do it anyway)", module.path.display());
+            return outcome;
+        }
     }
     let mut status = match result {
         Ok(output) if outdir.is_some() => {

@@ -23,6 +23,8 @@ through the kernel's file events; macOS and Windows still poll. The type-check c
 table: [docs/benchmarks.md](docs/benchmarks.md). One machine, one day: run
 the container recipe in [rathkit/pack-bench](https://github.com/rathkit/pack-bench) for yours.
 
+Which of esbuild's command line options and JavaScript API options `rkp` has, and which are not done: [docs/esbuild-conformance.md](docs/esbuild-conformance.md).
+
 ## Install
 
 ```

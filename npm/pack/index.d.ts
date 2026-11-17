@@ -4,6 +4,17 @@ export interface Options {
   entries: string | string[];
   /** Where relative paths are taken from. Default: the current directory. */
   cwd?: string;
+  /** esbuild's names, for what `entries` and `cwd` are: file names only (not esbuild's object or `{ in, out }` forms). */
+  entryPoints?: string | string[];
+  absWorkingDir?: string;
+  /** Accepted when `true`: this program always bundles. */
+  bundle?: true;
+  /** Accepted when `'utf8'`: the output keeps non-ASCII characters as they are. */
+  charset?: 'utf8';
+  /** Accepted and ignored: what is reported is in the result's `warnings` and `errors`. */
+  logLevel?: 'verbose' | 'debug' | 'info' | 'warning' | 'error' | 'silent';
+  color?: boolean;
+  logLimit?: number;
   /** Added to the environment of the program (and of plugins). */
   env?: Record<string, string>;
   /** Stops the program when aborted. */
@@ -48,6 +59,8 @@ export interface Options {
   resolveExtensions?: string[];
   /** Keep a symbolic link's own path instead of the real file's. */
   preserveSymlinks?: boolean;
+  /** Let the build write over one of its own input files (it stops with an error otherwise). */
+  allowOverwrite?: boolean;
   /** Plugins: objects with hooks (kept in this process; see `Plugin`), or `{ module }` to load one where the build runs. They come after those of the config file. */
   plugins?: Array<Plugin | PluginModule | Array<Plugin | PluginModule>>;
   /** `serve` only: serve over HTTPS. `true` makes (and keeps) a self-signed certificate for localhost that the browser has to be told to trust; give `{ cert, key }` (PEM files) to use your own, such as one made by mkcert. Needs Node.js. */
@@ -64,7 +77,7 @@ export interface Options {
   dtsBundle?: boolean;
   /** Write what went into the build and what came out, as JSON in the shape of esbuild's metafile, to this file (the result has it too). */
   metafile?: string;
-  /** Specifiers left out of the output: exact names, or a prefix ending in `/*`. */
+  /** Specifiers left out of the output: a name (which also names what is inside the package, `react` and `react/jsx-runtime`), or a pattern with one `*` (`@scope/*`, `*.png`). */
   external?: string[];
   /** Conditions of `exports` and `imports` maps, besides the usual ones. */
   conditions?: string[];

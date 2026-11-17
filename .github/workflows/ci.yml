@@ -97,6 +97,7 @@ jobs:
       - run: node tools/run-split.mjs
       - run: node tools/run-worstcase.mjs
       - run: node tools/run-library.mjs
+      - run: node tools/run-esbuild-conformance.mjs
       - run: node tools/run-sourcemaps.mjs
       - run: node tools/run-watch.mjs
       - run: node tools/run-rebuild.mjs
@@ -227,6 +228,7 @@ jobs:
       - run: node tools/check-promises.mjs
       - run: node tools/run-split.mjs
       - run: node tools/run-library.mjs
+      - run: node tools/run-esbuild-conformance.mjs
       - run: node tools/run-sourcemaps.mjs
       - run: node tools/run-watch.mjs
       - run: node tools/run-rebuild.mjs
