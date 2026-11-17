@@ -923,6 +923,7 @@ pub fn render_mapped(text: &str, parsed: &Parsed, replacements: &[Replacement], 
     let (css, anchors) = if minify {
         let offsets: Vec<usize> = anchors.iter().map(|a| a.0).collect();
         let (css, moved) = minify_mapped(&out, &offsets);
+        let css = if want_map { css } else { shorten_values(&css) };
         (css, moved.into_iter().zip(anchors.iter().map(|a| a.1)).collect())
     } else {
         (out, anchors)
@@ -932,7 +933,505 @@ pub fn render_mapped(text: &str, parsed: &Parsed, replacements: &[Replacement], 
 
 /// Removes comments (but not `/*! ... */`) and whitespace that does not matter.
 pub fn minify_text(text: &str) -> String {
-    minify_mapped(text, &[]).0
+    shorten_values(&minify_mapped(text, &[]).0)
+}
+
+/// Shorter spellings of what stands in declarations of minified text: `#ffffff` is `#fff`, `0.5` is `.5`. Strings and `url()` are copied
+/// as they are, as is a declaration that holds `progid` (an old filter that reads colors as text). Only text without a source map goes
+/// through this: it moves the positions that a map points to.
+fn shorten_values(css: &str) -> String {
+    let bytes = css.as_bytes();
+    let mut out = String::with_capacity(css.len());
+    let mut start = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' | b'\'' => {
+                let q = bytes[i];
+                i += 1;
+                while i < bytes.len() && bytes[i] != q {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => i = css[i + 2..].find("*/").map_or(bytes.len(), |p| i + 2 + p + 2),
+            b'(' if css[..i].to_ascii_lowercase().ends_with("url") => {
+                i = url_end(css, i);
+            }
+            b'{' => {
+                i += 1;
+                let prelude = &css[start..i];
+                if prelude.contains("@media (") {
+                    out.push_str(&prelude.replace("@media (", "@media("));
+                } else if !prelude.contains('@') {
+                    out.push_str(&tighten_combinators(prelude));
+                } else {
+                    out.push_str(prelude);
+                }
+                start = i;
+            }
+            b';' | b'}' => {
+                let segment = &css[start..i];
+                if segment.contains(':') && !segment.to_ascii_lowercase().contains("progid") {
+                    out.push_str(&shorten_declaration(segment));
+                } else {
+                    out.push_str(segment);
+                }
+                start = i;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    out.push_str(&css[start..]);
+    merge_rules(&out)
+}
+
+/// The end of a `url(...)` whose `(` is at `open`: after the `)`, which a quoted address may hold inside its quotes.
+fn url_end(text: &str, open: usize) -> usize {
+    let b = text.as_bytes();
+    let mut i = open + 1;
+    while i < b.len() && b[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if matches!(b.get(i), Some(b'"' | b'\'')) {
+        let q = b[i];
+        i += 1;
+        while i < b.len() && b[i] != q {
+            i += if b[i] == b'\\' { 2 } else { 1 };
+        }
+    }
+    text[i.min(b.len())..].find(')').map_or(b.len(), |p| i + p + 1)
+}
+
+/// The end of the text that starts at `from` and is closed by `stop` (a byte that is not in a string, a comment or `url()`), or the end of `text`.
+fn skip_to(text: &str, from: usize, stops: &[u8]) -> usize {
+    let b = text.as_bytes();
+    let mut i = from;
+    while i < b.len() {
+        match b[i] {
+            c if stops.contains(&c) => return i,
+            q @ (b'"' | b'\'') => {
+                i += 1;
+                while i < b.len() && b[i] != q {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+            }
+            b'(' if text[..i].to_ascii_lowercase().ends_with("url") => i = url_end(text, i),
+            _ => i += 1,
+        }
+    }
+    b.len()
+}
+
+/// Whether a selector is made only of what every browser reads: a list of it in which one part is not understood would be dropped whole, so
+/// two rules are joined only when both parts are of this kind.
+fn selector_is_plain(sel: &str) -> bool {
+    const PSEUDO: &[&str] = &["hover", "focus", "active", "visited", "link", "first-child", "last-child", "only-child", "first-of-type", "last-of-type", "only-of-type", "empty", "root", "before", "after", "first-line", "first-letter", "checked", "disabled", "enabled", "target", "not", "nth-child", "nth-of-type", "nth-last-child", "nth-last-of-type", "lang"];
+    if sel.contains("::") || sel.contains(['\\', '|']) || !sel.is_ascii() {
+        return false;
+    }
+    let b = sel.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'"' | b'\'' => {
+                let end = skip_to(sel, i + 1, &[b[i]]);
+                i = end + 1;
+            }
+            b':' => {
+                let name: String = sel[i + 1..].chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+                if !PSEUDO.contains(&name.as_str()) {
+                    return false;
+                }
+                i += 1 + name.len();
+            }
+            _ => i += 1,
+        }
+    }
+    true
+}
+
+/// Rules that follow each other: the same selector is one rule with both bodies, and the same body is one rule with both selectors.
+fn merge_rules(css: &str) -> String {
+    let mut items: Vec<(String, Option<String>)> = Vec::new(); // (header or whole text, body of a plain rule)
+    let mut i = 0;
+    while i < css.len() {
+        let start = i;
+        if css[i..].starts_with("/*") {
+            i = css[i + 2..].find("*/").map_or(css.len(), |p| i + 2 + p + 2);
+            items.push((css[start..i].to_string(), None));
+            continue;
+        }
+        let stop = skip_to(css, i, &[b'{', b';', b'}']);
+        if stop >= css.len() || css.as_bytes()[stop] != b'{' {
+            // A statement (`@import ...;`) or something that does not belong: kept as it is.
+            let end = if stop < css.len() { stop + 1 } else { css.len() };
+            items.push((css[start..end].to_string(), None));
+            i = end;
+            continue;
+        }
+        let header = &css[start..stop];
+        // The block, with its braces matched.
+        let mut depth = 0usize;
+        let mut j = stop;
+        loop {
+            j = skip_to(css, j, &[b'{', b'}']);
+            if j >= css.len() {
+                break;
+            }
+            if css.as_bytes()[j] == b'{' {
+                depth += 1;
+            } else {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            j += 1;
+        }
+        let end = (j + 1).min(css.len());
+        let inner = &css[stop + 1..j.min(css.len())];
+        if header.starts_with('@') {
+            let name: String = header[1..].chars().take_while(|c| c.is_ascii_alphabetic() || *c == '-').collect();
+            let text = if matches!(name.as_str(), "media" | "supports" | "layer" | "container") { format!("{header}{{{}}}", merge_rules(inner)) } else { css[start..end].to_string() };
+            items.push((text, None));
+        } else if inner.contains('{') || header.is_empty() {
+            items.push((css[start..end].to_string(), None));
+        } else {
+            items.push((header.to_string(), Some(inner.to_string())));
+        }
+        i = end;
+    }
+    let mut out: Vec<(String, Option<String>)> = Vec::with_capacity(items.len());
+    for (header, body) in items {
+        if let (Some(body), Some((ph, Some(pb)))) = (&body, out.last_mut()) {
+            if *ph == header {
+                if pb.is_empty() || body.is_empty() {
+                    pb.push_str(body);
+                } else {
+                    pb.push(';');
+                    pb.push_str(body);
+                }
+                continue;
+            }
+            if pb == body && selector_is_plain(ph) && selector_is_plain(&header) {
+                ph.push(',');
+                ph.push_str(&header);
+                continue;
+            }
+        }
+        out.push((header, body));
+    }
+    let mut text = String::with_capacity(css.len());
+    for (header, body) in out {
+        match body {
+            Some(body) => {
+                text.push_str(&header);
+                text.push('{');
+                text.push_str(&body);
+                text.push('}');
+            }
+            None => text.push_str(&header),
+        }
+    }
+    text
+}
+
+fn shorten_declaration(decl: &str) -> String {
+    let Some(colon) = decl.find(':') else { return decl.to_string() };
+    let property = decl[..colon].trim_start_matches([';', '{', '}']).trim().to_ascii_lowercase();
+    // A custom property holds whatever its users read from it.
+    if property.starts_with("--") {
+        return decl.to_string();
+    }
+    let scanned = scan_value(decl, colon);
+    let (name, value) = scanned.split_at(colon + 1);
+    format!("{name}{}", refine_value(&property, value))
+}
+
+fn scan_value(decl: &str, colon: usize) -> String {
+    // Only the value: a selector-like start (`a:hover{` never reaches here, as `{` ends a segment).
+    let (name, value) = decl.split_at(colon + 1);
+    let b = value.as_bytes();
+    let mut out = String::with_capacity(decl.len());
+    out.push_str(name);
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        match c {
+            b'"' | b'\'' | b'(' if c != b'(' || value[..i].to_ascii_lowercase().ends_with("url") => {
+                let end = if c == b'(' {
+                    url_end(value, i)
+                } else {
+                    let mut j = i + 1;
+                    while j < b.len() && b[j] != c {
+                        j += if b[j] == b'\\' { 2 } else { 1 };
+                    }
+                    (j + 1).min(b.len())
+                };
+                out.push_str(&value[i..end]);
+                i = end;
+            }
+            b'#' => {
+                let hex = value[i + 1..].bytes().take_while(|x| x.is_ascii_hexdigit()).count();
+                let after = b.get(i + 1 + hex).copied();
+                let ident_after = after.is_some_and(|x| x.is_ascii_alphanumeric() || x == b'_' || x == b'-' || x >= 0x80);
+                let digits = &value[i + 1..i + 1 + hex];
+                let pairs = digits.as_bytes().chunks(2).all(|p| p.len() == 2 && p[0].eq_ignore_ascii_case(&p[1]));
+                if !ident_after && (hex == 6 || hex == 8) && pairs {
+                    out.push('#');
+                    out.extend(digits.as_bytes().chunks(2).map(|p| p[0].to_ascii_lowercase() as char));
+                    i += 1 + hex;
+                } else if !ident_after && matches!(hex, 3 | 4 | 6 | 8) {
+                    out.push_str(&value[i..i + 1 + hex].to_ascii_lowercase());
+                    i += 1 + hex;
+                } else {
+                    out.push_str(&value[i..i + 1 + hex]);
+                    i += 1 + hex;
+                }
+            }
+            b'0' if b.get(i + 1) == Some(&b'.') && b.get(i + 2).is_some_and(u8::is_ascii_digit) => {
+                let lead = |x: u8| matches!(x, b' ' | b',' | b'(' | b'/');
+                let ok = match i.checked_sub(1).map(|p| b[p]) {
+                    None => true,
+                    Some(x) if lead(x) => true,
+                    Some(b'-' | b'+') => i == 1 || lead(b[i - 2]),
+                    _ => false,
+                };
+                if ok {
+                    i += 1;
+                } else {
+                    out.push('0');
+                    i += 1;
+                }
+            }
+            _ => {
+                let ch = value[i..].chars().next().expect("a character");
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+        }
+    }
+    out
+}
+
+/// Selector spelling: `a ~ b` and `a + b` lose their spaces, `::before` (and `::after`, `::first-line`, `::first-letter`) is the old `:before`,
+/// and `[a="b"]` is `[a=b]` when `b` is an identifier. Strings are not touched.
+fn tighten_combinators(prelude: &str) -> String {
+    let b = prelude.as_bytes();
+    let mut out = String::with_capacity(prelude.len());
+    let mut i = 0;
+    let ident = |v: &str| {
+        let f = v.as_bytes().first().copied();
+        let ok_start = f.is_some_and(|c| c.is_ascii_alphabetic() || c == b'_') || (f == Some(b'-') && v.as_bytes().get(1).is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_'));
+        ok_start && v.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+    };
+    while i < b.len() {
+        match b[i] {
+            q @ (b'"' | b'\'') => {
+                let mut j = i + 1;
+                while j < b.len() && b[j] != q {
+                    j += if b[j] == b'\\' { 2 } else { 1 };
+                }
+                let j = (j + 1).min(b.len());
+                // `="value"` of an attribute selector, with a plain identifier inside.
+                let inner = &prelude[(i + 1).min(j)..j.saturating_sub(1).max((i + 1).min(j))];
+                let after = b.get(j).copied();
+                if i > 0 && b[i - 1] == b'=' && j == prelude.len().min(j) && ident(inner) && j > i + 1 && matches!(after, Some(b']' | b' ')) {
+                    out.push_str(inner);
+                } else {
+                    out.push_str(&prelude[i..j]);
+                }
+                i = j;
+            }
+            b' ' if matches!(b.get(i + 1), Some(b'~' | b'+')) && b.get(i + 2) == Some(&b' ') => {
+                out.push(b[i + 1] as char);
+                i += 3;
+            }
+            b':' if b.get(i + 1) == Some(&b':') && !i.checked_sub(1).is_some_and(|p| b[p] == b':') && ["before", "after", "first-line", "first-letter"].iter().any(|n| prelude[i + 2..].starts_with(n) && !b.get(i + 2 + n.len()).is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))) => {
+                out.push(':');
+                i += 2;
+            }
+            _ => {
+                let ch = prelude[i..].chars().next().expect("a character");
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+        }
+    }
+    out
+}
+
+/// Value-level rewrites that keep the meaning: no space before `!important`, trailing zeros of numbers gone, `bold` and `normal` as numbers,
+/// a color of `rgb()` in hex, `0px` as `0` where a length is certain, quotes off a font name that is plain words, and a box shorthand
+/// (`margin`, `padding`, ...) of four or three equal parts written with fewer.
+fn refine_value(property: &str, value: &str) -> String {
+    let (body, important) = match value.strip_suffix("!important") {
+        Some(rest) => (rest.trim_end(), "!important"),
+        None => (value, ""),
+    };
+    let mut body = trim_numbers(body);
+    if property == "font-weight" {
+        body = match body.as_str() {
+            "normal" => "400".into(),
+            "bold" => "700".into(),
+            _ => body,
+        };
+    }
+    if matches!(property, "transform" | "-webkit-transform" | "-ms-transform") && body.contains(['Z', 'X', 'm']) {
+        let mut text = body.replace("rotateZ(", "rotate(").replace("skewX(", "skew(").replace("matrix(-1,0,0,1,0,0)", "scaleX(-1)").replace("matrix(1,0,0,-1,0,0)", "scaleY(-1)");
+        text = text.replace(" rotateZ(", " rotate(");
+        body = text;
+    }
+    if body.contains("rgb") {
+        body = rgb_to_hex(&body);
+    }
+    if property == "font-family" || property == "font" {
+        body = unquote_fonts(&body);
+    }
+    let boxed = matches!(property, "margin" | "padding" | "border-width" | "border-style" | "border-color" | "inset" | "scroll-margin" | "scroll-padding");
+    let zeroed = boxed || matches!(property, "top" | "right" | "bottom" | "left" | "width" | "height" | "min-width" | "min-height" | "max-width" | "max-height" | "gap" | "row-gap" | "column-gap" | "border-radius" | "outline-offset" | "text-indent");
+    if zeroed && !body.contains(['(', '"', '\'']) {
+        body = body.split(' ').map(|t| if is_zero_length(t) { "0" } else { t }).collect::<Vec<_>>().join(" ");
+    }
+    if boxed && !body.contains(['(', '"', '\'']) {
+        let mut parts: Vec<&str> = body.split(' ').collect();
+        if parts.len() == 4 && parts[1] == parts[3] {
+            parts.pop();
+        }
+        if parts.len() == 3 && parts[0] == parts[2] {
+            parts.pop();
+        }
+        if parts.len() == 2 && parts[0] == parts[1] {
+            parts.pop();
+        }
+        body = parts.join(" ");
+    }
+    format!("{body}{important}")
+}
+
+fn is_zero_length(t: &str) -> bool {
+    t.strip_prefix('0').is_some_and(|unit| matches!(unit, "px" | "em" | "rem" | "pt" | "cm" | "mm" | "in" | "ex" | "ch" | "vh" | "vw" | "vmin" | "vmax"))
+}
+
+/// `1.0` is `1` and `0.50` is `0.5` (`.5` is made by the scan before): the trailing zeros of a fraction go.
+fn trim_numbers(value: &str) -> String {
+    let b = value.as_bytes();
+    let mut out = String::with_capacity(value.len());
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c == b'"' || c == b'\'' {
+            let mut j = i + 1;
+            while j < b.len() && b[j] != c {
+                j += if b[j] == b'\\' { 2 } else { 1 };
+            }
+            let j = (j + 1).min(b.len());
+            out.push_str(&value[i..j]);
+            i = j;
+        } else if c == b'(' && value[..i].to_ascii_lowercase().ends_with("url") {
+            let j = url_end(value, i);
+            out.push_str(&value[i..j]);
+            i = j;
+        } else if (c.is_ascii_digit() || c == b'.') && !i.checked_sub(1).is_some_and(|p| b[p].is_ascii_alphanumeric() || matches!(b[p], b'_' | b'#' | b'.' | b'\\') || b[p] >= 0x80 || (b[p] == b'-' && i >= 2 && !matches!(b[i - 2], b' ' | b',' | b'(' | b'/'))) {
+            let mut j = i;
+            while j < b.len() && b[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j < b.len() && b[j] == b'.' && b.get(j + 1).is_some_and(u8::is_ascii_digit) {
+                let mut k = j + 1;
+                while k < b.len() && b[k].is_ascii_digit() {
+                    k += 1;
+                }
+                if matches!(b.get(k), Some(b'e' | b'E')) && b.get(k + 1).is_some_and(|x| x.is_ascii_digit() || matches!(x, b'-' | b'+')) {
+                    out.push_str(&value[i..k]);
+                } else {
+                    let frac = value[j + 1..k].trim_end_matches('0');
+                    out.push_str(&value[i..j]);
+                    if !frac.is_empty() {
+                        out.push('.');
+                        out.push_str(frac);
+                    }
+                }
+                i = k;
+            } else {
+                out.push_str(&value[i..j.max(i + 1)]);
+                i = j.max(i + 1);
+            }
+        } else {
+            let ch = value[i..].chars().next().expect("a character");
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
+/// `rgb(255, 0, 0)` and `rgb(255 0 0)` (whole numbers, no alpha) are `#f00`.
+fn rgb_to_hex(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(at) = rest.to_ascii_lowercase().find("rgb(") {
+        let before_ok = at == 0 || !rest.as_bytes()[at - 1].is_ascii_alphanumeric() && !matches!(rest.as_bytes()[at - 1], b'-' | b'_');
+        let Some(close) = rest[at..].find(')').map(|p| at + p) else { break };
+        let args = &rest[at + 4..close];
+        let nums: Vec<&str> = args.split(|c| c == ',' || c == ' ').filter(|s| !s.is_empty()).collect();
+        let parsed: Option<Vec<u8>> = if nums.len() == 3 { nums.iter().map(|n| n.parse::<u8>().ok().filter(|_| n.bytes().all(|d| d.is_ascii_digit()))).collect() } else { None };
+        match parsed {
+            Some(v) if before_ok => {
+                out.push_str(&rest[..at]);
+                let hex = format!("{:02x}{:02x}{:02x}", v[0], v[1], v[2]);
+                let b = hex.as_bytes();
+                if b[0] == b[1] && b[2] == b[3] && b[4] == b[5] {
+                    out.push_str(&format!("#{}{}{}", b[0] as char, b[2] as char, b[4] as char));
+                } else {
+                    out.push('#');
+                    out.push_str(&hex);
+                }
+                rest = &rest[close + 1..];
+            }
+            _ => {
+                out.push_str(&rest[..at + 4]);
+                rest = &rest[at + 4..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `"Helvetica Neue"` is `Helvetica Neue` when every word is an identifier and the whole is not a keyword.
+fn unquote_fonts(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(at) = rest.find('"') {
+        let Some(len) = rest[at + 1..].find('"') else { break };
+        let name = &rest[at + 1..at + 1 + len];
+        let words_ok = !name.is_empty()
+            && name.split(' ').all(|w| {
+                let mut chars = w.chars();
+                chars.next().is_some_and(|f| f.is_ascii_alphabetic() || f == '_' || (f == '-' && w.len() > 1 && w.as_bytes()[1].is_ascii_alphabetic()))
+                    && w.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            });
+        let keyword = matches!(
+            name.to_ascii_lowercase().as_str(),
+            "inherit" | "initial" | "unset" | "revert" | "revert-layer" | "default" | "serif" | "sans-serif" | "monospace" | "cursive" | "fantasy" | "system-ui" | "ui-serif" | "ui-sans-serif" | "ui-monospace" | "ui-rounded" | "math" | "emoji" | "fangsong" | "none"
+        );
+        let before_ok = at == 0 || matches!(rest.as_bytes()[at - 1], b' ' | b',');
+        let after = rest.as_bytes().get(at + len + 2).copied();
+        let after_ok = after.is_none_or(|c| matches!(c, b',' | b' ' | b'/'));
+        if words_ok && !keyword && before_ok && after_ok {
+            out.push_str(&rest[..at]);
+            out.push_str(name);
+        } else {
+            out.push_str(&rest[..at + len + 2]);
+        }
+        rest = &rest[at + len + 2..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// `minify_text`, also saying where the given offsets of `text` ended up (increasing offsets in,
@@ -1125,8 +1624,16 @@ mod tests {
     #[test]
     fn minifies() {
         assert_eq!(minify_text("/* c */ a  >  b ,\n c {\n  color: red ;\n  margin: 0 auto;\n}\n/*! keep */ d{x:url( a b.png )}"), "a>b,c{color:red;margin:0 auto}/*! keep */ d{x:url(a b.png)}");
-        assert_eq!(minify_text("a::before{content:\"a  b\"}"), "a::before{content:\"a  b\"}");
+        assert_eq!(minify_text("a::before{content:\"a  b\"}"), "a:before{content:\"a  b\"}");
         assert_eq!(minify_text("é { x: 1 ; }"), "é{x:1}");
+    }
+
+    #[test]
+    fn values_get_their_short_spelling() {
+        assert_eq!(minify_text("a { color: #FFFFFF; b: #aabbccdd; c: #abcdef; d: #11223 }"), "a{color:#fff;b:#abcd;c:#abcdef;d:#11223}");
+        assert_eq!(minify_text("a { margin: 0.5em -0.25em 10.5px 0; w: calc(1 + 0.5) ; x: a0.5 }"), "a{margin:.5em -.25em 10.5px 0;w:calc(1 + .5);x:a0.5}");
+        // Selectors, strings, urls, filters and ids are not values.
+        assert_eq!(minify_text("#ffffff, a:not(#aabbcc) { content: \"#ffffff 0.5\"; b: url(#ffffff0.5); filter: progid:X(c=#FFFFFF) }"), "#ffffff,a:not(#aabbcc){content:\"#ffffff 0.5\";b:url(#ffffff0.5);filter:progid:X(c=#FFFFFF)}");
     }
 
     #[test]
