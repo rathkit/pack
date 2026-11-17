@@ -73,9 +73,33 @@ const flatten = (list) => toArray(list).flatMap((item) => (Array.isArray(item) ?
 const handlerOf = (hook) => (typeof hook === 'function' ? hook : hook && typeof hook.handler === 'function' ? hook.handler : null);
 
 // Rollup 4 / Vite 6 hook filters: { id, code } each a string, RegExp, or { include, exclude }.
+// A filter string with glob characters (`**/*.glsl`, `*.{js,ts}`) is a glob, matched against the path as written and relative to the project; any other string is a part of the id.
+const globs = new Map();
+const globOf = (pattern) => {
+  if (!globs.has(pattern)) {
+    let source = '';
+    let depth = 0;
+    for (let i = 0; i < pattern.length; i++) {
+      const c = pattern[i];
+      if (c === '*' && pattern[i + 1] === '*') {
+        const slash = pattern[i + 2] === '/';
+        source += slash ? '(?:.*/)?' : '.*';
+        i += slash ? 2 : 1;
+      } else if (c === '*') source += '[^/]*';
+      else if (c === '?') source += '[^/]';
+      else if (c === '{') (depth++, (source += '(?:'));
+      else if (c === '}' && depth > 0) (depth--, (source += ')'));
+      else if (c === ',' && depth > 0) source += '|';
+      else source += c.replace(/[.+^$()|[\]\\]/g, '\\$&');
+    }
+    globs.set(pattern, new RegExp(`^${source}$`));
+  }
+  return globs.get(pattern);
+};
 const matchesFilter = (filter, value) => {
   if (filter === undefined || filter === null) return true;
-  const test = (pattern) => (pattern instanceof RegExp ? ((pattern.lastIndex = 0), pattern.test(value)) : typeof pattern === 'string' ? value.includes(pattern) || value === pattern : false);
+  const relative = path.isAbsolute(value) ? path.relative(root, value).split(path.sep).join('/') : value;
+  const test = (pattern) => (pattern instanceof RegExp ? ((pattern.lastIndex = 0), pattern.test(value)) : typeof pattern === 'string' ? (/[*?{]/.test(pattern) ? globOf(pattern).test(value) || globOf(pattern).test(relative) : value.includes(pattern) || value === pattern) : false);
   if (typeof filter === 'string' || filter instanceof RegExp || Array.isArray(filter)) return toArray(filter).some(test);
   const include = toArray(filter.include);
   const exclude = toArray(filter.exclude);
@@ -270,12 +294,18 @@ const viteConfig = () => ({
   // Files Vite would turn into a URL by default (a plugin asks before it loads a file as text).
   assetsInclude: (file) => /\.(?:png|jpe?g|gif|svg|webp|avif|ico|bmp|woff2?|ttf|otf|eot|mp4|webm|ogg|mp3|wav|flac|aac|pdf)(?:[?#].*)?$/i.test(String(file)),
   consumer: 'client',
+  preview: {},
   experimental: {},
   ssr: {},
   server: { hmr: true, middlewareMode: false },
   logger: { info: (m) => log('info', m), warn: (m) => log('warn', m), warnOnce: (m) => log('warn', m), error: (m) => log('error', m), clearScreen() {}, hasWarned: false },
   css: {},
   esbuild: {},
+  // Vite's resolver for a plugin's own use (what @tailwindcss/vite follows `@import` with).
+  createResolver: () => async (id, importer) => {
+    const result = await resolveId(id, importer, { isEntry: false, kind: 'import-statement', attributes: {} }, null);
+    return result && !result.external ? result.id : undefined;
+  },
   cacheDir: path.join(root, 'node_modules/.rathkit'),
   publicDir: path.join(root, 'public'),
 });
@@ -1543,13 +1573,19 @@ async function init(params) {
     for (const c of toArray(resolve.conditions ?? [])) if (!resolveExtras.conditions.includes(c)) resolveExtras.conditions.push(c);
     for (const f of toArray(resolve.mainFields ?? [])) if (!resolveExtras.mainFields.includes(f)) resolveExtras.mainFields.push(f);
   };
+  // What `config` hooks ask to leave out of the bundle (`build.rollupOptions.external`; vite-plugin-externalize-deps does).
+  const hookExternals = [];
   for (const plugin of list) {
     const hook = handlerOf(plugin.config);
     if (hook) {
-      const returned = await hook.call(createContext(plugin), { ...config, root }, { command, mode });
+      // (Vite hands its hooks a config that has the sections the command line fills in; plugins write to them without checking.)
+      const given = { ...config, root, build: { ...(config.build ?? {}) }, server: { ...(config.server ?? {}) }, preview: { ...(config.preview ?? {}) }, optimizeDeps: { ...(config.optimizeDeps ?? {}), esbuildOptions: { ...(config.optimizeDeps?.esbuildOptions ?? {}) } } };
+      const returned = await hook.call(createContext(plugin), given, { command, mode });
       if (returned?.define) configOptions.define = { ...configOptions.define, ...returned.define };
       if (returned?.resolve?.alias) configOptions.alias = [...toArray(configOptions.alias ?? []), ...(Array.isArray(returned.resolve.alias) ? returned.resolve.alias : Object.entries(returned.resolve.alias).map(([find, replacement]) => ({ find, replacement })))];
       takeResolve(returned?.resolve);
+      const external = returned?.build?.rollupOptions?.external ?? returned?.build?.rolldownOptions?.external;
+      if (external) hookExternals.push(...toArray(external));
     }
   }
   // Vite 6's environments: the browser one is the environment of a bundle for a page.
@@ -1566,10 +1602,15 @@ async function init(params) {
     takeResolve({ conditions: toArray(config.resolve?.conditionNames).filter((c) => typeof c === 'string' && !['import', 'require', 'default', '...'].includes(c)) });
     takeResolve({ conditions: swap(environment.resolve?.conditions), mainFields: environment.resolve?.mainFields });
   }
+  // One resolved config for all of them, with the plugin list (plugins look each other up in it, and some add a plugin to it:
+  // vite-plugin-compression2 adds the one that compresses the bundle); what is added runs like the others.
+  const resolvedConfig = viteConfig();
+  resolvedConfig.plugins = [...list];
   for (const plugin of list) {
     const hook = handlerOf(plugin.configResolved);
-    if (hook) await hook.call(createContext(plugin), viteConfig());
+    if (hook) await hook.call(createContext(plugin), resolvedConfig);
   }
+  for (const added of resolvedConfig.plugins.slice(list.length)) list.push(...(await normalizePlugin(added)));
   // Parcel plugins: a `.parcelrc` (given as the config, or found at the root), or `parcel` in the config.
   const parcelPlugins = [];
   {
@@ -1589,6 +1630,7 @@ async function init(params) {
     }
   }
   const pre = [];
+  if (hookExternals.length) pre.push(externalPlugin(hookExternals));
   if (config.external || config.build?.rollupOptions?.external) pre.push(externalPlugin(config.external ?? config.build.rollupOptions.external));
   if (config.externals && !config.external) pre.push(webpackExternalsPlugin(config.externals));
   {

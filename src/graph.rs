@@ -669,7 +669,9 @@ impl<'a> Context<'a> {
         });
         let looks_like_script = |t: &str| {
             let head = t.trim_start();
-            ["import ", "import{", "export ", "export{", "var ", "const ", "let ", "function", "/*#__PURE__*/", "\"use ", "'use ", "(function", "module.exports"].iter().any(|k| head.starts_with(k)) && crate::parser::parse(t, ParseOptions::new(true)).is_ok()
+            (["import ", "import{", "export ", "export{", "var ", "const ", "let ", "function", "/*#__PURE__*/", "\"use ", "'use ", "(function", "module.exports"].iter().any(|k| head.starts_with(k))
+                // (a plugin's code may open with an assignment and still be a module: vite-plugin-wasm's starts `URL = globalThis.URL`)
+                || t.lines().any(|line| line.starts_with("import ") || line.starts_with("export "))) && crate::parser::parse(t, ParseOptions::new(true)).is_ok()
         };
         let looks_like_json = |text: &str| Json::parse(text).is_ok() && text.trim_start().starts_with(['{', '[', '"']);
         let kind_of = |text: Option<&str>| -> Kind {

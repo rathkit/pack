@@ -2,6 +2,7 @@
 // fixture under tests/rollup-vite/<name>/ and is built here with `rkp bundle main.js --config rathkit.config.mjs`.
 // A fixture has: main.js (the entry), rathkit.config.mjs (the plugins, as a Rollup or Vite config would list them),
 // expected.txt (what `node dist/bundle.mjs` prints), and optionally
+//   entry       a file naming the entry (default main.js); `outdir` (an empty file) builds into a folder instead of one file (an HTML entry)
 //   no-entry    (an empty file) the entry comes from the config's `input`, none is given on the command line
 //   flags.json  extra command line flags (an array), `run.json` false to skip the run (output checked only),
 //   check.mjs   default export (outdir, fixtureDir) => null | problem text, to check files the build wrote.
@@ -33,7 +34,9 @@ for (const name of names) {
   symlinkSync(testModules, join(dir, 'node_modules'), 'dir');
   const out = join(dir, 'dist');
   const flags = json(join(src, 'flags.json'), []);
-  const b = spawnSync(bin, ['bundle', ...(existsSync(join(src, 'no-entry')) ? [] : ['main.js']), '--outfile', join(out, 'bundle.mjs'), '--config', 'rathkit.config.mjs', ...flags], { cwd: dir, encoding: 'utf8' });
+  const entry = existsSync(join(src, 'entry')) ? readFileSync(join(src, 'entry'), 'utf8').trim() : 'main.js';
+  const output = existsSync(join(src, 'outdir')) ? ['--outdir', out] : ['--outfile', join(out, 'bundle.mjs')];
+  const b = spawnSync(bin, ['bundle', ...(existsSync(join(src, 'no-entry')) ? [] : [entry]), ...output, '--config', 'rathkit.config.mjs', ...flags], { cwd: dir, encoding: 'utf8', timeout: 120000 });
   let problem = null;
   if (b.status !== 0) problem = `bundler failed: ${b.stderr.trim()}`;
   else {
