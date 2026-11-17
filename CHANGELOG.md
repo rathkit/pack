@@ -32,7 +32,8 @@ about stability.
   are left as written. A rule that follows one with the same selector is one rule, and one with the same body joins its selector list when both selectors are
   of the kind every browser reads. A quoted `url()` that holds a `)` no longer ends the scan early. The minified text of style sheets is different from before.
 - Faster builds of big bundles: the modules of a bundle of 256 KB of source or more are scanned on all cores (the output is the same for every number of
-  cores), and a source map's line tables and inline-map lookups are made on all cores, so a map adds 15% to a minified build of lodash-es instead of 39%.
+  cores), and a source map's line tables and inline-map lookups are made on all cores, so a map adds 15% to a minified build of lodash-es instead of 39%. The scan keeps the records of the modules it is working on, which costs a
+  little memory on mid-size bundles: the peak of React server rendering with a source map goes from 19.3 to 19.9 MB on four cores (3%; 10% on a hosted CI runner).
 - Less memory: a one-shot build drops the per-module scans and used-name sets before the minifier starts, finds repeated requests through an index
   instead of a quadratic scan, and runs on a 1 GB stack so that deeply nested generated files do not overflow it. `docs/memory.md` states the bound and
   `tools/run-worstcase.mjs` (50,000-module graphs in four shapes, a 16 MB module and a barrel of 5,000 re-exports) checks it on Linux. `RATHKIT_TIMING`
