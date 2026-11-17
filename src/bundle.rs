@@ -690,8 +690,12 @@ impl<'a> Bundler<'a> {
             self.scan_salt = self.compute_scan_salt();
             crate::minify::next_build();
         }
+        let before_scan = std::time::Instant::now();
         for id in included {
             self.scan(id);
+        }
+        if std::env::var_os("RATHKIT_TIMING").is_some() {
+            eprintln!("  scan: {:.1} ms{}", before_scan.elapsed().as_secs_f64() * 1000.0, crate::par::memory_note());
         }
         if self.registry {
             return self.run_registry(options);
@@ -801,13 +805,23 @@ impl<'a> Bundler<'a> {
             let started = std::time::Instant::now();
             raws.push(self.emit_chunk(c, &order, &exports, &names, &links));
             if timing {
-                eprintln!("  emit chunk {c}: {:.1} ms", started.elapsed().as_secs_f64() * 1000.0);
+                eprintln!("  emit chunk {c}: {:.1} ms{}", started.elapsed().as_secs_f64() * 1000.0, crate::par::memory_note());
             }
         }
         // Frameworks that use decorators read class names at run time (Nest builds its module
         // tokens from them), so shortening them breaks those programs unless asked for.
         let keep_names = options.minify.keep_names.unwrap_or(graph.decorator_metadata || graph.experimental_decorators);
         let settings = crate::minify::Options { keep_top_level: self.format == Format::Iife, keep_names: Some(keep_names), legacy: !self.target.supports(crate::target::Feature::Template) || !self.target.supports(crate::target::Feature::OptionalCatch), ..options.minify };
+        if !self.keep_scans {
+            // The chunks' text is made; the scans of the modules (their edits, and what the namespaces list) are not read again, and the
+            // minifier is about to want the memory. With `keep_scans` they go back to their modules instead, for the next build.
+            self.code = HashMap::new();
+            self.ns_entries = HashMap::new();
+            self.key_refs = HashMap::new();
+        }
+        if timing {
+            eprintln!("  emitted: {}", crate::par::memory_note());
+        }
         let marks = std::mem::take(&mut *self.marks.lock().expect("marks"));
         // The chunks are independent from here on, so with several they are finished side by side.
         let finish = |c: usize, (raw, layout): (String, crate::minify::Layout)| self.finish_chunk(c, raw, layout, options, &settings, &marks);
@@ -3453,23 +3467,34 @@ impl Bundler<'_> {
         let graph = self.graph;
         let mut globals: HashSet<&str> = RESERVED.iter().copied().collect();
         let mut nested: HashMap<ModuleId, &HashSet<String>> = HashMap::new();
+        // What a module uses is worked out once for as long as the module is kept. A build that keeps nothing holds it here only, so it
+        // is gone when the names are made instead of sitting in every module until the process ends.
+        let mut worked_out: Vec<(ModuleId, crate::graph::ModuleNames)> = Vec::new();
+        let used_by = |module: &Module, parsed: &crate::parser::Parsed| {
+            let root = parsed.semantic.root_scope();
+            let wrapped = module.kind != ModuleKind::Esm;
+            crate::graph::ModuleNames {
+                unresolved: parsed.semantic.unresolved().iter().filter_map(|&node| if let NodeKind::Ident(name) = parsed.ast[node].kind { Some(parsed.ast.atom(name).to_string()) } else { None }).collect(),
+                // What an inner scope declares can capture a reference to a bundle-level name.
+                nested: parsed.semantic.symbols().filter(|(_, s)| wrapped || s.scope != root).map(|(_, s)| parsed.ast.atom(s.name).to_string()).collect(),
+            }
+        };
         for module in &graph.modules {
             if !self.included(module.id) {
                 continue;
             }
             let Some(parsed) = module.parsed.as_ref() else { continue };
-            // What a module uses is worked out once for as long as the module is kept.
-            let used = module.memo.names.get_or_init(|| {
-                let root = parsed.semantic.root_scope();
-                let wrapped = module.kind != ModuleKind::Esm;
-                crate::graph::ModuleNames {
-                    unresolved: parsed.semantic.unresolved().iter().filter_map(|&node| if let NodeKind::Ident(name) = parsed.ast[node].kind { Some(parsed.ast.atom(name).to_string()) } else { None }).collect(),
-                    // What an inner scope declares can capture a reference to a bundle-level name.
-                    nested: parsed.semantic.symbols().filter(|(_, s)| wrapped || s.scope != root).map(|(_, s)| parsed.ast.atom(s.name).to_string()).collect(),
-                }
-            });
+            if graph.keeps_modules {
+                let used = module.memo.names.get_or_init(|| used_by(module, parsed));
+                globals.extend(used.unresolved.iter().map(String::as_str));
+                nested.insert(module.id, &used.nested);
+            } else {
+                worked_out.push((module.id, used_by(module, parsed)));
+            }
+        }
+        for (id, used) in &worked_out {
             globals.extend(used.unresolved.iter().map(String::as_str));
-            nested.insert(module.id, &used.nested);
+            nested.insert(*id, &used.nested);
         }
         let mut names: HashMap<Key, String> = HashMap::new();
         let mut taken: HashSet<String> = HashSet::new();

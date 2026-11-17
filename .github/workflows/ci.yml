@@ -95,6 +95,7 @@ jobs:
       - run: node tools/test-npm-wrapper.mjs
       - run: node tools/check-promises.mjs
       - run: node tools/run-split.mjs
+      - run: node tools/run-worstcase.mjs
       - run: node tools/run-library.mjs
       - run: node tools/run-sourcemaps.mjs
       - run: node tools/run-watch.mjs
@@ -225,6 +226,7 @@ jobs:
       - run: node tools/test-npm-wrapper.mjs
       - run: node tools/check-promises.mjs
       - run: node tools/run-split.mjs
+      - run: node tools/run-worstcase.mjs
       - run: node tools/run-library.mjs
       - run: node tools/run-sourcemaps.mjs
       - run: node tools/run-watch.mjs

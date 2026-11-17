@@ -122,7 +122,7 @@ impl ModuleRecord {
     }
 
     pub fn build_with(parsed: &Parsed, jsx: &JsxOptions, defines: &Defines) -> ModuleRecord {
-        let mut builder = Builder { ast: &parsed.ast, semantic: &parsed.semantic, is_ts: parsed.is_ts, jsx, defines, record: ModuleRecord::default() };
+        let mut builder = Builder { ast: &parsed.ast, semantic: &parsed.semantic, is_ts: parsed.is_ts, jsx, defines, record: ModuleRecord::default(), by_specifier: None };
         builder.run();
         builder.record
     }
@@ -144,7 +144,13 @@ struct Builder<'a> {
     jsx: &'a JsxOptions,
     defines: &'a Defines,
     record: ModuleRecord,
+    /// For a module with many requests (a generated barrel or entry): the requests with each specifier, so a repeat is found without a
+    /// scan of the list, which is quadratic for a module that imports tens of thousands of files.
+    by_specifier: Option<std::collections::HashMap<String, Vec<usize>>>,
 }
+
+/// Past this many requests the builder keeps an index of them.
+const INDEX_REQUESTS_AT: usize = 24;
 
 impl Builder<'_> {
     fn run(&mut self) {
@@ -204,12 +210,28 @@ impl Builder<'_> {
     }
 
     fn request_for(&mut self, specifier: &str, kind: RequestKind, attrs: Vec<(String, String)>, span: Span) -> usize {
-        let existing = self.record.requests.iter().position(|r| r.kind == kind && r.specifier == specifier && r.attrs == attrs);
+        let same = |r: &Request| r.kind == kind && r.specifier == specifier && r.attrs == attrs;
+        let existing = match &self.by_specifier {
+            Some(index) => index.get(specifier).and_then(|ids| ids.iter().copied().find(|&i| same(&self.record.requests[i]))),
+            None => self.record.requests.iter().position(same),
+        };
         if let Some(index) = existing {
             return index;
         }
         self.record.requests.push(Request { specifier: specifier.to_string(), kind, attrs, span });
-        self.record.requests.len() - 1
+        let at = self.record.requests.len() - 1;
+        match &mut self.by_specifier {
+            Some(index) => index.entry(specifier.to_string()).or_default().push(at),
+            None if self.record.requests.len() >= INDEX_REQUESTS_AT => {
+                let mut index: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+                for (i, r) in self.record.requests.iter().enumerate() {
+                    index.entry(r.specifier.clone()).or_default().push(i);
+                }
+                self.by_specifier = Some(index);
+            }
+            None => {}
+        }
+        at
     }
 
     fn import_declaration(&mut self, node: NodeId, import: crate::ast::ImportId) {

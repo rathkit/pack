@@ -84,7 +84,7 @@ fn run(source: &str, options: &Options, anchors: Option<&mut Vec<Anchor>>, barri
     let mut clock = std::time::Instant::now();
     let mut lap = |what: &str| {
         if timing {
-            eprintln!("  minify {what}: {:.1} ms", clock.elapsed().as_secs_f64() * 1000.0);
+            eprintln!("  minify {what}: {:.1} ms{}", clock.elapsed().as_secs_f64() * 1000.0, crate::par::memory_note());
             clock = std::time::Instant::now();
         }
     };

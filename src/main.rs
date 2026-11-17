@@ -26,7 +26,20 @@ fn tune_allocator() {
 #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
 fn tune_allocator() {}
 
+/// The stack the work runs on. The syntax trees are walked by recursion, and a generated file can nest a thousand levels or
+/// chain a hundred thousand `+`, which the 8 MB of the process's own stack does not hold. The pages of a stack are mapped when
+/// they are touched, so a big one costs address space and nothing else.
+const STACK_BYTES: usize = 1 << 30;
+
 fn main() -> ExitCode {
+    match std::thread::Builder::new().name("rkp".to_string()).stack_size(STACK_BYTES).spawn(real_main) {
+        Ok(handle) => handle.join().unwrap_or(ExitCode::FAILURE),
+        // No address space for it (a low `ulimit -v`): the process's own stack, as before.
+        Err(_) => real_main(),
+    }
+}
+
+fn real_main() -> ExitCode {
     tune_allocator();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.split_first() {
@@ -1925,12 +1938,12 @@ fn run_build(job: &Job) -> Outcome {
     }
     bundle_options.entry_names = entry_names;
     if timing {
-        eprintln!("  graph: {:.1} ms ({} modules)", started.elapsed().as_secs_f64() * 1000.0, graph.modules.len());
+        eprintln!("  graph: {:.1} ms ({} modules){}", started.elapsed().as_secs_f64() * 1000.0, graph.modules.len(), rathkit_pack::par::memory_note());
     }
     let linked_at = Instant::now();
     let linked = rathkit_pack::link::link(&graph);
     if timing {
-        eprintln!("  link: {:.1} ms", linked_at.elapsed().as_secs_f64() * 1000.0);
+        eprintln!("  link: {:.1} ms{}", linked_at.elapsed().as_secs_f64() * 1000.0, rathkit_pack::par::memory_note());
     }
     let mut failed = false;
     let mut error_texts: Vec<String> = Vec::new();
@@ -1964,7 +1977,7 @@ fn run_build(job: &Job) -> Outcome {
     let entry_exports = !(bundle_options.format == rathkit_pack::bundle::Format::Iife && bundle_options.global_name.is_none());
     let shaken = if job.treeshake { rathkit_pack::shake::shake_entries(&graph, &linked, entry_exports) } else { rathkit_pack::shake::keep_everything(&graph) };
     if timing {
-        eprintln!("  shake: {:.1} ms", shake_at.elapsed().as_secs_f64() * 1000.0);
+        eprintln!("  shake: {:.1} ms{}", shake_at.elapsed().as_secs_f64() * 1000.0, rathkit_pack::par::memory_note());
     }
     let bundle_at = Instant::now();
     // Files written beside the output (style sheets) are named after it.
@@ -2020,7 +2033,7 @@ fn run_build(job: &Job) -> Outcome {
         }
     }
     if timing {
-        eprintln!("  bundle (all chunks): {:.1} ms", bundle_at.elapsed().as_secs_f64() * 1000.0);
+        eprintln!("  bundle (all chunks): {:.1} ms{}", bundle_at.elapsed().as_secs_f64() * 1000.0, rathkit_pack::par::memory_note());
     }
     // Plugins get the finished chunks (renderChunk), then the whole output (generateBundle).
     let mut written_names: Vec<String> = Vec::new();

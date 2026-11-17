@@ -43,6 +43,16 @@ pub fn map<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
     done.into_inner().expect("results").into_iter().map(|r| r.expect("every item ran")).collect()
 }
 
+/// For `RATHKIT_TIMING`: the resident size now and at its peak (Linux; empty elsewhere).
+pub fn memory_note() -> String {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let field = |name: &str| status.lines().find_map(|l| l.strip_prefix(name)).and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<u64>().ok());
+    match (field("VmRSS:"), field("VmHWM:")) {
+        (Some(now), Some(peak)) => format!("  [rss {} MB, peak {} MB]", now / 1024, peak / 1024),
+        _ => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

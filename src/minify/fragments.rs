@@ -345,7 +345,7 @@ fn in_pieces(source: &str, layout: &Layout, ranges: &[std::ops::Range<usize>], o
     let mut clock = std::time::Instant::now();
     let mut lap = |what: &str| {
         if timing {
-            eprintln!("  minify {what}: {:.1} ms", clock.elapsed().as_secs_f64() * 1000.0);
+            eprintln!("  minify {what}: {:.1} ms{}", clock.elapsed().as_secs_f64() * 1000.0, crate::par::memory_note());
             clock = std::time::Instant::now();
         }
     };
