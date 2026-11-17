@@ -319,7 +319,7 @@ fn analyze<'s>(source: &'s str, range: &std::ops::Range<usize>, layout: &Layout,
         asi[i] = true;
     }
     asi[tokens.len()] = parsed.eof_asi;
-    let plan = options.syntax.then(|| crate::compress::plan(text, &parsed.ast, &parsed.semantic, tokens, &[], options.legacy));
+    let plan = options.syntax.then(|| crate::compress::plan(text, &parsed.ast, &parsed.semantic, tokens, &[], options.legacy, true));
     let mut facts = Facts::default();
     facts.collect(&parsed.ast, &parsed.semantic, text);
     let prep = options.identifiers.then(|| facts.prepare(&parsed.ast, &parsed.semantic, options));
@@ -963,6 +963,22 @@ export { counter as total, bump };
         compare(Options { whitespace: true, identifiers: true, syntax: true, keep_top_level: false, keep_names: Some(true), legacy: false });
         compare(Options { whitespace: false, identifiers: true, syntax: false, keep_top_level: false, keep_names: None, legacy: false });
         compare(Options { whitespace: true, identifiers: false, syntax: true, keep_top_level: false, keep_names: None, legacy: false });
+    }
+
+    #[test]
+    fn a_constant_read_once_here_and_in_another_piece_stays_declared() {
+        // `K` has one read in the piece that declares it (in `M`'s initializer) and one in the next piece. Written at its one local read and
+        // dropped, it would leave the other read with no declaration.
+        let options = Options { whitespace: true, identifiers: true, syntax: true, keep_top_level: false, keep_names: None, legacy: false };
+        let source = "var K = 16, M = K | 2;\nfunction f(x) { return x & K }\nconsole.log(f(16), M);\n";
+        let layout = Layout { head: 0, tail: source.len(), cuts: cuts(source), reserved: Vec::new(), ..Layout::default() };
+        let c = cuts(source);
+        let ranges = vec![0..c[0], c[0]..c[1], c[1]..source.len()];
+        let out = in_pieces(source, &layout, &ranges, &options, None).unwrap();
+        let parsed = parser::parse(&out, ParseOptions::new(true)).unwrap();
+        let free: Vec<&str> = parsed.semantic.unresolved().iter().filter_map(|&n| match parsed.ast[n].kind { NodeKind::Ident(a) => Some(parsed.ast.atom(a)), _ => None }).collect();
+        assert!(free.iter().all(|n| *n == "console"), "a name is read that nothing declares: {free:?}\n{out}");
+        assert!(out.contains("=16"), "the constant is still declared: {out}");
     }
 
     #[test]

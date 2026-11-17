@@ -100,7 +100,7 @@ fn run(source: &str, options: &Options, anchors: Option<&mut Vec<Anchor>>, barri
     // Which tokens the syntax rewrites change does not depend on the names, so the two plans
     // are made side by side.
     let plan = std::thread::scope(|scope| {
-        let syntax = options.syntax.then(|| scope.spawn(|| crate::compress::plan(source, &parsed.ast, &parsed.semantic, tokens, barriers, options.legacy)));
+        let syntax = options.syntax.then(|| scope.spawn(|| crate::compress::plan(source, &parsed.ast, &parsed.semantic, tokens, barriers, options.legacy, !barriers.is_empty())));
         if options.any() {
             facts.collect(&parsed.ast, &parsed.semantic, source);
             lap("collect facts");
@@ -1374,7 +1374,7 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
     let syntax = options.syntax;
     let a = parser::parse(source, ParseOptions::new(true)).map_err(|e| format!("original: {e}"))?;
     let b = parser::parse(&minified, ParseOptions::new(true)).map_err(|e| format!("minified: {e}"))?;
-    let inlined: HashMap<NodeId, NodeId> = if syntax { crate::compress::inlinable_constants(&a.ast, &a.semantic).into_iter().collect() } else { HashMap::default() };
+    let inlined: HashMap<NodeId, NodeId> = if syntax { crate::compress::inlinable_constants(&a.ast, &a.semantic, false).into_iter().collect() } else { HashMap::default() };
     let inlined_uses: HashMap<NodeId, NodeId> = inlined.iter().map(|(&d, &u)| (u, d)).collect();
     let no_inlined: HashMap<NodeId, NodeId> = HashMap::default();
     let mut forward: HashMap<SymbolId, SymbolId> = HashMap::default();

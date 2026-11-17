@@ -117,7 +117,10 @@ pub(crate) fn statement_leaves(ast: &Ast, s: NodeId) -> bool {
 
 /// Declarations `const name = 5;` (a number or a string) of a name that is read once, after the declaration, and never assigned: the declarator
 /// by the node that reads it. The reader is written as the literal and the declarator is left out.
-pub(crate) fn inlinable_constants(ast: &Ast, sem: &Semantic) -> crate::fxhash::FastMap<NodeId, NodeId> {
+///
+/// `shared_top`: the text is a piece of a bundle, so what it declares at its top level may be read by the other pieces, and the one read
+/// this text holds is not all of them. Such names are left alone.
+pub(crate) fn inlinable_constants(ast: &Ast, sem: &Semantic, shared_top: bool) -> crate::fxhash::FastMap<NodeId, NodeId> {
     use crate::semantic::{ScopeKind, SymbolKind, scope_flags, symbol_flags};
     let mut parent: Vec<Option<NodeId>> = vec![None; ast.node_count() + 1];
     let mut order = Vec::new();
@@ -152,6 +155,9 @@ pub(crate) fn inlinable_constants(ast: &Ast, sem: &Semantic) -> crate::fxhash::F
         }
         let Some(sym) = sem.symbol_of(target) else { continue };
         let symbol = sem.symbol(sym);
+        if shared_top && symbol.scope == root {
+            continue;
+        }
         let global = symbol.scope == root && sem.scope(root).kind != ScopeKind::Module;
         if global || symbol.reads != 1 || symbol.writes != 1 || !matches!(symbol.kind, SymbolKind::Var | SymbolKind::Let | SymbolKind::Const) || symbol.flags & (symbol_flags::DYNAMIC | symbol_flags::EXPORTED) != 0 || sem.scope(symbol.scope).flags & scope_flags::HAS_EVAL != 0 {
             continue;
@@ -197,8 +203,8 @@ fn self_precedence_ok(ast: &Ast, left: NodeId) -> bool {
     !matches!(ast[left].kind, NodeKind::Sequence(_) | NodeKind::Assign { .. } | NodeKind::Conditional { .. } | NodeKind::Yield(_) | NodeKind::Function { .. })
 }
 
-pub(crate) fn plan(source: &str, ast: &Ast, sem: &Semantic, tokens: &[Token], barriers: &[u32], legacy: bool) -> Plan {
-    let mut ctx = Ctx { legacy, source, ast, sem, tokens, barriers, parent: vec![None; ast.node_count() + 1], actions: vec![Action::Keep; tokens.len()], locked: vec![false; tokens.len()], dead: Vec::new(), kept_semi: Vec::new(), done: Default::default(), visited: Default::default(), as_expr: Default::default(), inlined: Default::default(), seq_returns: Default::default(), closers: vec![false; tokens.len()], listed: Default::default(), joined_ifs: Default::default(), consumed: Default::default(), removed: Default::default(), texts: Vec::new(), text_index: Default::default() };
+pub(crate) fn plan(source: &str, ast: &Ast, sem: &Semantic, tokens: &[Token], barriers: &[u32], legacy: bool, shared_top: bool) -> Plan {
+    let mut ctx = Ctx { legacy, shared_top, source, ast, sem, tokens, barriers, parent: vec![None; ast.node_count() + 1], actions: vec![Action::Keep; tokens.len()], locked: vec![false; tokens.len()], dead: Vec::new(), kept_semi: Vec::new(), done: Default::default(), visited: Default::default(), as_expr: Default::default(), inlined: Default::default(), seq_returns: Default::default(), closers: vec![false; tokens.len()], listed: Default::default(), joined_ifs: Default::default(), consumed: Default::default(), removed: Default::default(), texts: Vec::new(), text_index: Default::default() };
     let mut order = Vec::new();
     let mut stack = vec![ast.root];
     while let Some(n) = stack.pop() {
@@ -265,6 +271,8 @@ struct Ctx<'a> {
     sem: &'a Semantic,
     tokens: &'a [Token],
     barriers: &'a [u32],
+    /// The text is a piece of a bundle: its top-level names may be read by other pieces (see `inlinable_constants`).
+    shared_top: bool,
     parent: Vec<Option<NodeId>>,
     actions: Vec<Action>,
     /// Tokens a rewrite has decided on, which later rules (visiting the children) must not change.
@@ -299,7 +307,7 @@ impl Ctx<'_> {
     /// `const k = 5; f(k);` is `f(5);`: see `inlinable_constants`. The use is written as the literal and the declarator goes.
     fn inline_constants(&mut self) {
         let (ast, tokens) = (self.ast, self.tokens);
-        let found = inlinable_constants(ast, self.sem);
+        let found = inlinable_constants(ast, self.sem, self.shared_top);
         if found.is_empty() {
             return;
         }

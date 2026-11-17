@@ -45,14 +45,14 @@
       "rssKb": 15112
     },
     "lodash/min": {
-      "bytes": 74854,
-      "gzip": 25551,
+      "bytes": 76474,
+      "gzip": 26710,
       "rssKb": 18036
     },
     "lodash/min-map": {
-      "bytes": 74899,
-      "gzip": 25581,
-      "map": 770403,
+      "bytes": 76519,
+      "gzip": 26741,
+      "map": 778704,
       "rssKb": 23032
     },
     "three/plain": {
