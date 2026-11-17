@@ -16,7 +16,7 @@ What an alpha or beta does promise, and checks on every change (`tools/check-pro
 scripts in any package, a build that needs no network, provenance and checksums on every release. It promises nothing
 about stability.
 
-## Unreleased
+## 0.3.0-beta.0 - 2026-11-16
 
 ### Changed
 
@@ -37,8 +37,21 @@ about stability.
   build and used when nothing they depend on changed, which takes the warm minified rebuild of the TypeScript compiler from over a hundred
   milliseconds to a few tens. The output is the same as that of a build from nothing (`tests/rebuild.rs`, `tools/run-rebuild.mjs`).
 
+### Known gaps
+
+- Pack does not read `base` from a Vite configuration; its default public path is `./`.
+- On the container benchmark of this release (docs/benchmarks.md), Pack is ahead of esbuild on time and memory in all 45 build cases, on minified size in every
+  minified case, on warm rebuild in all 30 cases and on HMR latency in all 14. esbuild is still smaller in two plain cases (React by gzip, Zod by size). Vite's
+  HMR is faster everywhere and Parcel's on most workloads; Parcel 3 has the lower warm rebuild on half the cases. macOS and Windows still poll for file events.
+
 ### Added
 
+- Style sheets without a configuration file: when a project has a `postcss.config.*`, a `postcss` field in `package.json`, or a Sass, Less or Stylus
+  package installed, those are run for style sheets only (JavaScript modules are not sent through the plugin host); `--no-config` turns it off.
+  `@import` conditions, `url()` with a `#fragment` or `?query`, `@charset`, and `@value` and `:export` in CSS modules are handled. The corpus has
+  apps for Sass, Less, PostCSS and CSS modules, and one that builds with no configuration at all.
+- An optional type checker, `rkp-check`, installed apart from `rkp` (which stays byte for byte the same with or without it), and `rkp check` to run it.
+  This is stage 1 only: it reports TypeScript 5.9.3's scanner errors and nothing else, and a run with no diagnostics says so. See `docs/typechecker.md`.
 - `--target=es5`, and engines without es2015 (`ie11`, `chrome44`): arrow functions, classes, `let` and `const`, templates, destructuring, default and
   rest parameters, spread, `for of` (closing its iterator), new object literal forms, private members, `new.target`, generators, async functions,
   async generators and `for await` (a state machine) and the output's own helpers are written as es5. A browserslist input: `--target` defaults to the queries of the project (`.browserslistrc`, `package.json`, `BROWSERSLIST`) or of
@@ -47,6 +60,10 @@ about stability.
   (and `--preserve-modules-root`) writes one file for each module, and `--write-exports` sets `main`, `module`, `types` and `exports` in the `package.json`.
   The corpus libraries are built in both ways and compared with the releases their authors publish.
 - `--dts-bundle` and the types of module federation work with TypeScript 7: its command line writes the declarations and a reader of our own merges them.
+
+- Smaller minified output: unused declarators of a shared declaration are dropped, more built-in reads count as pure, private names get short names,
+  and `else if` chains, trailing guards, `typeof` comparisons and nullish checks are written shorter. On the 15-workload benchmark Pack's minified
+  output is smaller than esbuild's on Preact, Svelte and date-fns; it is still larger on Solid (+1.7%) and Zod (+0.4%), though smaller when gzipped.
 
 ### Fixed
 
