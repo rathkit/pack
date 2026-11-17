@@ -85,13 +85,13 @@ Conformance suites: esbuild, webpack, Rollup and Vite, each with its own example
 
 Performance bars met: time, size and memory at or beyond the other benchmarked tools on every workload of the public suite, or listed with a reason.
 
-- [ ] [3.7](https://github.com/rathkit/pack/issues/21) Size: constant folding and inlining across modules `P0`
-- [ ] [3.8](https://github.com/rathkit/pack/issues/22) Size: a stronger minifier and frequency-ordered name mangling `P0`
+- [x] [3.7](https://github.com/rathkit/pack/issues/21) Size: constant folding and inlining across modules `P0`
+- [x] [3.8](https://github.com/rathkit/pack/issues/22) Size: a stronger minifier and frequency-ordered name mangling `P0`
 - [ ] [3.9](https://github.com/rathkit/pack/issues/23) Size: CSS minification (shorthand and rule merging) `P1`
-- [ ] [3.10](https://github.com/rathkit/pack/issues/24) Time: parallel code generation and per-chunk minify `P1`
+- [x] [3.10](https://github.com/rathkit/pack/issues/24) Time: parallel code generation and per-chunk minify `P1`
 - [ ] [3.11](https://github.com/rathkit/pack/issues/25) Time: cheaper source maps `P1`
 - [ ] [3.2](https://github.com/rathkit/pack/issues/26) Persistent cache and a faster dev server start `P0`
-- [ ] [3.4](https://github.com/rathkit/pack/issues/27) Memory: free per-module data after emit; worst-case inputs `P0`
+- [x] [3.4](https://github.com/rathkit/pack/issues/27) Memory: free per-module data after emit; worst-case inputs `P0`
 - [ ] [3.12](https://github.com/rathkit/pack/issues/28) Every workload where another tool wins is listed, with a reason and an issue `P1`
 - [x] [3.16](https://github.com/rathkit/pack/issues/86) Where esbuild is ahead on the 15-workload benchmark: time, size and warm rebuild `P1`
 
