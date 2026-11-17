@@ -1392,8 +1392,8 @@ impl<'a> Bundler<'a> {
         // core escapes them while the minifier works: the biggest one (ts5 is one 9 MB module) is not worth waiting for.
         let preparing = std::time::Instant::now();
         let (mut code, anchors, mut prep) = std::thread::scope(|scope| {
-            let escaping = options.sources_content.then(|| scope.spawn(|| self.escape_sources(marks)));
-            let indexing = scope.spawn(|| self.index_sources(marks));
+            let escaping = options.sources_content.then(|| scope.spawn(|| { let t = std::time::Instant::now(); let r = self.escape_sources(marks); if timing { eprintln!("  escape sources: {:.1} ms", t.elapsed().as_secs_f64() * 1000.0); } r }));
+            let indexing = scope.spawn(|| { let t = std::time::Instant::now(); let r = self.index_sources(marks); if timing { eprintln!("  index sources: {:.1} ms", t.elapsed().as_secs_f64() * 1000.0); } r });
             let (code, anchors) = if settings.any() {
                 let mut anchors = Vec::new();
                 let code = crate::minify::minify_chunk(&text, &layout, settings, Some(&mut anchors)).map_err(fail)?;
@@ -1737,12 +1737,17 @@ impl<'a> Bundler<'a> {
         let mut ids: Vec<u32> = marks.iter().map(|m| m.module.index() as u32).collect();
         ids.sort_unstable();
         ids.dedup();
+        let one = |k: usize| {
+            let module = &self.graph.modules[ids[k] as usize];
+            (std::sync::Arc::new(crate::sourcemap::Lines::new(&module.source)), crate::sourcemap::Input::find(&module.path, &module.source).map(std::sync::Arc::new))
+        };
+        let bytes: usize = ids.iter().map(|&i| self.graph.modules[i as usize].source.len()).sum();
+        let made: Vec<_> = if crate::par::worth_it(ids.len(), bytes) { crate::par::map(ids.len(), one) } else { (0..ids.len()).map(one).collect() };
         let mut lines = crate::fxhash::FastMap::default();
         let mut inputs = crate::fxhash::FastMap::default();
-        for i in ids {
-            let module = &self.graph.modules[i as usize];
-            lines.insert(i, std::sync::Arc::new(crate::sourcemap::Lines::new(&module.source)));
-            inputs.insert(i, crate::sourcemap::Input::find(&module.path, &module.source).map(std::sync::Arc::new));
+        for (&i, (l, input)) in ids.iter().zip(made) {
+            lines.insert(i, l);
+            inputs.insert(i, input);
         }
         (lines, inputs)
     }
