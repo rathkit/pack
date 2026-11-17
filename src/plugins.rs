@@ -159,7 +159,7 @@ fn chunk_json(file_name: &str, is_entry: bool, info: Option<&ChunkInfo>) -> Stri
     let Some(info) = info else {
         return format!("{{\"fileName\":{},\"name\":{},\"isEntry\":{is_entry},\"type\":\"chunk\",\"exports\":[],\"imports\":[],\"dynamicImports\":[],\"modules\":{{}}}}", quote(file_name), quote(name));
     };
-    let modules: Vec<String> = info.modules.iter().map(|(id, len)| format!("{}:{{\"renderedLength\":{len},\"originalLength\":{len},\"removedExports\":[],\"renderedExports\":[],\"code\":null}}", quote(id))).collect();
+    let modules: Vec<String> = info.modules.iter().filter(|(id, _)| !info.shaken_out.contains(id)).map(|(id, len)| format!("{}:{{\"renderedLength\":{len},\"originalLength\":{len},\"removedExports\":[],\"renderedExports\":[],\"code\":null}}", quote(id))).collect();
     let ids: Vec<String> = info.modules.iter().map(|(id, _)| id.clone()).collect();
     format!(
         "{{\"type\":\"chunk\",\"fileName\":{},\"name\":{},\"isEntry\":{},\"isDynamicEntry\":{},\"isImplicitEntry\":false,\"facadeModuleId\":{},\"exports\":{},\"imports\":{},\"dynamicImports\":{},\"importedBindings\":{{}},\"referencedFiles\":[],\"implicitlyLoadedBefore\":[],\"modules\":{{{}}},\"moduleIds\":{},\"preliminaryFileName\":{}}}",
