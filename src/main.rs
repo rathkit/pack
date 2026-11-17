@@ -744,11 +744,10 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
                         "cjs" => rathkit_pack::bundle::Format::Cjs,
                         "iife" => rathkit_pack::bundle::Format::Iife,
                         "esm" | "es" => rathkit_pack::bundle::Format::Esm,
-                        _ if value.contains(',') => {
-                            eprintln!("error: --format is esm, cjs or iife, or a list of esm and cjs; not '{name}'");
+                        _ => {
+                            eprintln!("error: --format is esm, cjs or iife (or a list of esm and cjs), not '{name}' (umd, amd and system are not supported)");
                             return Done::Exit(ExitCode::from(2));
                         }
-                        _ => rathkit_pack::bundle::Format::Esm,
                     };
                     if !formats.contains(&format) {
                         formats.push(format);

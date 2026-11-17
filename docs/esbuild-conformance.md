@@ -37,6 +37,7 @@ How `rkp` is shaped differently, once, so the rows can be short:
 | `--outbase=` | gap | gap 2 | `gap-outbase` |
 | `--allow-overwrite` | supported | a build that would write over one of its own inputs stops, as in esbuild; this flag allows it | `overwrite-refused`, `allow-overwrite` |
 | `--format=esm\|cjs\|iife` | supported | also a list for a library, `--format=esm,cjs` | `format-esm`, `format-cjs`, `format-iife` |
+| `--format=umd\|amd\|system` | gap | Rollup's formats, not esbuild's; they are an error (they were once built as an ES module without a word) (gap 12) | `gap-format-umd`, `gap-format-amd`, `gap-format-system` |
 | `--global-name=` | supported | | `global-name` |
 | `--platform=browser\|node` | partly | `node` (the default here) leaves Node's built-in modules as imports; `browser` does not, so an import of `fs` is an error, as in esbuild. With `browser`, `process.env.NODE_ENV` is `"production"` whatever `--minify` says (esbuild: `"development"` unless minifying) (gap 11) | `platform-node`, `platform-browser`, `gap-node-env-development` |
 | `--platform=neutral` | partly | treated as `browser`; the default main fields and conditions of esbuild's `neutral` are not applied (gap 11) | `platform-neutral` |
@@ -161,3 +162,4 @@ Each is drafted as an issue in `night-drafts/14-gaps.md` (title, body, labels). 
 9. esbuild's `--serve`, `--servedir`, `--serve-fallback`, `--certfile`, `--keyfile`, `--watch=forever`.
 10. Output and message options: `--charset=ascii`, `--line-limit`, `--abs-paths`, `--log-override`, `--analyze`, `analyzeMetafile`, `formatMessages`.
 11. Plugin API completeness and `--platform=neutral` defaults.
+12. Output formats `umd`, `amd` and `system` (Rollup's `output.format`; esbuild has none of them).

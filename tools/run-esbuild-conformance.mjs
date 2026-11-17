@@ -113,6 +113,9 @@ const partly = {
 
 // Options this program does not have: each must fail (exit status other than 0), so a table row saying "gap" is true until the option is added.
 const gaps = {
+  'gap-format-umd': [{}, [M, '--outfile=o.js', '--format=umd']],
+  'gap-format-amd': [{}, [M, '--outfile=o.js', '--format=amd']],
+  'gap-format-system': [{}, [M, '--outfile=o.js', '--format=system']],
   'gap-sourcemap-both': [{}, [M, '--outfile=o.js', '--sourcemap=both']],
   'gap-supported': [{}, [M, '--outfile=o.js', '--supported:bigint=false']],
   'gap-mangle-props': [{}, [M, '--outfile=o.js', '--mangle-props=^_']],
