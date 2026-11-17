@@ -366,7 +366,20 @@ impl Purity<'_> {
             NodeKind::Unary { op: UnaryOp::Not | UnaryOp::Typeof | UnaryOp::Void, arg } => self.expr_is_pure(arg),
             NodeKind::Unary { op: UnaryOp::Neg | UnaryOp::Pos | UnaryOp::BitNot, arg } => self.is_primitive(arg),
             NodeKind::Binary { op, left, right } => match op {
-                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::Exp => self.is_primitive(left) && self.is_primitive(right),
+                // Walked along the left side in a loop: a sum of 50,000 terms is a tree that deep, and this runs on a worker's small stack.
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::Exp => {
+                    if !self.is_primitive(right) {
+                        return false;
+                    }
+                    let mut at = left;
+                    while let NodeKind::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::Exp, left, right } = ast[at].kind {
+                        if !self.is_primitive(right) {
+                            return false;
+                        }
+                        at = left;
+                    }
+                    self.is_primitive(at)
+                }
                 BinOp::StrictEq | BinOp::StrictNe => self.expr_is_pure(left) && self.expr_is_pure(right),
                 _ => false,
             },
