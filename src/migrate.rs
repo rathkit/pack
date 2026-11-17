@@ -220,6 +220,8 @@ fn vite(dir: &Path, package: Option<&Json>) -> Option<Finding> {
     }
     if let Some(base) = literal_after(&text, "base").filter(|b| b != "/") {
         build.push_str(&format!(" --public-path={base}"));
+    } else if text.contains("base:") && literal_after(&text, "base").is_none() {
+        finding.notes.push("base is not a plain string in the config: add --public-path=BASE with its value (Vite's default is /, rkp's links are relative without it)".to_string());
     }
     if page.is_none() {
         finding.notes.push("there is no index.html here: give the page (or the script) that Vite was given".to_string());

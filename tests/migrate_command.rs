@@ -198,3 +198,14 @@ fn rollup_with_the_output_built_in_code_gets_an_outfile() {
     let out = stdout(&rkp(&dir, &["migrate"]));
     assert!(out.contains("build:rkp: rkp bundle index.js --global-name=X --outfile dist/index.js") || out.contains("--outfile dist/index.js"), "{out}");
 }
+
+#[test]
+fn vite_base_from_a_variable_is_a_note() {
+    let dir = std::env::temp_dir().join(format!("rkp-migrate-vite-base-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("package.json"), "{\"devDependencies\":{\"vite\":\"1\"}}").unwrap();
+    std::fs::write(dir.join("index.html"), "<script type=module src=/src/main.js></script>").unwrap();
+    std::fs::write(dir.join("vite.config.js"), "const b = process.env.BASE;\nexport default { base: b };\n").unwrap();
+    let out = stdout(&rkp(&dir, &["migrate"]));
+    assert!(out.contains("note: base is not a plain string"), "{out}");
+}
