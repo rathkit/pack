@@ -76,13 +76,68 @@ fn real_main() -> ExitCode {
         Some((cmd, rest)) if cmd == "serve" => bundle_command(rest, true),
         // The optional checker, a separate program found the way cargo finds `cargo-*` (src/checker.rs); nothing of it is in rkp.
         Some((cmd, rest)) if cmd == "check" => check_command(rest),
+        // A page for reading a metafile: `rkp analyze META.json [--outfile REPORT.html]` (src/analyze.rs).
+        Some((cmd, rest)) if cmd == "analyze" => analyze_command(rest),
         Some((cmd, files)) if cmd == "--graph" && !files.is_empty() => graph(files),
         Some((cmd, files)) if cmd == "--resolve-dump" && !files.is_empty() => resolve_dump(files),
         Some((cmd, files)) if cmd == "--ts-verdicts" && !files.is_empty() => ts_verdicts(files),
         Some((cmd, files)) if cmd == "--link-dump" && !files.is_empty() => link_dump(files),
         _ => {
-            eprintln!("usage: rkp bundle <entry>... | serve <entry>... | check <file.ts>... | --version\n       rkp --lex-check|--parse-check|--parse-verdicts|--script-verdicts|--bench <file.js>... (development aids)\n       rkp --scopes <file.js>\n       rkp bundle <entry.js>... [--outfile FILE | --outdir DIR --splitting] [--format esm|cjs|iife] [--no-treeshake] [--define KEY=VALUE]... [--loader .ext=NAME]... [--jsx automatic|classic] [--external NAME]... [--condition NAME]...\n       rkp --graph <entry.js>... [--quiet] [--threads N] [--external NAME]... [--condition NAME]...");
+            eprintln!("usage: rkp bundle <entry>... | serve <entry>... | analyze <meta.json> | check <file.ts>... | --version\n       rkp --lex-check|--parse-check|--parse-verdicts|--script-verdicts|--bench <file.js>... (development aids)\n       rkp --scopes <file.js>\n       rkp bundle <entry.js>... [--outfile FILE | --outdir DIR --splitting] [--format esm|cjs|iife] [--no-treeshake] [--define KEY=VALUE]... [--loader .ext=NAME]... [--jsx automatic|classic] [--external NAME]... [--condition NAME]...\n       rkp --graph <entry.js>... [--quiet] [--threads N] [--external NAME]... [--condition NAME]...");
             ExitCode::from(2)
+        }
+    }
+}
+
+/// `rkp analyze META.json [--outfile REPORT.html]`: the HTML report of a metafile, on the standard output unless a file is named.
+fn analyze_command(args: &[String]) -> ExitCode {
+    let (mut input, mut outfile) = (None, None);
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--outfile" => outfile = it.next().cloned(),
+            a if a.starts_with("--outfile=") => outfile = Some(a["--outfile=".len()..].to_string()),
+            a if a.starts_with("--") => {
+                eprintln!("error: rkp analyze: unknown option {a}");
+                return ExitCode::from(2);
+            }
+            _ if input.is_none() => input = Some(arg.clone()),
+            _ => {
+                eprintln!("error: rkp analyze takes one metafile");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let Some(input) = input else {
+        eprintln!("usage: rkp analyze META.json [--outfile REPORT.html]   (META.json is made by rkp bundle --metafile=META.json)");
+        return ExitCode::from(2);
+    };
+    let text = match std::fs::read_to_string(&input) {
+        Ok(text) => text,
+        Err(e) => {
+            eprintln!("error: {input}: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let page = match rathkit_pack::analyze::report(&text) {
+        Ok(page) => page,
+        Err(e) => {
+            eprintln!("error: {input}: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    match outfile {
+        Some(file) => match std::fs::write(&file, page) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {file}: {e}");
+                ExitCode::from(1)
+            }
+        },
+        None => {
+            use std::io::Write;
+            let _ = std::io::stdout().write_all(page.as_bytes());
+            ExitCode::SUCCESS
         }
     }
 }

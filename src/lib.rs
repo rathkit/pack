@@ -23,6 +23,7 @@ pub mod json;
 pub mod link;
 pub mod literal;
 pub mod loader;
+pub mod analyze;
 pub mod metafile;
 pub mod module;
 pub mod par;

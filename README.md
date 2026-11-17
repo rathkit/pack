@@ -58,7 +58,10 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   `--pure:NAME` (calls of a name, or of a chain such as `styled.div`, and tagged templates of it, are free of effects, so an unused one
   is removed when what it is given has no effects either); `--preserve-symlinks`; `--metafile=FILE` (JSON in the shape of esbuild's metafile: every
   module with what it imports, every file written with the modules in it, what it imports and exports and its entry point;
-  `bytesInOutput` is an estimate, the modules' original sizes scaled to the file's size).
+  `bytesInOutput` is an estimate, the modules' original sizes scaled to the file's size). `rkp analyze meta.json --outfile report.html`
+  turns a metafile into one HTML page (a treemap by package, the packages and modules of each output with their sizes, what imports a
+  module, a filter box; style and script are inline, the page fetches nothing and the metafile is inside it). Without `--outfile` the page
+  is on the standard output.
   A word that starts with a dash and is not an option is an error, not a file.
 - Pages: `rkp bundle index.html --outdir dist` builds the module scripts the page points at, writes the page again with
   the built files (and their style sheets) in place, runs plugins' `transformIndexHtml` with the built files as `bundle`
@@ -192,7 +195,8 @@ rkp bundle src/main.ts --outfile dist/app.mjs
 - `--watch` builds again when a file the build read changes (and plugins' `addWatchFile` files): plugins hear it. On Linux it hears of changes through file events (inotify); elsewhere it polls the files every 80 ms.
   through `watchChange`, a changed config starts everything again, and Ctrl-C ends it cleanly. Modules whose files
   did not change are kept between builds (no reading, parsing or scanning again; without plugins).
-- `rkp serve ENTRY... [--port N] [--host H]` is a development server with the same options as `bundle`.
+- `rkp analyze META.json [--outfile REPORT.html]
+rkp serve ENTRY... [--port N] [--host H]` is a development server with the same options as `bundle`.
   The build stays in memory (with source maps) and is served over HTTP, together with your `index.html` (its entry
   `<script src>` is pointed at the built file; the style sheets and the reload client are added), `public/` and
   the project's files. A rebuild tells open pages: style sheet edits are swapped in place, anything else reloads

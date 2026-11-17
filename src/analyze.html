@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Bundle report</title>
+<style>
+:root{--bg:#fff;--fg:#1c1f23;--mut:#667;--line:#d9dde3;--bar:#3b6fd4;--card:#f5f7fa}
+@media (prefers-color-scheme:dark){:root{--bg:#14171b;--fg:#e4e7eb;--mut:#98a;--line:#2d333b;--bar:#6d9bf0;--card:#1c2026}}
+body{margin:0;padding:16px;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,sans-serif;max-width:1100px;margin-inline:auto}
+h1{font-size:20px;margin:0 0 4px}h2{font-size:16px;margin:28px 0 8px}.mut{color:var(--mut)}
+.cards{display:flex;gap:12px;flex-wrap:wrap;margin:12px 0}.card{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:8px 12px}
+.card b{display:block;font-size:18px}
+table{border-collapse:collapse;width:100%}td,th{padding:3px 6px;border-bottom:1px solid var(--line);text-align:left;vertical-align:middle}
+th{font-weight:600;cursor:default}td.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+td.p{word-break:break-all}.bar{height:8px;background:var(--bar);border-radius:2px;min-width:1px}
+.tm{position:relative;width:100%;height:320px;border:1px solid var(--line);border-radius:4px;overflow:hidden}
+.tm div{position:absolute;box-sizing:border-box;border:1px solid var(--bg);background:var(--bar);color:#fff;font-size:11px;overflow:hidden;padding:2px 3px;cursor:pointer}
+details{margin:6px 0}summary{cursor:pointer}code{font-family:ui-monospace,monospace;font-size:12px}
+input{padding:4px 6px;border:1px solid var(--line);border-radius:4px;background:var(--bg);color:var(--fg);width:min(100%,320px)}
+</style></head><body>
+<h1>Bundle report</h1>
+<div class="mut">Made by rkp analyze from a metafile. Sizes of modules in an output are estimates (the metafile scales each module's original size to the file's size).</div>
+<div id="app"></div>
+<script id="metafile" type="application/json">@@METAFILE@@</script>
+<script>
+(function () {
+  var meta = JSON.parse(document.getElementById('metafile').textContent);
+  var inputs = meta.inputs || {}, outputs = meta.outputs || {};
+  var app = document.getElementById('app');
+  function el(tag, attrs, kids) {
+    var e = document.createElement(tag);
+    for (var k in attrs || {}) { if (k === 'text') e.textContent = attrs[k]; else if (k === 'style') e.style.cssText = attrs[k]; else e.setAttribute(k, attrs[k]); }
+    (kids || []).forEach(function (c) { e.appendChild(c); });
+    return e;
+  }
+  function fmt(n) { return n >= 1048576 ? (n / 1048576).toFixed(2) + ' MB' : n >= 1024 ? (n / 1024).toFixed(1) + ' kB' : n + ' B'; }
+  // node_modules/@scope/name/... -> @scope/name; anything else -> (project)
+  function pkg(path) {
+    var i = path.lastIndexOf('node_modules/');
+    if (i < 0) return '(project)';
+    var rest = path.slice(i + 13).split('/');
+    return rest[0].charAt(0) === '@' ? rest[0] + '/' + rest[1] : rest[0];
+  }
+  var importers = {};
+  Object.keys(inputs).forEach(function (p) {
+    (inputs[p].imports || []).forEach(function (im) { (importers[im.path] = importers[im.path] || []).push(p); });
+  });
+  var totalIn = 0, nIn = 0, totalOut = 0;
+  Object.keys(inputs).forEach(function (p) { totalIn += inputs[p].bytes || 0; nIn++; });
+  Object.keys(outputs).forEach(function (p) { if (!/\.map$/.test(p)) totalOut += outputs[p].bytes || 0; });
+  app.appendChild(el('div', { 'class': 'cards' }, [
+    card(nIn, 'modules'), card(fmt(totalIn), 'input size'), card(Object.keys(outputs).filter(function (p) { return !/\.map$/.test(p); }).length, 'output files'), card(fmt(totalOut), 'output size')
+  ]));
+  function card(v, label) { return el('div', { 'class': 'card' }, [el('b', { text: String(v) }), el('span', { 'class': 'mut', text: label })]); }
+  var filter = el('input', { type: 'search', placeholder: 'Filter modules and packages' });
+  app.appendChild(filter);
+  var holder = el('div');
+  app.appendChild(holder);
+  filter.addEventListener('input', render);
+  function squarify(items, x, y, w, h, out) {
+    // slice and dice, alternating direction: simple and stable
+    var total = items.reduce(function (s, i) { return s + i.size; }, 0);
+    if (!items.length || total <= 0) return;
+    if (items.length === 1) { out.push({ item: items[0], x: x, y: y, w: w, h: h }); return; }
+    var half = 0, k = 0;
+    while (k < items.length - 1 && half + items[k].size <= total / 2) { half += items[k].size; k++; }
+    if (k === 0) { half = items[0].size; k = 1; }
+    var a = items.slice(0, k), b = items.slice(k), f = half / total;
+    if (w >= h) { squarify(a, x, y, w * f, h, out); squarify(b, x + w * f, y, w * (1 - f), h, out); }
+    else { squarify(a, x, y, w, h * f, out); squarify(b, x, y + h * f, w, h * (1 - f), out); }
+  }
+  function render() {
+    holder.textContent = '';
+    var q = filter.value.toLowerCase();
+    Object.keys(outputs).forEach(function (name) {
+      if (/\.map$/.test(name)) return;
+      var o = outputs[name], mods = Object.keys(o.inputs || {}).map(function (p) { return { path: p, size: o.inputs[p].bytesInOutput || 0 }; });
+      mods.sort(function (a, b) { return b.size - a.size; });
+      var sum = mods.reduce(function (s, m) { return s + m.size; }, 0);
+      var packages = {};
+      mods.forEach(function (m) { var k = pkg(m.path); packages[k] = (packages[k] || 0) + m.size; });
+      var pk = Object.keys(packages).map(function (k) { return { path: k, size: packages[k] }; }).sort(function (a, b) { return b.size - a.size; });
+      var sec = el('section');
+      sec.appendChild(el('h2', { text: name + '  ' + fmt(o.bytes || 0) }));
+      var extra = [];
+      if (o.entryPoint) extra.push('entry ' + o.entryPoint);
+      if ((o.imports || []).length) extra.push((o.imports.length) + ' imports');
+      if ((o.exports || []).length) extra.push((o.exports.length) + ' exports');
+      if (extra.length) sec.appendChild(el('div', { 'class': 'mut', text: extra.join(' · ') }));
+      var tm = el('div', { 'class': 'tm' }), rects = [];
+      squarify(pk.filter(function (p) { return p.size > 0; }), 0, 0, 100, 100, rects);
+      rects.forEach(function (r, i) {
+        var d = el('div', { title: r.item.path + ': ' + fmt(r.item.size), style: 'left:' + r.x + '%;top:' + r.y + '%;width:' + r.w + '%;height:' + r.h + '%;opacity:' + (0.55 + 0.45 * ((i * 7) % 10) / 10) }, [document.createTextNode(r.item.path + ' ' + fmt(r.item.size))]);
+        d.addEventListener('click', function () { filter.value = r.item.path === '(project)' ? '' : r.item.path; render(); });
+        tm.appendChild(d);
+      });
+      sec.appendChild(tm);
+      sec.appendChild(table('Packages', pk, sum, q));
+      sec.appendChild(table('Modules', mods, sum, q, true));
+      holder.appendChild(sec);
+    });
+  }
+  function table(title, rows, sum, q, why) {
+    var shown = rows.filter(function (r) { return !q || r.path.toLowerCase().indexOf(q) >= 0; });
+    var cap = shown.length > 200 && !q ? 200 : shown.length;
+    var d = el('details', why ? {} : { open: '' });
+    d.appendChild(el('summary', { text: title + ' (' + shown.length + ')' }));
+    var t = el('table', {}, [el('tr', {}, [el('th', { text: 'Path' }), el('th', { text: 'Size' }), el('th', { text: '%' }), el('th', { style: 'width:25%' })])]);
+    shown.slice(0, cap).forEach(function (r) {
+      var pct = sum ? r.size * 100 / sum : 0;
+      var cell = el('td', { 'class': 'p' }, [document.createTextNode(r.path)]);
+      if (why && importers[r.path]) cell.appendChild(el('div', { 'class': 'mut', text: 'imported by ' + importers[r.path].slice(0, 3).join(', ') + (importers[r.path].length > 3 ? ' and ' + (importers[r.path].length - 3) + ' more' : '') }));
+      t.appendChild(el('tr', {}, [cell, el('td', { 'class': 'n', text: fmt(r.size) }), el('td', { 'class': 'n', text: pct.toFixed(1) }), el('td', {}, [el('div', { 'class': 'bar', style: 'width:' + pct + '%' })])]));
+    });
+    d.appendChild(t);
+    if (cap < shown.length) d.appendChild(el('div', { 'class': 'mut', text: (shown.length - cap) + ' more; filter to find them.' }));
+    return d;
+  }
+  render();
+})();
+</script></body></html>
