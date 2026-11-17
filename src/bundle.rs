@@ -591,6 +591,9 @@ const TAG_REPLACEMENT: char = '\u{E001}';
 const TAG_CLOSE: char = '\u{E002}';
 const TAG_NUMBER_END: char = '\u{E003}';
 
+/// Below this much source a scan takes about a millisecond, which starting threads does not repay (measured on the benchmark workloads).
+const SCAN_PARALLEL_BYTES: usize = 256 * 1024;
+
 impl<'a> Bundler<'a> {
     fn new(graph: &'a Graph, linked: &'a Linked, shaken: &'a Shaken) -> Bundler<'a> {
         Bundler {
@@ -691,11 +694,17 @@ impl<'a> Bundler<'a> {
             crate::minify::next_build();
         }
         let before_scan = std::time::Instant::now();
-        for id in included {
-            self.scan(id);
+        let n_scanned = included.len();
+        let scan_bytes: usize = included.iter().map(|&id| self.graph.module(id).source.len()).sum();
+        if !self.keep_scans && !self.registry && self.federation.is_none() && scan_bytes >= SCAN_PARALLEL_BYTES && crate::par::worth_it(included.len(), scan_bytes) {
+            self.scan_in_parallel(&included);
+        } else {
+            for id in included {
+                self.scan(id);
+            }
         }
         if std::env::var_os("RATHKIT_TIMING").is_some() {
-            eprintln!("  scan: {:.1} ms{}", before_scan.elapsed().as_secs_f64() * 1000.0, crate::par::memory_note());
+            eprintln!("  scan: {:.1} ms ({} modules, {} KB){}", before_scan.elapsed().as_secs_f64() * 1000.0, n_scanned, scan_bytes / 1024, crate::par::memory_note());
         }
         if self.registry {
             return self.run_registry(options);
@@ -2486,6 +2495,65 @@ impl<'a> Bundler<'a> {
                 let key = Key::External(specifier.clone(), ext);
                 self.register(key.clone(), from);
                 vec![Piece::Name(key)]
+            }
+        }
+    }
+
+    /// A bundler with this one's settings and nothing collected, for scanning a module on another thread.
+    fn scan_fork(&self) -> Bundler<'a> {
+        let mut fork = Bundler::new(self.graph, self.linked, self.shaken);
+        fork.original_paths = self.original_paths;
+        fork.browser = self.browser;
+        fork.hot = self.hot;
+        fork.registry = self.registry;
+        fork.react_refresh = self.react_refresh;
+        fork.tla_possible = self.tla_possible;
+        fork.drop_console = self.drop_console;
+        fork.drop_debugger = self.drop_debugger;
+        fork.out_extensions = self.out_extensions.clone();
+        fork.target = self.target;
+        fork.legacy = self.legacy;
+        fork.cjs_exports = self.cjs_exports;
+        fork.preserve = self.preserve;
+        fork.preserve_root = self.preserve_root.clone();
+        fork.preserve_entries = self.preserve_entries;
+        fork.entry_names = self.entry_names.clone();
+        fork.format = self.format;
+        fork.global_name = self.global_name.clone();
+        fork.globals = self.globals.clone();
+        fork.splitting = self.splitting;
+        fork.single_name = self.single_name.clone();
+        fork.mapping = self.mapping;
+        fork.nesting = self.nesting;
+        fork
+    }
+
+    /// `scan` for every module, on all cores. A scan reads the graph and what tree shaking decided and writes only to the bundler's
+    /// collections (the keys it asked for, in order; the helpers; its code), so each module is scanned by a bundler of its own that
+    /// records its keys, and the records are replayed here in module order: the same keys in the same order as scanning one after the
+    /// other. A scan that made an error is made again here, so the errors keep their order.
+    fn scan_in_parallel(&mut self, included: &[ModuleId]) {
+        let this = &*self;
+        let scanned = crate::par::map_with_stack(included.len(), crate::par::DEEP_STACK, |i| {
+            let mut fork = this.scan_fork();
+            fork.journal = Some(Vec::new());
+            fork.scan(included[i]);
+            let clean = fork.errors.is_empty();
+            let code = fork.code.remove(&included[i]);
+            let journal = fork.journal.take().unwrap_or_default();
+            let helpers = std::mem::take(&mut fork.helpers);
+            (clean, code, journal, helpers)
+        });
+        for (&id, (clean, code, journal, helpers)) in included.iter().zip(scanned) {
+            match code {
+                Some(code) if clean => {
+                    for (key, from) in journal {
+                        self.register(key, from);
+                    }
+                    self.helpers.or(&helpers);
+                    self.code.insert(id, code);
+                }
+                _ => self.scan(id),
             }
         }
     }
