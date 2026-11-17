@@ -11,7 +11,9 @@ import { testModules } from './lib/test-deps.mjs';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const tmp = mkdtempSync(join(tmpdir(), 'npm-wrapper-'));
 const made = join(tmp, 'made');
-const run = (cmd, args, options = {}) => spawnSync(cmd, args, { encoding: 'utf8', ...options });
+// RATHKIT_PACK_BIN (set by a shell that runs the corpus or benchmarks) would make the launcher skip the platform package the test looks for.
+const { RATHKIT_PACK_BIN: _override, ...cleanEnv } = process.env;
+const run = (cmd, args, options = {}) => spawnSync(cmd, args, { encoding: 'utf8', env: cleanEnv, ...options });
 const fail = (message) => {
   console.log(`FAIL npm wrapper: ${message}`);
   process.exit(1);
