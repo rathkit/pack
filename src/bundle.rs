@@ -1359,13 +1359,23 @@ impl<'a> Bundler<'a> {
         out
     }
 
+    /// The minifier on a chunk's text. A build that is not kept for the next one (no watch, no dev server) keeps its answer in the
+    /// persistent cache instead (`cache.rs`); one that is kept reuses the pieces it still holds.
+    fn minify_text(&self, text: &str, layout: &crate::minify::Layout, settings: &crate::minify::Options, anchors: Option<&mut Vec<crate::minify::Anchor>>) -> Result<String, String> {
+        if self.keep_scans {
+            crate::minify::minify_chunk(text, layout, settings, anchors)
+        } else {
+            crate::cache::minify_chunk(text, layout, settings, anchors)
+        }
+    }
+
     /// Minifies one chunk's text and builds its map, as asked for.
     fn finish_chunk(&self, c: usize, raw: String, mut layout: crate::minify::Layout, options: &Options, settings: &crate::minify::Options, marks: &[Mark]) -> Result<OutputFile, Vec<Diagnostic>> {
         let timing = std::env::var_os("RATHKIT_TIMING").is_some();
         let fail = |message: String| vec![Diagnostic { severity: crate::graph::Severity::Error, message: format!("{}: {message}", self.plan.chunks[c].file), file: None, pos: None }];
         let file = self.plan.chunks[c].file.clone();
         if !self.mapping {
-            let code = if settings.any() { crate::minify::minify_chunk(&raw, &layout, settings, None).map_err(fail)? } else { raw };
+            let code = if settings.any() { self.minify_text(&raw, &layout, settings, None).map_err(fail)? } else { raw };
             let code = self.with_legal_comments(code, c, &file, options, settings);
             let code = wrap_text(code, options.banner_js.as_deref(), options.footer_js.as_deref());
             return Ok(OutputFile { name: file, code, map: None, data: None, original: None });
@@ -1396,7 +1406,7 @@ impl<'a> Bundler<'a> {
             let indexing = scope.spawn(|| { let t = std::time::Instant::now(); let r = self.index_sources(marks); if timing { eprintln!("  index sources: {:.1} ms", t.elapsed().as_secs_f64() * 1000.0); } r });
             let (code, anchors) = if settings.any() {
                 let mut anchors = Vec::new();
-                let code = crate::minify::minify_chunk(&text, &layout, settings, Some(&mut anchors)).map_err(fail)?;
+                let code = self.minify_text(&text, &layout, settings, Some(&mut anchors)).map_err(fail)?;
                 (code, anchors)
             } else {
                 let anchors = synthetic_anchors(&text, &spans);

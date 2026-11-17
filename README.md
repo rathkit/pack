@@ -336,6 +336,12 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   written on all cores (only the top-level names are chosen for the bundle as a whole); the
   text is the same as one pass writes, except that declarations are not joined across a cut.
   A bundle that is one huge module is one piece. `RATHKIT_FRAGMENTS=off` turns the cutting off.
+  What the minifier made of a chunk is kept between runs (a one-shot build; not `--watch` or the dev server), so the same chunk
+  is not minified twice: a warm minified build of TypeScript's 9 MB is a third faster. An entry holds the chunk's text, the settings and the
+  program that made it next to the answer, and a hit needs all of them to match, so the output is byte for byte what a cold build writes; a
+  file that is missing, cut short, damaged or from another version is ignored and written again. The folder is `RATHKIT_CACHE_DIR`,
+  else `$XDG_CACHE_HOME/rathkit/minify` or `~/.cache/rathkit/minify` (`%LOCALAPPDATA%\rathkit\minify` on Windows), kept under 512 MB
+  (oldest entries go first); `RATHKIT_CACHE=off` turns it off, and deleting the folder is always safe. Measure cold builds with it off.
   Exported names, imported names, properties and globals never change, nor do bindings that
   a direct `eval` can see. `--keep-names` leaves functions, classes and variables that name an
   anonymous function alone, so their `.name` stays. It is on by itself when decorators are
