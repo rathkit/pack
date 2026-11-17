@@ -1,0 +1,1 @@
+module.exports = { mode: 'production', target: 'node', optimization: { splitChunks: { chunks: 'all', cacheGroups: { defaultVendors: false, vendors: { test: /[\\/]node_modules[\\/]/, name: 'vendors', chunks: 'all', priority: -10, reuseExistingChunk: true, enforce: true, filename: 'v-[name].js' }, common: { minChunks: 2, priority: -20, reuseExistingChunk: true } } } } };

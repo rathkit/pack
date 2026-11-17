@@ -44,7 +44,7 @@ webpack's runtime or its caches do nothing.
 | `target` | partly | `web` and `node` as the bundler's own platform; no `electron-*`, `webworker`, browserslist query | `cfg-target-web` |
 | `node` (`__dirname`, `__filename`, `global`) | partly | | `cfg-node-dirname` |
 | `optimization.minimize`, `minimizer` (with `'...'`) | works | the plugins listed run; `'...'` is the bundler's own `--minify` | `terser-webpack-plugin`, `css-minimizer-webpack-plugin` |
-| `optimization.splitChunks` | partly | see the SplitChunksPlugin section | `cfg-splitchunks` |
+| `optimization.splitChunks` | partly | accepted, layout not followed; see the SplitChunksPlugin section | `cfg-splitchunks` |
 | `optimization.runtimeChunk`, `moduleIds`, `chunkIds`, `usedExports`, `sideEffects`, `concatenateModules`, `innerGraph` | n/a | tree shaking and scope hoisting are always on | |
 | `experiments` (`topLevelAwait`, `outputModule`) | works | top-level await needs the esm format | `cfg-experiments` |
 | `experiments` (`asyncWebAssembly`, `layers`, `css`, `lazyCompilation`) | no | gap 3 | |
@@ -107,6 +107,31 @@ More that have a fixture: `source-map-loader`, `expose-loader`, `imports-loader`
 `json5-loader`, `circular-dependency-plugin`, `case-sensitive-paths-webpack-plugin`, `assets-webpack-plugin`,
 `node-polyfill-webpack-plugin`, `webpack-subresource-integrity`, `webpack-merge`.
 
+## SplitChunksPlugin settings
+
+`optimization.splitChunks` is read, and every setting in it is accepted without an error, but none of them decides where a module goes: Pack splits
+a dynamic `import()` into its own chunk, and (with `--splitting`, esm output) a module several chunks share into a common chunk, always. A program
+built with any of these settings behaves the same as with webpack's; the number and names of its chunk files can differ. What each fixture
+checks is that the build succeeds and the program prints what it prints with webpack.
+
+| Setting | Status | Fixture |
+|---|---|---|
+| `chunks` (`'async'`, `'initial'`, `'all'`, a function) | accepted, layout not followed | `cfg-splitchunks`, `cfg-splitchunks-functions` |
+| `cacheGroups` (`test` as a RegExp or a function, `name` as a string or a function, `priority`, `enforce`, `reuseExistingChunk`, `filename`, `minChunks`, `false` to turn one off) | accepted, layout not followed: no `vendors` chunk is made | `cfg-splitchunks-cachegroups`, `cfg-splitchunks-functions` |
+| `minSize`, `maxSize`, `maxAsyncSize`, `maxInitialSize`, `minSizeReduction`, `enforceSizeThreshold` | accepted, not followed | `cfg-splitchunks-sizes` |
+| `minChunks`, `maxAsyncRequests`, `maxInitialRequests`, `automaticNameDelimiter`, `name`, `usedExports`, `hidePathInfo` | accepted, not followed | `cfg-splitchunks-sizes` |
+| `optimization.runtimeChunk`, `moduleIds`, `chunkIds` | n/a (there is no webpack runtime) | `cfg-splitchunks-sizes` |
+
+## Plugins that read the compilation
+
+Plugins get a `compiler` and a `compilation` with the parts they usually read. `compilation-internals` is a plugin written for the fixture that reads
+`chunks`, `chunkGroups`, `entrypoints` (and their files), `modules`, `chunkGraph.getChunkModules`, `namedChunks`, `getAssets()`, `hash`, and
+`stats.toJson()` (`assets`, `chunks`, `entrypoints`, `modules`), emits an asset in `processAssets`, and writes what it saw; its `check.mjs` fails if any
+of it is missing. The real plugins that read the compilation are the rows of the table above: `html-webpack-plugin` (entrypoints, chunk files, asset
+tags), `webpack-manifest-plugin`, `assets-webpack-plugin`, `webpack-bundle-analyzer` (stats), `workbox-webpack-plugin`, `compression-webpack-plugin`,
+`circular-dependency-plugin` (module graph), `webpack-subresource-integrity` (`RealContentHashPlugin` hooks, chunk group iterables),
+`fork-ts-checker-webpack-plugin`, `eslint-webpack-plugin`, `mini-css-extract-plugin` and `copy-webpack-plugin`. None of them needed an exception.
+
 ## Gaps
 
 Drafted for issues in `night-drafts/15-gaps.md` (not filed):
@@ -114,3 +139,4 @@ Drafted for issues in `night-drafts/15-gaps.md` (not filed):
 2. `output.library` and `libraryTarget` (UMD, var, assign) are not read.
 3. Rule conditions `issuer`, `issuerLayer`, `dependency`, `mimetype`; `resolve.plugins`, `symlinks`, `roots`; `externalsType`; experiments `css`, `layers`, `asyncWebAssembly`.
 4. `worker-loader` needs webpack's child compilation of a worker entry with the web worker template plugins.
+6. `optimization.splitChunks` `cacheGroups` do not decide the layout (no `vendors` chunk), nor do the size and request limits. Fixture to add: a `vendors` cache group names a file that holds the package.
