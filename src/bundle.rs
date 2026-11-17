@@ -2125,6 +2125,11 @@ impl<'a> Bundler<'a> {
                             modules.extend(resolve_export(self.graph, *target, name).and_then(|b| self.binding_module(&b)));
                         }
                     }
+                    Use::Path(symbol, names) => {
+                        if let Some(Binding::Namespace(target)) = self.linked.binding(id, *symbol) {
+                            modules.extend(crate::shake::follow_namespaces(self.graph, *target, names).and_then(|(b, _)| self.binding_module(&b)));
+                        }
+                    }
                     Use::Symbol(symbol) => {
                         if let Some(Binding::Namespace(target)) = self.linked.binding(id, *symbol) {
                             for name in export_names(self.graph, *target) {
@@ -3229,6 +3234,22 @@ impl<'a> Scanner<'_, 'a> {
                         }
                     }
                 }
+            // `ns.a.b`: `a` is a namespace that `ns` re-exports (`export * as a`), so `b` is named directly and no namespace object is built.
+            if let NodeKind::Member { object, .. } = ast[node].kind {
+            if matches!(ast[object].kind, NodeKind::Member { .. }) && !self.written.contains(&node) {
+                if let Some((sym, names)) = crate::shake::member_path(ast, self.semantic, node) {
+                    if let Some(Binding::Namespace(target)) = self.bundler.linked.binding(self.module.id, sym).cloned() {
+                        if let Some((binding, used)) = crate::shake::follow_namespaces(self.bundler.graph, target, &names) {
+                            if used == names.len() {
+                                let pieces = self.bundler.binding_pieces(Some(self.module.id), &binding);
+                                self.push(node, pieces);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+            }
             }
             // `--drop:console`: a call of a method of the global `console` is not made.
             NodeKind::Call { callee, .. }
