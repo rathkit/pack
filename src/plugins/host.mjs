@@ -64,6 +64,8 @@ const watchFiles = new Set();
 let outputOptionsSeen = {};
 
 
+// The input the `options` hooks left (what `buildStart` is given).
+let optionsInput;
 const HOOKS = ['resolveId', 'resolveDynamicImport', 'load', 'transform', 'moduleParsed', 'buildStart', 'buildEnd', 'renderChunk', 'generateBundle', 'writeBundle', 'closeBundle', 'closeWatcher', 'watchChange', 'resolveFileUrl', 'renderStart', 'banner', 'footer', 'intro', 'outro'];
 
 const toArray = (v) => (v === undefined || v === null || v === false ? [] : Array.isArray(v) ? v : [v]);
@@ -1612,6 +1614,7 @@ async function init(params) {
     }
   }
   list = flatten(inputOptions.plugins);
+  optionsInput = inputOptions.input;
   const externals = inputOptions.external !== firstExternal ? toArray(inputOptions.external) : [];
   // Plugins written for webpack's compiler get one together; they are applied once, before the first build.
   const compilerPlugins = [];
@@ -1631,7 +1634,8 @@ async function init(params) {
   const hooks = {};
   for (const name of HOOKS) hooks[name] = hooksOf(name).length > 0;
   hooks.transform = hooksOf('transform').length > 0;
-  const input = config.input ?? config.build?.rollupOptions?.input ?? config.build?.lib?.entry ?? webpackEntries(config.entry, config.context);
+  // (an `options` hook may have replaced the input, as @rollup/plugin-multi-entry does)
+  const input = inputOptions.input !== (config.input ?? cli.entries ?? []) ? inputOptions.input : config.input ?? config.build?.rollupOptions?.input ?? config.build?.lib?.entry ?? webpackEntries(config.entry, config.context);
   federationOptions ??= config.federation ?? config.moduleFederation ?? null;
   return {
     // Functions and promises cannot be carried out of the host (a regular expression goes as its source and flags); what is left is plain data.
@@ -1674,6 +1678,8 @@ const cachedTransform = (code, id, moduleType) => {
 };
 
 async function transformModule(code, id, moduleType) {
+  // Rollup knows the module (`getModuleInfo`) while its transform hooks run; @rollup/plugin-commonjs reads its `meta`.
+  if (!moduleInfo.has(id)) moduleInfoFor(id, { id });
   let current = code;
   let changed = false;
   const maps = [];
@@ -1729,7 +1735,7 @@ const handlers = {
     // A new build forgets what the last one's own hooks emitted; what its modules emitted stays with their cached results.
     for (const [reference, file] of emitted) if (file.owner === 'build' || file.owner === 'generate') emitted.delete(reference);
     for (let i = emittedChunks.length - 1; i >= 0; i--) if (emittedChunks[i].owner === 'build') emittedChunks.splice(i, 1);
-    for (const plugin of hooksOf('buildStart')) await callHook(plugin, 'buildStart', [{ input: cli.entries ?? [], plugins }]);
+    for (const plugin of hooksOf('buildStart')) await callHook(plugin, 'buildStart', [{ input: optionsInput === undefined ? cli.entries ?? [] : toArray(optionsInput), plugins }]);
     return null;
   },
 
