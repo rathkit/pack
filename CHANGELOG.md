@@ -39,6 +39,10 @@ about stability.
   `tools/run-worstcase.mjs` (50,000-module graphs in four shapes, a 16 MB module and a barrel of 5,000 re-exports) checks it on Linux. `RATHKIT_TIMING`
   prints the resident and peak size of each phase.
 
+- An unknown `--format` (`umd`, `amd`, `system` or a misspelling) is an error that lists the formats that exist; it was read as `esm` and built without a word.
+- `--external` takes one `*` anywhere in the name (`@scope/*`, `*.png`), and a package name also covers its subpaths (`react/jsx-runtime`). A build that would
+  write over one of its own inputs stops, as esbuild's does; `--allow-overwrite` lets it.
+
 ### Added
 
 - An optional cache for the minifier, off unless `RATHKIT_CACHE=on` (or `1`, `true`, `yes`): a one-shot minified build keeps what the minifier made of each chunk of 16 KB
@@ -46,6 +50,17 @@ about stability.
   entry holds the chunk's text, the settings, the layout and the program that made it next to the answer, and a hit needs every one to match; a missing,
   cut short, damaged or stale entry is ignored and written again, and a folder that cannot be written is not an error. The folder is `RATHKIT_CACHE_DIR`, else
   `$XDG_CACHE_HOME/rathkit/minify` or `~/.cache/rathkit/minify`, kept under 512 MB. Watch mode and the dev server do not use it.
+
+- `rkp analyze meta.json [--outfile report.html]` reads a metafile (`--metafile=FILE`) and writes one self-contained HTML page: a treemap by package, the packages
+  and modules of each output with their sizes, what imports a module, and a filter box. It fetches nothing and needs no server.
+- `rkp migrate [DIR] [--write]` finds the build tool of a project (esbuild, Vite, webpack, rspack or Rollup) and prints the equivalent rkp commands, with notes on
+  what does not carry over. `--write` adds `build:rkp` and `dev:rkp` to the scripts of `package.json` and never changes a script that is there. Run on the 63 corpus
+  projects, it found the tool of all 34 that have one, and every command it printed that can run builds the project (`docs/migrate/corpus-check.md`).
+- Migration guides from esbuild, Vite, webpack and Rollup (`docs/migrate/`), each starting from a small project of the tool and checked in CI (`tools/run-migrate.mjs`).
+- esbuild's spellings of options are read (`--outfile=FILE`, `--external:NAME`, `--alias:A=B`, `--conditions=a,b`, `--main-fields=a,b`, `--platform=`,
+  `--jsx=transform|automatic`, `--tree-shaking=`, `--sources-content=`, `--bundle`, `--charset=utf8`, `--log-level`, `--color`, `--log-limit`), and the npm API accepts
+  `entryPoints`, `absWorkingDir`, `bundle: true`, `charset: 'utf8'`, `logLevel`, `color`, `logLimit` and `allowOverwrite`. `docs/esbuild-conformance.md` lists every esbuild
+  option with its status and a probe that CI runs (`tools/run-esbuild-conformance.mjs`, 114 probes).
 
 ### Known gaps
 
@@ -56,6 +71,7 @@ about stability.
   another piece may read it. A whole-bundle count of reads would allow it; lodash-es is about 1.6 KB larger without it.
 - The minified text of a bundle can differ by a few bytes between machines with different numbers of cores, because the pieces the minifier works on
   are split by the number of threads. The output is the same for the same number of cores.
+- Of esbuild's options, the ones Pack does not support are listed in `docs/esbuild-conformance.md`; among them are the formats `umd`, `amd` and `system`.
 
 ## 0.3.0-beta.0 - 2026-11-16
 
