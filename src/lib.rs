@@ -1,4 +1,5 @@
 pub mod ast;
+pub mod cache;
 pub mod css;
 pub mod define;
 pub mod dts;

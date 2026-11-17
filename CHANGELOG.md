@@ -16,6 +16,47 @@ What an alpha or beta does promise, and checks on every change (`tools/check-pro
 scripts in any package, a build that needs no network, provenance and checksums on every release. It promises nothing
 about stability.
 
+## Unreleased
+
+### Changed
+
+- Smaller minified output. A namespace path such as `ns.a.b`, where `a` is a namespace a module re-exports (`export * as a`), is folded to the
+  binding it names across modules, and a call of a function that only returns a value is dropped when its result is unused. The minifier writes a
+  `const` that is read once where it is read, drops an `else` after a branch that always leaves, and lets `export default x` alias a variable that is
+  initialized once. In the pack-bench container, minified Zod is about 6.4 KB smaller than with 0.3.0-beta.0 (gzip about 1.9 KB), D3 3.9 KB, the TypeScript compiler
+  2.0 KB, Solid 0.6 KB and lodash-es 0.8 KB, with the same behavior on all 15 workloads.
+- Smaller minified style sheets (without a source map): `#ffffff` is `#fff`, `0.5` is `.5`, trailing zeros and `0px` go where a length is certain, the `bold`
+  and `normal` weights are 700 and 400, `rgb(r,g,b)` is written in hex, `rotateZ`, `skewX` and a mirroring `matrix` are shorter, quotes come off font names
+  that are plain words, duplicate parts of `margin`, `padding` and similar shorthands are dropped, the space before `!important`, after `@media` and around
+  `~` and `+` goes, `::before` is `:before` (also `after`, `first-line` and `first-letter`) and `[a="b"]` is `[a=b]`. Custom properties, strings and `url()`
+  are left as written. A rule that follows one with the same selector is one rule, and one with the same body joins its selector list when both selectors are
+  of the kind every browser reads. A quoted `url()` that holds a `)` no longer ends the scan early. The minified text of style sheets is different from before.
+- Faster builds of big bundles: the modules of a bundle of 256 KB of source or more are scanned on all cores (the output is the same for every number of
+  cores), and a source map's line tables and inline-map lookups are made on all cores, so a map adds 15% to a minified build of lodash-es instead of 39%. The scan keeps the records of the modules it is working on, which costs a
+  little memory on mid-size bundles: the peak of React server rendering with a source map goes from 19.3 to 19.9 MB on four cores (3%; 10% on a hosted CI runner).
+- Less memory: a one-shot build drops the per-module scans and used-name sets before the minifier starts, finds repeated requests through an index
+  instead of a quadratic scan, and runs on a 1 GB stack so that deeply nested generated files do not overflow it. `docs/memory.md` states the bound and
+  `tools/run-worstcase.mjs` (50,000-module graphs in four shapes, a 16 MB module and a barrel of 5,000 re-exports) checks it on Linux. `RATHKIT_TIMING`
+  prints the resident and peak size of each phase.
+
+### Added
+
+- An optional cache for the minifier, off unless `RATHKIT_CACHE=on` (or `1`, `true`, `yes`): a one-shot minified build keeps what the minifier made of each chunk of 16 KB
+  or more, so a warm build skips that step (TypeScript's 9 MB bundle builds about a third faster) and writes byte for byte what a cold build writes. An
+  entry holds the chunk's text, the settings, the layout and the program that made it next to the answer, and a hit needs every one to match; a missing,
+  cut short, damaged or stale entry is ignored and written again, and a folder that cannot be written is not an error. The folder is `RATHKIT_CACHE_DIR`, else
+  `$XDG_CACHE_HOME/rathkit/minify` or `~/.cache/rathkit/minify`, kept under 512 MB. Watch mode and the dev server do not use it.
+
+### Known gaps
+
+- Source maps still add 20 to 25% to a minified build on the TypeScript compiler, three.js, React, rxjs, Zod and the 500-module TypeScript app (#25).
+- CSS minification does not build shorthands from longhands, merge rules that are not next to each other, or change `rgba()` to hex (#23).
+- The cache does not make the development server or watch mode start faster; their time is in parsing and scanning (#26).
+- A bundle of 96 KB of text or more is minified in pieces, and a constant declared at the top level of a piece is not written at its one read, because
+  another piece may read it. A whole-bundle count of reads would allow it; lodash-es is about 1.6 KB larger without it.
+- The minified text of a bundle can differ by a few bytes between machines with different numbers of cores, because the pieces the minifier works on
+  are split by the number of threads. The output is the same for the same number of cores.
+
 ## 0.3.0-beta.0 - 2026-11-16
 
 ### Changed

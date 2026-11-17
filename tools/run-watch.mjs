@@ -47,29 +47,38 @@ const until = async (what, check, ms = 15000) => {
   throw new Error(`timed out waiting for ${what}\n--- stderr\n${stderr}\n--- log\n${readFileSync(log, 'utf8')}`);
 };
 const output = () => readFileSync(out, 'utf8');
+// The watcher writes the output, then arms its watches, then says "watching N files". A change made before that line may fall between the build's
+// read and the new watch, so the next change waits for it.
+const settled = () => until('the watcher to settle', () => /watching \d+ files[^\n]*\n$/.test(stderr));
 let failed = null;
 try {
   await until('the first build', () => output().includes('v1') && output().startsWith('// config one'));
+  await settled();
 
   write('dep.js', 'export const value = "v2";\n');
   await until('a rebuild after dep.js changed', () => output().includes('v2'));
+  await settled();
 
   // A file the build did not read before: main.js now imports it, and it is watched from then on.
   write('extra.js', 'export const extra = "x1";\n');
   write('main.js', 'import { value } from "./dep.js";\nimport { extra } from "./extra.js";\nconsole.log(value, extra);\n');
   await until('a rebuild with extra.js', () => output().includes('x1'));
+  await settled();
   // A change of size too: the watcher compares the modification time and the size, and a write that follows the last build by less
   // than a clock tick of the file system (a few milliseconds) with the same size looks like no change.
   write('extra.js', 'export const extra = "x2-changed";\n');
   await until('a rebuild after extra.js changed', () => output().includes('x2-changed'));
+  await settled();
 
   // A file added to a directory that `import.meta.glob` lists is picked up, though no file the build read changed.
   mkdirSync(join(dir, 'items'));
   write('items/a.js', 'export default "g1";\n');
   write('main.js', 'import { value } from "./dep.js";\nimport { extra } from "./extra.js";\nconst items = import.meta.glob("./items/*.js", { eager: true, import: "default" });\nconsole.log(value, extra, items);\n');
   await until('a build that lists items', () => output().includes('g1'));
+  await settled();
   write('items/b.js', 'export default "g2";\n');
   await until('a rebuild with a file added to the glob', () => output().includes('g2'));
+  await settled();
 
   // The config is read again, so the new plugin's banner shows.
   write('rathkit.config.mjs', config('// config two'));

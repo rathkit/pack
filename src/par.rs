@@ -18,6 +18,15 @@ pub fn worth_it(items: usize, bytes: usize) -> bool {
 
 /// `f(0)`, `f(1)`, ... `f(n - 1)`, each taken by the first free thread (the caller's thread is one of them), results in order.
 pub fn map<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
+    map_with_stack(n, 0, f)
+}
+
+/// The stack of the threads that walk a whole syntax tree, in bytes: as much as the one thread the program runs on has, so that a
+/// module with a very deep expression is as safe on a helper thread as on the main one. The memory is only reserved, not used.
+pub const DEEP_STACK: usize = 1 << 30;
+
+/// `map` with `stack` bytes of stack for each thread it starts (0: the default).
+pub fn map_with_stack<T: Send>(n: usize, stack: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
     let threads = workers().min(n);
     if threads < 2 {
         return (0..n).map(f).collect();
@@ -36,11 +45,26 @@ pub fn map<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
     };
     std::thread::scope(|scope| {
         for _ in 1..threads {
-            scope.spawn(work);
+            if stack == 0 {
+                scope.spawn(work);
+            } else if std::thread::Builder::new().stack_size(stack).spawn_scoped(scope, work).is_err() {
+                // No room for another stack: the threads there are, the caller's among them, do all of it.
+                break;
+            }
         }
         work();
     });
     done.into_inner().expect("results").into_iter().map(|r| r.expect("every item ran")).collect()
+}
+
+/// For `RATHKIT_TIMING`: the resident size now and at its peak (Linux; empty elsewhere).
+pub fn memory_note() -> String {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let field = |name: &str| status.lines().find_map(|l| l.strip_prefix(name)).and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<u64>().ok());
+    match (field("VmRSS:"), field("VmHWM:")) {
+        (Some(now), Some(peak)) => format!("  [rss {} MB, peak {} MB]", now / 1024, peak / 1024),
+        _ => String::new(),
+    }
 }
 
 #[cfg(test)]

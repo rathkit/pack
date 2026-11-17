@@ -591,6 +591,9 @@ const TAG_REPLACEMENT: char = '\u{E001}';
 const TAG_CLOSE: char = '\u{E002}';
 const TAG_NUMBER_END: char = '\u{E003}';
 
+/// Below this much source a scan takes about a millisecond, which starting threads does not repay (measured on the benchmark workloads).
+const SCAN_PARALLEL_BYTES: usize = 256 * 1024;
+
 impl<'a> Bundler<'a> {
     fn new(graph: &'a Graph, linked: &'a Linked, shaken: &'a Shaken) -> Bundler<'a> {
         Bundler {
@@ -690,8 +693,18 @@ impl<'a> Bundler<'a> {
             self.scan_salt = self.compute_scan_salt();
             crate::minify::next_build();
         }
-        for id in included {
-            self.scan(id);
+        let before_scan = std::time::Instant::now();
+        let n_scanned = included.len();
+        let scan_bytes: usize = included.iter().map(|&id| self.graph.module(id).source.len()).sum();
+        if !self.keep_scans && !self.registry && self.federation.is_none() && scan_bytes >= SCAN_PARALLEL_BYTES && crate::par::worth_it(included.len(), scan_bytes) {
+            self.scan_in_parallel(&included);
+        } else {
+            for id in included {
+                self.scan(id);
+            }
+        }
+        if std::env::var_os("RATHKIT_TIMING").is_some() {
+            eprintln!("  scan: {:.1} ms ({} modules, {} KB){}", before_scan.elapsed().as_secs_f64() * 1000.0, n_scanned, scan_bytes / 1024, crate::par::memory_note());
         }
         if self.registry {
             return self.run_registry(options);
@@ -801,13 +814,23 @@ impl<'a> Bundler<'a> {
             let started = std::time::Instant::now();
             raws.push(self.emit_chunk(c, &order, &exports, &names, &links));
             if timing {
-                eprintln!("  emit chunk {c}: {:.1} ms", started.elapsed().as_secs_f64() * 1000.0);
+                eprintln!("  emit chunk {c}: {:.1} ms{}", started.elapsed().as_secs_f64() * 1000.0, crate::par::memory_note());
             }
         }
         // Frameworks that use decorators read class names at run time (Nest builds its module
         // tokens from them), so shortening them breaks those programs unless asked for.
         let keep_names = options.minify.keep_names.unwrap_or(graph.decorator_metadata || graph.experimental_decorators);
         let settings = crate::minify::Options { keep_top_level: self.format == Format::Iife, keep_names: Some(keep_names), legacy: !self.target.supports(crate::target::Feature::Template) || !self.target.supports(crate::target::Feature::OptionalCatch), ..options.minify };
+        if !self.keep_scans {
+            // The chunks' text is made; the scans of the modules (their edits, and what the namespaces list) are not read again, and the
+            // minifier is about to want the memory. With `keep_scans` they go back to their modules instead, for the next build.
+            self.code = HashMap::new();
+            self.ns_entries = HashMap::new();
+            self.key_refs = HashMap::new();
+        }
+        if timing {
+            eprintln!("  emitted: {}", crate::par::memory_note());
+        }
         let marks = std::mem::take(&mut *self.marks.lock().expect("marks"));
         // The chunks are independent from here on, so with several they are finished side by side.
         let finish = |c: usize, (raw, layout): (String, crate::minify::Layout)| self.finish_chunk(c, raw, layout, options, &settings, &marks);
@@ -1345,13 +1368,23 @@ impl<'a> Bundler<'a> {
         out
     }
 
+    /// The minifier on a chunk's text. A build that is not kept for the next one (no watch, no dev server) keeps its answer in the
+    /// persistent cache instead (`cache.rs`); one that is kept reuses the pieces it still holds.
+    fn minify_text(&self, text: &str, layout: &crate::minify::Layout, settings: &crate::minify::Options, anchors: Option<&mut Vec<crate::minify::Anchor>>) -> Result<String, String> {
+        if self.keep_scans {
+            crate::minify::minify_chunk(text, layout, settings, anchors)
+        } else {
+            crate::cache::minify_chunk(text, layout, settings, anchors)
+        }
+    }
+
     /// Minifies one chunk's text and builds its map, as asked for.
     fn finish_chunk(&self, c: usize, raw: String, mut layout: crate::minify::Layout, options: &Options, settings: &crate::minify::Options, marks: &[Mark]) -> Result<OutputFile, Vec<Diagnostic>> {
         let timing = std::env::var_os("RATHKIT_TIMING").is_some();
         let fail = |message: String| vec![Diagnostic { severity: crate::graph::Severity::Error, message: format!("{}: {message}", self.plan.chunks[c].file), file: None, pos: None }];
         let file = self.plan.chunks[c].file.clone();
         if !self.mapping {
-            let code = if settings.any() { crate::minify::minify_chunk(&raw, &layout, settings, None).map_err(fail)? } else { raw };
+            let code = if settings.any() { self.minify_text(&raw, &layout, settings, None).map_err(fail)? } else { raw };
             let code = self.with_legal_comments(code, c, &file, options, settings);
             let code = wrap_text(code, options.banner_js.as_deref(), options.footer_js.as_deref());
             return Ok(OutputFile { name: file, code, map: None, data: None, original: None });
@@ -1378,11 +1411,11 @@ impl<'a> Bundler<'a> {
         // core escapes them while the minifier works: the biggest one (ts5 is one 9 MB module) is not worth waiting for.
         let preparing = std::time::Instant::now();
         let (mut code, anchors, mut prep) = std::thread::scope(|scope| {
-            let escaping = options.sources_content.then(|| scope.spawn(|| self.escape_sources(marks)));
-            let indexing = scope.spawn(|| self.index_sources(marks));
+            let escaping = options.sources_content.then(|| scope.spawn(|| { let t = std::time::Instant::now(); let r = self.escape_sources(marks); if timing { eprintln!("  escape sources: {:.1} ms", t.elapsed().as_secs_f64() * 1000.0); } r }));
+            let indexing = scope.spawn(|| { let t = std::time::Instant::now(); let r = self.index_sources(marks); if timing { eprintln!("  index sources: {:.1} ms", t.elapsed().as_secs_f64() * 1000.0); } r });
             let (code, anchors) = if settings.any() {
                 let mut anchors = Vec::new();
-                let code = crate::minify::minify_chunk(&text, &layout, settings, Some(&mut anchors)).map_err(fail)?;
+                let code = self.minify_text(&text, &layout, settings, Some(&mut anchors)).map_err(fail)?;
                 (code, anchors)
             } else {
                 let anchors = synthetic_anchors(&text, &spans);
@@ -1723,12 +1756,17 @@ impl<'a> Bundler<'a> {
         let mut ids: Vec<u32> = marks.iter().map(|m| m.module.index() as u32).collect();
         ids.sort_unstable();
         ids.dedup();
+        let one = |k: usize| {
+            let module = &self.graph.modules[ids[k] as usize];
+            (std::sync::Arc::new(crate::sourcemap::Lines::new(&module.source)), crate::sourcemap::Input::find(&module.path, &module.source).map(std::sync::Arc::new))
+        };
+        let bytes: usize = ids.iter().map(|&i| self.graph.modules[i as usize].source.len()).sum();
+        let made: Vec<_> = if crate::par::worth_it(ids.len(), bytes) { crate::par::map(ids.len(), one) } else { (0..ids.len()).map(one).collect() };
         let mut lines = crate::fxhash::FastMap::default();
         let mut inputs = crate::fxhash::FastMap::default();
-        for i in ids {
-            let module = &self.graph.modules[i as usize];
-            lines.insert(i, std::sync::Arc::new(crate::sourcemap::Lines::new(&module.source)));
-            inputs.insert(i, crate::sourcemap::Input::find(&module.path, &module.source).map(std::sync::Arc::new));
+        for (&i, (l, input)) in ids.iter().zip(made) {
+            lines.insert(i, l);
+            inputs.insert(i, input);
         }
         (lines, inputs)
     }
@@ -2125,6 +2163,11 @@ impl<'a> Bundler<'a> {
                             modules.extend(resolve_export(self.graph, *target, name).and_then(|b| self.binding_module(&b)));
                         }
                     }
+                    Use::Path(symbol, names) => {
+                        if let Some(Binding::Namespace(target)) = self.linked.binding(id, *symbol) {
+                            modules.extend(crate::shake::follow_namespaces(self.graph, *target, names).and_then(|(b, _)| self.binding_module(&b)));
+                        }
+                    }
                     Use::Symbol(symbol) => {
                         if let Some(Binding::Namespace(target)) = self.linked.binding(id, *symbol) {
                             for name in export_names(self.graph, *target) {
@@ -2452,6 +2495,65 @@ impl<'a> Bundler<'a> {
                 let key = Key::External(specifier.clone(), ext);
                 self.register(key.clone(), from);
                 vec![Piece::Name(key)]
+            }
+        }
+    }
+
+    /// A bundler with this one's settings and nothing collected, for scanning a module on another thread.
+    fn scan_fork(&self) -> Bundler<'a> {
+        let mut fork = Bundler::new(self.graph, self.linked, self.shaken);
+        fork.original_paths = self.original_paths;
+        fork.browser = self.browser;
+        fork.hot = self.hot;
+        fork.registry = self.registry;
+        fork.react_refresh = self.react_refresh;
+        fork.tla_possible = self.tla_possible;
+        fork.drop_console = self.drop_console;
+        fork.drop_debugger = self.drop_debugger;
+        fork.out_extensions = self.out_extensions.clone();
+        fork.target = self.target;
+        fork.legacy = self.legacy;
+        fork.cjs_exports = self.cjs_exports;
+        fork.preserve = self.preserve;
+        fork.preserve_root = self.preserve_root.clone();
+        fork.preserve_entries = self.preserve_entries;
+        fork.entry_names = self.entry_names.clone();
+        fork.format = self.format;
+        fork.global_name = self.global_name.clone();
+        fork.globals = self.globals.clone();
+        fork.splitting = self.splitting;
+        fork.single_name = self.single_name.clone();
+        fork.mapping = self.mapping;
+        fork.nesting = self.nesting;
+        fork
+    }
+
+    /// `scan` for every module, on all cores. A scan reads the graph and what tree shaking decided and writes only to the bundler's
+    /// collections (the keys it asked for, in order; the helpers; its code), so each module is scanned by a bundler of its own that
+    /// records its keys, and the records are replayed here in module order: the same keys in the same order as scanning one after the
+    /// other. A scan that made an error is made again here, so the errors keep their order.
+    fn scan_in_parallel(&mut self, included: &[ModuleId]) {
+        let this = &*self;
+        let scanned = crate::par::map_with_stack(included.len(), crate::par::DEEP_STACK, |i| {
+            let mut fork = this.scan_fork();
+            fork.journal = Some(Vec::new());
+            fork.scan(included[i]);
+            let clean = fork.errors.is_empty();
+            let code = fork.code.remove(&included[i]);
+            let journal = fork.journal.take().unwrap_or_default();
+            let helpers = std::mem::take(&mut fork.helpers);
+            (clean, code, journal, helpers)
+        });
+        for (&id, (clean, code, journal, helpers)) in included.iter().zip(scanned) {
+            match code {
+                Some(code) if clean => {
+                    for (key, from) in journal {
+                        self.register(key, from);
+                    }
+                    self.helpers.or(&helpers);
+                    self.code.insert(id, code);
+                }
+                _ => self.scan(id),
             }
         }
     }
@@ -3229,6 +3331,22 @@ impl<'a> Scanner<'_, 'a> {
                         }
                     }
                 }
+            // `ns.a.b`: `a` is a namespace that `ns` re-exports (`export * as a`), so `b` is named directly and no namespace object is built.
+            if let NodeKind::Member { object, .. } = ast[node].kind {
+            if matches!(ast[object].kind, NodeKind::Member { .. }) && !self.written.contains(&node) {
+                if let Some((sym, names)) = crate::shake::member_path(ast, self.semantic, node) {
+                    if let Some(Binding::Namespace(target)) = self.bundler.linked.binding(self.module.id, sym).cloned() {
+                        if let Some((binding, used)) = crate::shake::follow_namespaces(self.bundler.graph, target, &names) {
+                            if used == names.len() {
+                                let pieces = self.bundler.binding_pieces(Some(self.module.id), &binding);
+                                self.push(node, pieces);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+            }
             }
             // `--drop:console`: a call of a method of the global `console` is not made.
             NodeKind::Call { callee, .. }
@@ -3432,23 +3550,34 @@ impl Bundler<'_> {
         let graph = self.graph;
         let mut globals: HashSet<&str> = RESERVED.iter().copied().collect();
         let mut nested: HashMap<ModuleId, &HashSet<String>> = HashMap::new();
+        // What a module uses is worked out once for as long as the module is kept. A build that keeps nothing holds it here only, so it
+        // is gone when the names are made instead of sitting in every module until the process ends.
+        let mut worked_out: Vec<(ModuleId, crate::graph::ModuleNames)> = Vec::new();
+        let used_by = |module: &Module, parsed: &crate::parser::Parsed| {
+            let root = parsed.semantic.root_scope();
+            let wrapped = module.kind != ModuleKind::Esm;
+            crate::graph::ModuleNames {
+                unresolved: parsed.semantic.unresolved().iter().filter_map(|&node| if let NodeKind::Ident(name) = parsed.ast[node].kind { Some(parsed.ast.atom(name).to_string()) } else { None }).collect(),
+                // What an inner scope declares can capture a reference to a bundle-level name.
+                nested: parsed.semantic.symbols().filter(|(_, s)| wrapped || s.scope != root).map(|(_, s)| parsed.ast.atom(s.name).to_string()).collect(),
+            }
+        };
         for module in &graph.modules {
             if !self.included(module.id) {
                 continue;
             }
             let Some(parsed) = module.parsed.as_ref() else { continue };
-            // What a module uses is worked out once for as long as the module is kept.
-            let used = module.memo.names.get_or_init(|| {
-                let root = parsed.semantic.root_scope();
-                let wrapped = module.kind != ModuleKind::Esm;
-                crate::graph::ModuleNames {
-                    unresolved: parsed.semantic.unresolved().iter().filter_map(|&node| if let NodeKind::Ident(name) = parsed.ast[node].kind { Some(parsed.ast.atom(name).to_string()) } else { None }).collect(),
-                    // What an inner scope declares can capture a reference to a bundle-level name.
-                    nested: parsed.semantic.symbols().filter(|(_, s)| wrapped || s.scope != root).map(|(_, s)| parsed.ast.atom(s.name).to_string()).collect(),
-                }
-            });
+            if graph.keeps_modules {
+                let used = module.memo.names.get_or_init(|| used_by(module, parsed));
+                globals.extend(used.unresolved.iter().map(String::as_str));
+                nested.insert(module.id, &used.nested);
+            } else {
+                worked_out.push((module.id, used_by(module, parsed)));
+            }
+        }
+        for (id, used) in &worked_out {
             globals.extend(used.unresolved.iter().map(String::as_str));
-            nested.insert(module.id, &used.nested);
+            nested.insert(*id, &used.nested);
         }
         let mut names: HashMap<Key, String> = HashMap::new();
         let mut taken: HashSet<String> = HashSet::new();

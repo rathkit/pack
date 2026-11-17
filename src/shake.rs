@@ -48,6 +48,9 @@ pub enum Use {
     Symbol(SymbolId),
     /// `ns.name`, where `ns` may be a namespace import: only that one export is needed.
     Member(SymbolId, String),
+    /// `ns.a.b` (or deeper), where `ns` may be a namespace import and `a` a namespace that `ns` re-exports (`export * as a`): only that
+    /// export of the innermost namespace is needed. The names are in order and there are at least two.
+    Path(SymbolId, Vec<String>),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -271,6 +274,13 @@ impl Shaker<'_> {
                     }
                     _ => self.work.push(Work::Symbol(id, *symbol)),
                 },
+                Use::Path(symbol, names) => match self.linked.binding(id, *symbol) {
+                    Some(Binding::Namespace(target)) => match follow_namespaces(self.graph, *target, names) {
+                        Some((binding, _)) => self.work.push(Work::Binding(binding)),
+                        None => self.work.push(Work::Module(*target)),
+                    },
+                    _ => self.work.push(Work::Symbol(id, *symbol)),
+                },
             }
         }
         self.modules[id.index()].parts[index].uses = uses;
@@ -324,6 +334,43 @@ impl Shaker<'_> {
     }
 }
 
+/// `a.b.c` with plain property names: the base identifier and the names, outermost last (at least two).
+pub(crate) fn member_path(ast: &crate::ast::Ast, semantic: &crate::semantic::Semantic, node: NodeId) -> Option<(SymbolId, Vec<String>)> {
+    use crate::ast::{NodeKind, flags};
+    let mut names = Vec::new();
+    let mut at = node;
+    loop {
+        let NodeKind::Member { object, prop } = ast[at].kind else { return None };
+        if ast[at].has(flags::COMPUTED) || ast[at].has(flags::OPTIONAL) {
+            return None;
+        }
+        let NodeKind::PropName(name) = ast[prop].kind else { return None };
+        names.push(ast.atom(name).to_string());
+        match ast[object].kind {
+            NodeKind::Member { .. } => at = object,
+            NodeKind::Ident(_) => {
+                names.reverse();
+                return semantic.symbol_of(object).map(|symbol| (symbol, names));
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Follows `names` through namespaces from `target`: the binding the first name that is not a namespace stands for (or the last
+/// name), and how many names that took. `None` when a name is not exported.
+pub(crate) fn follow_namespaces(graph: &Graph, target: ModuleId, names: &[String]) -> Option<(Binding, usize)> {
+    let mut module = target;
+    for (i, name) in names.iter().enumerate() {
+        let binding = resolve_export(graph, module, name)?;
+        match binding {
+            Binding::Namespace(next) if i + 1 < names.len() => module = next,
+            _ => return Some((binding, i + 1)),
+        }
+    }
+    None
+}
+
 /// Every module-level name the subtree at `root_node` refers to, however deeply nested.
 fn collect_uses(ast: &crate::ast::Ast, semantic: &crate::semantic::Semantic, root: crate::semantic::ScopeId, defines: Option<&crate::define::Defines>, enums: Option<(&EnumTable, &Linked)>, id: ModuleId, root_node: NodeId, stack: &mut Vec<NodeId>) -> Vec<Use> {
     use crate::ast::NodeKind;
@@ -349,6 +396,20 @@ let mut uses = Vec::new();
                 }
                 continue;
             }
+            NodeKind::Member { object: outer, .. } if matches!(ast[outer].kind, NodeKind::Member { .. }) && !written.contains(&node) => {
+                if let Some((symbol, names)) = member_path(ast, semantic, node) {
+                    if semantic.symbol(symbol).scope == root {
+                        let first_is_enum = enums.is_some_and(|(table, linked)| table.member(linked, id, symbol, &names[0]).is_some());
+                        if !first_is_enum {
+                            uses.push(Use::Path(symbol, names));
+                            continue;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        match ast[node].kind {
             NodeKind::Member { object, prop } => {
                 let name = match ast[prop].kind {
                     NodeKind::PropName(name) if !ast[node].has(crate::ast::flags::COMPUTED) => Some(name),
@@ -386,6 +447,7 @@ let mut uses = Vec::new();
     uses.sort_by_key(|u| match u {
         Use::Symbol(s) => (s.index(), String::new()),
         Use::Member(s, n) => (s.index(), n.clone()),
+        Use::Path(s, n) => (s.index(), n.join(".")),
     });
     uses.dedup();
     uses
@@ -398,9 +460,34 @@ fn build_parts(graph: &Graph, id: ModuleId, enums: Option<(&EnumTable, &Linked)>
     use crate::ast::NodeKind;
     let (ast, semantic) = (&parsed.ast, &parsed.semantic);
     let defines = Some(&graph.defines).filter(|d| !d.is_empty());
-    let purity = Purity { source: &module.source, ast, semantic, defines, pure_calls: &graph.pure_calls };
     let root = semantic.root_scope();
     let NodeKind::Program(body) = ast[ast.root].kind else { return ModuleShake::default() };
+    let mut functions = HashMap::new();
+    let mut consts = HashMap::new();
+    for &stmt in ast.list(body) {
+        let declaration = match ast[stmt].kind {
+            NodeKind::ExportNamed(export) => ast.export(export).decl.unwrap_or(stmt),
+            _ => stmt,
+        };
+        match ast[declaration].kind {
+            NodeKind::Function { name: Some(n), .. } if ast[declaration].has(crate::ast::flags::DECL) => {
+                if let Some(sym) = semantic.symbol_of(n) {
+                    functions.insert(sym, declaration);
+                }
+            }
+            NodeKind::VarDecl { kind: crate::ast::VarKind::Const, decls } => {
+                for &d in ast.list(decls) {
+                    if let NodeKind::VarDeclarator { target, init: Some(init) } = ast[d].kind {
+                        if let Some(sym) = matches!(ast[target].kind, NodeKind::BindingIdent(_)).then(|| semantic.symbol_of(target)).flatten() {
+                            consts.insert(sym, init);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let purity = Purity { source: &module.source, ast, semantic, defines, pure_calls: &graph.pure_calls, functions: Some(&functions), consts: Some(&consts), depth: std::cell::Cell::new(0) };
     let mut parts = Vec::new();
     let mut stack = Vec::new();
     for &stmt in ast.list(body) {

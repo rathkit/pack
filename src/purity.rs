@@ -10,7 +10,9 @@
 //! side: a read of a module-level binding is assumed to be free of the temporal dead zone error.
 
 use crate::ast::{Ast, BinOp, NodeId, NodeKind, UnaryOp, flags};
-use crate::semantic::Semantic;
+use crate::semantic::{Semantic, SymbolId};
+use std::cell::Cell;
+use std::collections::HashMap;
 
 /// Built-in globals whose mere mention cannot fail: they exist in every JavaScript
 /// environment. Any other unresolved name might not be defined, and reading it would throw.
@@ -21,6 +23,13 @@ const SAFE_GLOBALS: &[&str] = &[
     "Uint32Array", "Float32Array", "Float64Array", "BigInt64Array", "BigUint64Array", "Intl", "Atomics", "parseInt", "parseFloat", "isNaN", "isFinite",
     "encodeURIComponent", "decodeURIComponent", "encodeURI", "decodeURI",
 ];
+
+/// `Math` functions that take numbers and give a number without running any other code.
+const MATH_FUNCTIONS: &[&str] = &[
+    "abs", "acos", "acosh", "asin", "asinh", "atan", "atan2", "atanh", "cbrt", "ceil", "clz32", "cos", "cosh", "exp", "expm1", "floor", "fround", "hypot", "imul", "log", "log10",
+    "log1p", "log2", "max", "min", "pow", "round", "sign", "sin", "sinh", "sqrt", "tan", "tanh", "trunc",
+];
+const MATH_CONSTANTS: &[&str] = &["E", "LN10", "LN2", "LOG10E", "LOG2E", "PI", "SQRT1_2", "SQRT2"];
 
 /// Built-in constructors that have a `prototype`.
 const PROTOTYPE_HOLDERS: &[&str] = &["Object", "Function", "Array", "String", "Number", "Boolean", "Symbol", "BigInt", "Promise", "Map", "Set", "WeakMap", "WeakSet", "Date", "RegExp", "Error"];
@@ -34,7 +43,17 @@ pub struct Purity<'a> {
     pub defines: Option<&'a crate::define::Defines>,
     /// With `--pure`: calls of these names (`styled.div`) are free of effects, as if each carried `/* @__PURE__ */`.
     pub pure_calls: &'a [String],
+    /// The function declarations of the module's top level, by the symbol they declare: a call of one whose body only makes a value is free of effects.
+    pub functions: Option<&'a HashMap<SymbolId, NodeId>>,
+    /// The `const` declarations of the module's top level that name one plain name, by symbol: the initializer. A name whose value is
+    /// a number or a string is a primitive, so arithmetic on it runs no code.
+    pub consts: Option<&'a HashMap<SymbolId, NodeId>>,
+    /// How deep the check of a function body is (a body that calls functions checks those too).
+    pub depth: Cell<u8>,
 }
+
+/// How many functions deep a call is followed.
+const CALL_DEPTH: u8 = 4;
 
 impl Purity<'_> {
     /// Whether a top-level statement can be dropped when nothing it defines is used.
@@ -120,7 +139,7 @@ impl Purity<'_> {
             }
             NodeKind::Unary { op, arg } => match op {
                 UnaryOp::Not | UnaryOp::Typeof | UnaryOp::Void => self.expr_is_pure(arg) || (op == UnaryOp::Typeof && matches!(ast[arg].kind, NodeKind::Ident(_))),
-                UnaryOp::Neg | UnaryOp::Pos | UnaryOp::BitNot => matches!(ast[arg].kind, NodeKind::Num(_)),
+                UnaryOp::Neg | UnaryOp::Pos | UnaryOp::BitNot => self.is_primitive(arg),
                 UnaryOp::Delete => false,
             },
             NodeKind::Binary { op, left, right } => match op {
@@ -133,7 +152,7 @@ impl Purity<'_> {
             NodeKind::Conditional { test, cons, alt } => self.expr_is_pure(test) && self.expr_is_pure(cons) && self.expr_is_pure(alt),
             NodeKind::Sequence(items) => ast.list(items).iter().all(|&e| self.expr_is_pure(e)),
             // A call the author marked as free of effects: only evaluating its arguments can matter.
-            NodeKind::Call { args, .. } | NodeKind::New { args, .. } => (self.is_marked_pure(id) && ast.list(args).iter().all(|&a| self.expr_is_pure(a))) || self.is_known_pure_call(id),
+            NodeKind::Call { args, .. } | NodeKind::New { args, .. } => (self.is_marked_pure(id) && ast.list(args).iter().all(|&a| self.expr_is_pure(a))) || self.is_known_pure_call(id) || self.is_pure_function_call(id) || (matches!(ast[id].kind, NodeKind::Call { .. }) && self.is_primitive(id)),
             // `Object.keys`, `Array.prototype.indexOf`: reading a member of a built-in that is there in every environment.
             NodeKind::Member { .. } => self.is_builtin_member(id),
             // A tagged template of a name given to --pure (`styled.div`...``): free of effects when what is in it is too.
@@ -144,6 +163,55 @@ impl Purity<'_> {
             }
             _ => false,
         }
+    }
+
+    /// `f(x)` where `f` is a function declared at the top of this module (and never assigned) whose body only makes a value: it returns, or
+    /// declares names with initializers that only make values. Nothing else runs when the arguments are free of effects, so the call can go
+    /// when its result is not used. A function that is async or a generator, or has parameters that are not plain names, is not followed.
+    fn is_pure_function_call(&self, id: NodeId) -> bool {
+        let ast = self.ast;
+        let Some(functions) = self.functions else { return false };
+        let NodeKind::Call { callee, args } = ast[id].kind else { return false };
+        if ast[id].has(flags::OPTIONAL) || !matches!(ast[callee].kind, NodeKind::Ident(_)) || ast[callee].has(flags::PARENTHESIZED) {
+            return false;
+        }
+        let Some(sym) = self.semantic.symbol_of(callee) else { return false };
+        let Some(&function) = functions.get(&sym) else { return false };
+        let symbol = self.semantic.symbol(sym);
+        if symbol.writes != 0 || symbol.flags & crate::semantic::symbol_flags::DYNAMIC != 0 {
+            return false;
+        }
+        if self.depth.get() >= CALL_DEPTH {
+            return false;
+        }
+        if !ast.list(args).iter().all(|&a| !matches!(ast[a].kind, NodeKind::Spread(_)) && self.expr_is_pure(a)) {
+            return false;
+        }
+        self.depth.set(self.depth.get() + 1);
+        let pure = self.function_makes_a_value(function);
+        self.depth.set(self.depth.get() - 1);
+        pure
+    }
+
+    fn function_makes_a_value(&self, function: NodeId) -> bool {
+        let ast = self.ast;
+        let NodeKind::Function { params, body, .. } = ast[function].kind else { return false };
+        if ast[function].has(flags::ASYNC) || ast[function].has(flags::GENERATOR) {
+            return false;
+        }
+        if !ast.list(params).iter().all(|&p| matches!(ast[p].kind, NodeKind::BindingIdent(_))) {
+            return false;
+        }
+        let NodeKind::Block(list) = ast[body].kind else { return false };
+        ast.list(list).iter().all(|&s| match ast[s].kind {
+            NodeKind::Return(value) => value.is_none_or(|v| self.expr_is_pure(v)),
+            NodeKind::Function { .. } => true,
+            NodeKind::VarDecl { decls, .. } => ast.list(decls).iter().all(|&d| {
+                let NodeKind::VarDeclarator { target, init } = ast[d].kind else { return false };
+                matches!(ast[target].kind, NodeKind::BindingIdent(_)) && init.is_none_or(|i| self.expr_is_pure(i))
+            }),
+            _ => false,
+        })
     }
 
     /// A call of the language itself that only makes a value: `Symbol("name")`, and `new Map`, `new Set`, `new WeakMap` or `new WeakSet` with no
@@ -277,6 +345,17 @@ impl Purity<'_> {
         }
     }
 
+    /// `name` of `Math.name` (the global `Math`, a plain property read).
+    fn math_member(&self, member: NodeId) -> Option<&str> {
+        let ast = self.ast;
+        let NodeKind::Member { object, prop } = ast[member].kind else { return None };
+        if ast[member].has(flags::COMPUTED) || ast[member].has(flags::OPTIONAL) {
+            return None;
+        }
+        let (NodeKind::Ident(o), NodeKind::PropName(p)) = (ast[object].kind, ast[prop].kind) else { return None };
+        (ast.atom(o) == "Math" && self.semantic.symbol_of(object).is_none()).then(|| ast.atom(p))
+    }
+
     /// A value that is certainly a number, string, boolean, null or similar, known without
     /// running anything, so no `valueOf`/`toString` can be invoked on it.
     fn is_primitive(&self, id: NodeId) -> bool {
@@ -285,18 +364,40 @@ impl Purity<'_> {
             NodeKind::Num(_) | NodeKind::Str(_) | NodeKind::Bool(_) | NodeKind::Null => true,
             NodeKind::Template { exprs, .. } => ast.list(exprs).iter().all(|&e| self.is_primitive(e)),
             NodeKind::Unary { op: UnaryOp::Not | UnaryOp::Typeof | UnaryOp::Void, arg } => self.expr_is_pure(arg),
-            NodeKind::Unary { op: UnaryOp::Neg | UnaryOp::Pos | UnaryOp::BitNot, arg } => matches!(ast[arg].kind, NodeKind::Num(_)),
+            NodeKind::Unary { op: UnaryOp::Neg | UnaryOp::Pos | UnaryOp::BitNot, arg } => self.is_primitive(arg),
             NodeKind::Binary { op, left, right } => match op {
-                BinOp::Add => {
-                    let literal = |n: NodeId| matches!(ast[n].kind, NodeKind::Num(_) | NodeKind::Str(_));
-                    literal(left) && literal(right)
-                }
-                BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::Exp => {
-                    matches!(ast[left].kind, NodeKind::Num(_)) && matches!(ast[right].kind, NodeKind::Num(_))
+                // Walked along the left side in a loop: a sum of 50,000 terms is a tree that deep, and this runs on a worker's small stack.
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::Exp => {
+                    if !self.is_primitive(right) {
+                        return false;
+                    }
+                    let mut at = left;
+                    while let NodeKind::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::Exp, left, right } = ast[at].kind {
+                        if !self.is_primitive(right) {
+                            return false;
+                        }
+                        at = left;
+                    }
+                    self.is_primitive(at)
                 }
                 BinOp::StrictEq | BinOp::StrictNe => self.expr_is_pure(left) && self.expr_is_pure(right),
                 _ => false,
             },
+            // A name that nothing assigns, declared with `const` at the top of the module to a primitive.
+            NodeKind::Ident(name) => match self.semantic.symbol_of(id) {
+                Some(sym) => self.consts.and_then(|c| c.get(&sym)).is_some_and(|&init| {
+                    self.depth.get() < CALL_DEPTH && {
+                        self.depth.set(self.depth.get() + 1);
+                        let primitive = self.is_primitive(init);
+                        self.depth.set(self.depth.get() - 1);
+                        primitive
+                    }
+                }),
+                None => matches!(ast.atom(name), "Infinity" | "NaN" | "undefined"),
+            },
+            // `Math.pow(2, 10)` and `Math.PI`: the global `Math` is not shadowed, and its numeric functions run no code on primitives.
+            NodeKind::Call { callee, args } => self.math_member(callee).is_some_and(|n| MATH_FUNCTIONS.contains(&n)) && !ast[id].has(flags::OPTIONAL) && ast.list(args).iter().all(|&a| !matches!(ast[a].kind, NodeKind::Spread(_)) && self.is_primitive(a)),
+            NodeKind::Member { .. } => self.math_member(id).is_some_and(|n| MATH_CONSTANTS.contains(&n)),
             _ => false,
         }
     }
@@ -311,7 +412,7 @@ mod tests {
     fn pure(src: &str) -> bool {
         let parsed = parse(src, ParseOptions::new(true)).unwrap_or_else(|e| panic!("{}: {src}", e.message));
         let NodeKind::Program(body) = parsed.ast[parsed.ast.root].kind else { unreachable!() };
-        let analysis = Purity { source: src, ast: &parsed.ast, semantic: &parsed.semantic, defines: None, pure_calls: &[] };
+        let analysis = Purity { source: src, ast: &parsed.ast, semantic: &parsed.semantic, defines: None, pure_calls: &[], functions: None, consts: None, depth: Cell::new(0) };
         analysis.statement_is_pure(parsed.ast.list(body)[0])
     }
 
