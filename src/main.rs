@@ -1212,6 +1212,25 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
                 options.resolve.main_fields.insert(position.min(options.resolve.main_fields.len()), field.clone());
             }
         }
+        // webpack's `resolve.extensions`, unless the command line gave its own; `...` is the default list.
+        if !host.info.extensions.is_empty() && options.resolve.extensions == rathkit_pack::resolve::ResolveOptions::default().extensions {
+            let defaults = options.resolve.extensions.clone();
+            options.resolve.extensions = host.info.extensions.iter().flat_map(|e| if e == "..." { defaults.clone() } else { vec![e.clone()] }).collect();
+        }
+        // webpack's `devtool` and `output.publicPath`, unless the command line gave them.
+        if bundle_options.sourcemap == rathkit_pack::bundle::SourceMapMode::None {
+            match host.info.sourcemap.as_deref() {
+                Some("linked") => bundle_options.sourcemap = rathkit_pack::bundle::SourceMapMode::Linked,
+                Some("inline") => bundle_options.sourcemap = rathkit_pack::bundle::SourceMapMode::Inline,
+                Some("external") => bundle_options.sourcemap = rathkit_pack::bundle::SourceMapMode::External,
+                _ => {}
+            }
+        }
+        if !public_path_given {
+            if let Some(path) = &host.info.public_path {
+                options.public_path = path.clone();
+            }
+        }
         if entries.is_empty() {
             entries = host.info.input.clone();
         }

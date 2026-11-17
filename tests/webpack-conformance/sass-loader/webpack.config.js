@@ -1,0 +1,1 @@
+module.exports = { mode: 'production', target: 'node', module: { rules: [{ test: /\.scss$/, use: ['css-loader', { loader: 'sass-loader', options: { sassOptions: { silenceDeprecations: ['legacy-js-api'] } } }] }] } };

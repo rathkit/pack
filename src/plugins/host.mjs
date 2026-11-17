@@ -656,7 +656,8 @@ const loadLoader = async (request, context) => {
     const fn = typeof mod.default === 'function' ? mod.default : typeof mod === 'function' ? mod : mod.default?.default ?? mod;
     // CommonJS loaders: `module.exports = function`, with `.pitch` / `.raw` properties on it.
     const resolved = { fn: typeof fn === 'function' ? fn : mod.default, pitch: mod.pitch ?? fn?.pitch, raw: mod.raw ?? fn?.raw ?? mod.default?.raw, file };
-    if (typeof resolved.fn !== 'function') throw new Error(`Loader ${request} does not export a function`);
+    // A loader that only pitches (thread-loader) has no normal function: it passes the content on.
+    if (typeof resolved.fn !== 'function' && typeof resolved.pitch !== 'function') throw new Error(`Loader ${request} does not export a function`);
     loaderModules.set(key, resolved);
   }
   return loaderModules.get(key);
@@ -721,6 +722,7 @@ const runLoaders = async (resource, query, uses) => {
     addDependency: (f) => dependencies.push(f),
     addContextDependency: (f) => contextDependencies.push(f),
     addMissingDependency: (f) => missingDependencies.push(f),
+    addBuildDependency: () => {}, // build dependencies are for webpack's persistent cache, which a build here has none of
     getDependencies: () => dependencies,
     getContextDependencies: () => contextDependencies,
     getMissingDependencies: () => missingDependencies,
@@ -790,6 +792,7 @@ const runLoaders = async (resource, query, uses) => {
     loaderObjects[i].normalExecuted = true;
     const asBuffer = Buffer.isBuffer(content) ? content : Buffer.from(content);
     const input = loader.raw ? asBuffer : asBuffer.toString('utf8');
+    if (typeof loader.fn !== 'function') continue;
     const [out] = await call(i, loader.fn, [input, null, undefined]);
     content = out === undefined ? input : out;
   }
@@ -797,7 +800,7 @@ const runLoaders = async (resource, query, uses) => {
   let code = Buffer.isBuffer(content) ? content.toString('utf8') : String(content);
   // file-loader and url-loader write `__webpack_public_path__ + "name"`; webpack's runtime provides it, so here it is the public path.
   if (code.includes('__webpack_public_path__') && !/\b(var|let|const)\s+__webpack_public_path__/.test(code)) code = `var __webpack_public_path__ = ${JSON.stringify(process.env.RATHKIT_PUBLIC_PATH ?? '')};\n` + code;
-  return { code, dependencies };
+  return { code, dependencies, content };
 };
 
 /** `this.loadModule` / `this.importModule`: the module as the build would see it, loaded and transformed. */
@@ -852,20 +855,36 @@ const resolveInlineRequest = async (request, importer) => {
   }
   const resolved = await resolveId(resourceSpec, importer, { kind: 'import-statement', onlyPlugins: false }, null);
   if (!resolved || resolved.external) return null;
-  // `!./x.js`: just the file, no loaders of its own to add.
-  if (loaders.length === 0 && prefix) return { id: resolved.id };
   const joiner = resolved.id.includes('?') ? '&' : '?';
   return { id: `${resolved.id}${joiner}${INLINE_MARK}${encodeInline({ prefix, loaders })}` };
 };
 
-const ruleMatches = (rule, resource, query) => {
+const ruleMatches = (rule, resource, query, nested = false) => {
   if (rule.resource !== undefined) return testRule(rule.resource, resource) && (rule.resourceQuery === undefined || testRule(rule.resourceQuery, query));
-  if (rule.test === undefined && rule.include === undefined) return false;
+  const conditions = rule.test !== undefined || rule.include !== undefined || rule.exclude !== undefined || rule.resourceQuery !== undefined;
+  // A rule nested in `rules` or `oneOf` with no condition of its own matches; at the top, one with only `oneOf` or `rules` does.
+  if (!conditions && !nested && !rule.oneOf && !rule.rules) return false;
   if (rule.test !== undefined && !testRule(rule.test, resource)) return false;
   if (rule.include !== undefined && !testRule(rule.include, resource)) return false;
   if (rule.exclude !== undefined && testRule(rule.exclude, resource)) return false;
   if (rule.resourceQuery !== undefined && !testRule(rule.resourceQuery, query)) return false;
   return true;
+};
+
+/** The rules that apply to a file, in order: a rule, then the rules nested in it (`rules`: all that match; `oneOf`: the first that matches). */
+const matchRules = (list, resource, query) => {
+  const out = [];
+  const visit = (rule, nested) => {
+    if (!ruleMatches(rule, resource, query, nested)) return;
+    out.push(rule);
+    for (const child of flatten(rule.rules ?? [])) visit(child, true);
+    if (rule.oneOf) {
+      const first = flatten(rule.oneOf).find((child) => ruleMatches(child, resource, query, true));
+      if (first) visit(first, true);
+    }
+  };
+  for (const rule of list) visit(rule, false);
+  return out;
 };
 
 const evalStore = new Map(); // id -> { code, dir }: modules made up to be run once
@@ -914,8 +933,48 @@ const extractStyleSheet = async (code, resource) => {
   return { code: relativeUrls(items.map(wrap).join('\n')), moduleType: 'css', jsFace: names.length ? face : 'export {};' };
 };
 
+
+const MIME_TYPES = { txt: 'text/plain', html: 'text/html', htm: 'text/html', css: 'text/css', js: 'text/javascript', mjs: 'text/javascript', json: 'application/json', xml: 'application/xml', svg: 'image/svg+xml', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', avif: 'image/avif', ico: 'image/x-icon', bmp: 'image/bmp', woff: 'font/woff', woff2: 'font/woff2', ttf: 'font/ttf', otf: 'font/otf', eot: 'application/vnd.ms-fontobject', mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', mp4: 'video/mp4', webm: 'video/webm', wasm: 'application/wasm', pdf: 'application/pdf', md: 'text/markdown' };
+
+/**
+ * `type: "asset" | "asset/resource" | "asset/inline" | "asset/source"` of a webpack rule: the file (or what the rule's loaders made of it)
+ * is a file of the output, a data URL, or a string. Returns the JavaScript of the module: `module.exports` is the URL, as in webpack.
+ */
+const assetModule = (type, rule, resource, query, content, outputOptions) => {
+  const bytes = Buffer.isBuffer(content) ? content : Buffer.from(String(content));
+  const ext = path.extname(resource);
+  const dataUrl = () => {
+    const generator = rule.generator?.dataUrl;
+    if (typeof generator === 'function') return String(generator(bytes, { filename: resource, module: null }));
+    const mimetype = (generator && generator.mimetype) || MIME_TYPES[ext.slice(1).toLowerCase()] || 'application/octet-stream';
+    const encoding = generator && generator.encoding === false ? false : 'base64';
+    return `data:${mimetype}${encoding ? ';base64' : ''},${encoding ? bytes.toString('base64') : encodeURIComponent(bytes.toString('utf8'))}`;
+  };
+  if (type === 'asset/source') return `module.exports = ${JSON.stringify(bytes.toString('utf8'))};\n`;
+  if (type === 'asset/inline') return `module.exports = ${JSON.stringify(dataUrl())};\n`;
+  if (type === 'asset') {
+    const condition = rule.parser?.dataUrlCondition;
+    const inline = typeof condition === 'function' ? condition(bytes, { filename: resource, module: null }) : bytes.length <= (typeof condition?.maxSize === 'number' ? condition.maxSize : 8096);
+    if (inline) return `module.exports = ${JSON.stringify(dataUrl())};\n`;
+  }
+  // A file of the output. The name is webpack's template: [name], [base], [ext] (with its dot), [path], [hash], [contenthash], [query].
+  const template = rule.generator?.filename ?? outputOptions?.assetModuleFilename ?? '[hash][ext][query]';
+  const resolved = typeof template === 'function' ? template({ filename: resource, module: null }) : template;
+  const hash = crypto.createHash('sha256').update(bytes).digest('hex').slice(0, outputOptions?.hashDigestLength ?? 20);
+  const relative = path.relative(root, path.dirname(resource)).split(path.sep).join('/');
+  const fileName = resolved
+    .replace(/\[name\]/g, path.basename(resource, ext)).replace(/\[base\]/g, path.basename(resource)).replace(/\[ext\]/g, ext)
+    .replace(/\[path\]/g, relative ? relative + '/' : '').replace(/\[(?:content)?hash(?::\d+)?\]/g, (m) => hash.slice(0, +(/:(\d+)/.exec(m)?.[1] ?? hash.length))).replace(/\[query\]/g, query);
+  const compilation = getCompilation();
+  compilation.emitAsset(fileName, new RawSource(bytes), { sourceFilename: path.relative(root, resource) });
+  emitted.set(`ref${emitted.size + 1}`, { fileName, source: bytes, explicit: true, owner: resource });
+  const configured = typeof wp.config?.output?.publicPath === 'string' && wp.config.output.publicPath !== 'auto' ? wp.config.output.publicPath : undefined;
+  const publicPath = rule.generator?.publicPath ?? configured;
+  return `var __webpack_public_path__ = ${JSON.stringify(publicPath ?? process.env.RATHKIT_PUBLIC_PATH ?? '')};\nmodule.exports = __webpack_public_path__ + ${JSON.stringify(fileName)};\n`;
+};
+
 const adaptWebpackRules = (rules) => {
-  const list = flatten(rules).flatMap((r) => (r.oneOf ? r.oneOf.map((o) => ({ ...r, ...o, oneOf: undefined })) : [r]));
+  const list = flatten(rules);
   return {
     name: 'webpack-loaders',
     async resolveId(source, importer) {
@@ -936,7 +995,7 @@ const adaptWebpackRules = (rules) => {
       const resource = queryAt < 0 ? id : id.slice(0, queryAt);
       const query = queryAt < 0 ? '' : id.slice(queryAt);
       if (!path.isAbsolute(resource) || !fs.existsSync(resource)) return null;
-      const matched = list.filter((rule) => ruleMatches(rule, resource, query));
+      const matched = matchRules(list, resource, query);
       const pre = matched.filter((r) => r.enforce === 'pre'), post = matched.filter((r) => r.enforce === 'post'), normal = matched.filter((r) => !r.enforce);
       let uses;
       if (inline) {
@@ -946,6 +1005,12 @@ const adaptWebpackRules = (rules) => {
         else if (inline.prefix === '!') uses = [...post.flatMap(normalizeUse), ...mine, ...pre.flatMap(normalizeUse)];
         else uses = [...post.flatMap(normalizeUse), ...mine, ...normal.flatMap(normalizeUse), ...pre.flatMap(normalizeUse)];
       } else uses = [...post, ...normal, ...pre].flatMap(normalizeUse);
+      // A rule with a `type` of asset modules turns the file, or what its loaders made of it, into a URL, a data URL or a string.
+      const assetRule = [...pre, ...normal, ...post].reverse().find((r) => typeof r.type === 'string' && r.type.startsWith('asset'));
+      if (assetRule && !inline) {
+        const content = uses.length ? (await runLoaders(resource, query, uses)).content : await fs.promises.readFile(resource);
+        return { code: assetModule(assetRule.type, assetRule, resource, query, content, getCompilation().outputOptions), moduleType: 'js' };
+      }
       if (uses.length === 0) return null;
       // mini-css-extract-plugin's loader needs webpack's module graph; the style sheet goes through this bundler's own instead.
       if (/mini-css-extract-plugin[\\/]dist[\\/]loader\.js$/.test(uses[0].loader)) {
@@ -1243,6 +1308,81 @@ const externalPlugin = (external) => {
   };
 };
 
+/**
+ * webpack's `externals`: a string, a RegExp, an object (`{ request: value }`), a function (`({ context, request }, callback)`, the older
+ * `(context, request, callback)`, or one that returns a promise) or an array of these. A request an entry matches is left out of the
+ * bundle and imported as written; the global or module type an entry names for it (`{ react: 'React' }`, `commonjs lodash`) is not used.
+ */
+const webpackExternalsPlugin = (externals) => {
+  const tests = flatten(toArray(externals));
+  // What an entry answers is `true`, or the module to import in place of the request: `commonjs lodash`, `module lodash`, `node-commonjs fs`
+  // (a type and a name), or a name. A global (`var jQuery`, or a bare name where the type is `var`, as for a page) is not carried out: the request is imported.
+  const answer = (value, source) => {
+    if (value === undefined || value === false) return null;
+    const text = Array.isArray(value) ? value[0] : value;
+    if (typeof text !== 'string') return source;
+    const typed = /^(commonjs2?|commonjs-module|commonjs-static|node-commonjs|module|import|module-import|promise|script|umd2?|amd|system|var|window|self|global|this|assign|jsonp)\s+(.+)$/.exec(text);
+    if (typed) return /^(commonjs2?|commonjs-module|commonjs-static|node-commonjs|module|import|module-import)$/.test(typed[1]) && !typed[2].includes(' ') ? typed[2] : source;
+    return !cli.platformBrowser && /^[@\w./:-]+$/.test(text) ? text : source;
+  };
+  const decide = async (test, source, importer) => {
+    const context = importer ? path.dirname(importer) : root;
+    if (typeof test === 'string') return test === source ? source : null;
+    if (test instanceof RegExp) return (test.lastIndex = 0), test.test(source) ? source : null;
+    if (typeof test === 'function') {
+      return new Promise((resolve, reject) => {
+        const done = (error, value) => (error ? reject(error) : resolve(answer(value, source)));
+        // Three parameters: the older form that takes the context and the request; otherwise the object form, which may also give a promise.
+        const out = test.length >= 3 ? test(context, source, done) : test({ context, request: source, contextInfo: { issuer: importer ?? '', compiler: '' }, getResolve: () => async (ctx, request) => (await resolveId(request, path.join(ctx, 'noop.js'), { kind: 'import-statement' }, null))?.id }, done);
+        if (out && typeof out.then === 'function') out.then((value) => resolve(answer(value, source)), reject);
+      });
+    }
+    if (test && typeof test === 'object' && Object.prototype.hasOwnProperty.call(test, source)) return answer(test[source], source);
+    return null;
+  };
+  return {
+    name: 'webpack-externals',
+    async resolveId(source, importer, options) {
+      if (options.isEntry || source.startsWith('\0')) return null;
+      for (const test of tests) {
+        const id = await decide(test, source, importer);
+        if (id) return { id, external: true };
+      }
+      return null;
+    },
+  };
+};
+
+/** webpack's `resolve.modules`: directories (absolute) searched for a bare request before `node_modules`. */
+const modulesPlugin = (dirs) => ({
+  name: 'webpack-resolve-modules',
+  async resolveId(source, importer, options) {
+    if (!source || source.startsWith('.') || source.startsWith('\0') || path.isAbsolute(source) || /^[a-z][a-z0-9+.-]*:/i.test(source)) return null;
+    for (const dir of dirs) {
+      const resolved = await this.resolve(path.join(dir, source), importer, { ...options, skipSelf: true });
+      if (resolved && !resolved.external) return resolved;
+    }
+    return null;
+  },
+});
+
+/** webpack's `devtool` as a source map mode of the bundler; `eval` kinds make none (the bundler has no eval wrapper). */
+const devtoolMode = (devtool) => {
+  if (typeof devtool !== 'string' || !devtool || /^eval(?!-.*source-map)/.test(devtool) || devtool === 'eval') return null;
+  if (!/source-map/.test(devtool)) return null;
+  if (/^inline-/.test(devtool)) return 'inline';
+  if (/^hidden-/.test(devtool)) return 'external';
+  return 'linked';
+};
+
+/** webpack's `entry`: a path, a list of them, an object of them (or of `{ import }`), or a function that gives one of these. Names are not kept. */
+const webpackEntries = (entry, context) => {
+  if (!entry || typeof entry === 'function') return undefined;
+  const base = typeof context === 'string' ? path.resolve(root, context) : root;
+  const paths = (value) => (typeof value === 'string' ? [value] : Array.isArray(value) ? value.flatMap(paths) : value && typeof value === 'object' && value.import ? paths(value.import) : value && typeof value === 'object' && !(value instanceof RegExp) ? Object.values(value).flatMap(paths) : []);
+  return paths(entry).map((p) => (p.startsWith('.') ? path.resolve(base, p) : p));
+};
+
 const aliasPlugin = (alias) => {
   const entries = Array.isArray(alias) ? alias : Object.entries(alias ?? {}).map(([find, replacement]) => ({ find, replacement }));
   return {
@@ -1252,6 +1392,9 @@ const aliasPlugin = (alias) => {
         let target = null;
         if (find instanceof RegExp) {
           if (find.test(source)) target = source.replace(find, replacement);
+        } else if (typeof find === 'string' && find.endsWith('$')) {
+          // webpack's `name$`: that request only, not the ones below it.
+          if (source === find.slice(0, -1)) target = replacement;
         } else if (source === find || source.startsWith(find + '/')) target = replacement + source.slice(find.length);
         if (target === null || target === source) continue;
         const resolved = await this.resolve(target, importer, { ...options, skipSelf: true });
@@ -1277,9 +1420,10 @@ const bannerPlugin = (output) => {
 
 const isWebpackPlugin = (raw) => {
   if (typeof raw === 'function') return true;
-  if (!raw || typeof raw !== 'object' || typeof raw.apply !== 'function' || typeof raw.setup === 'function') return false;
-  // A class instance with `apply(compiler)`, or a plain object that is not a Rollup/Vite plugin (those have a name or hooks).
+  if (!raw || typeof raw !== 'object' || typeof raw.apply !== 'function') return false;
+  // A class instance with `apply(compiler)` (it may have a `setup` of its own), or a plain object that is not a Rollup/Vite/esbuild plugin (those have a name, hooks or `setup`).
   if (Object.getPrototypeOf(raw) !== Object.prototype) return raw.apply.length <= 1;
+  if (typeof raw.setup === 'function') return false;
   return raw.name === undefined && !HOOKS.some((h) => handlerOf(raw[h]));
 };
 
@@ -1300,7 +1444,8 @@ const normalizePlugin = async (raw) => {
     federationOptions = federation;
     return [];
   }
-  if (typeof raw === 'object' && typeof raw.setup === 'function' && !HOOKS.some((h) => raw[h])) return [await adaptEsbuild(raw)];
+  // (A webpack plugin may have a `setup` of its own; esbuild's have no `apply`.)
+  if (typeof raw === 'object' && typeof raw.setup === 'function' && typeof raw.apply !== 'function' && !HOOKS.some((h) => raw[h])) return [await adaptEsbuild(raw)];
   if (isWebpackPlugin(raw)) {
     // The ones that ship with webpack are done here; the rest apply to the compiler of webpack.mjs.
     const kind = raw?.constructor?.name;
@@ -1369,6 +1514,11 @@ async function init(params) {
     if (Array.isArray(config)) config = config[0] ?? {};
   }
   configOptions = { define: { ...(config.define ?? {}) }, alias: config.resolve?.alias ?? config.alias };
+  // webpack's `mode` sets `process.env.NODE_ENV` (`optimization.nodeEnv` names another value, or false for none).
+  {
+    const nodeEnv = config.optimization?.nodeEnv ?? (config.mode === 'development' || config.mode === 'production' ? config.mode : undefined);
+    if (typeof nodeEnv === 'string' && !('process.env.NODE_ENV' in configOptions.define)) configOptions.define['process.env.NODE_ENV'] = JSON.stringify(nodeEnv);
+  }
   wp.config = config;
   let list = [];
   for (const raw of flatten(await Promise.all(flatten(config.plugins ?? [])))) list.push(...(await normalizePlugin(raw)));
@@ -1410,6 +1560,8 @@ async function init(params) {
       if (returned?.resolve) environment.resolve = { ...environment.resolve, ...returned.resolve };
     }
     const swap = (list2) => toArray(list2 ?? []).map((c) => (c === 'development|production' ? mode : c));
+    // webpack's `resolve.conditionNames` (`import`, `require` and `default` are picked by the request here, so they are not extra ones).
+    takeResolve({ conditions: toArray(config.resolve?.conditionNames).filter((c) => typeof c === 'string' && !['import', 'require', 'default', '...'].includes(c)) });
     takeResolve({ conditions: swap(environment.resolve?.conditions), mainFields: environment.resolve?.mainFields });
   }
   for (const plugin of list) {
@@ -1436,6 +1588,11 @@ async function init(params) {
   }
   const pre = [];
   if (config.external || config.build?.rollupOptions?.external) pre.push(externalPlugin(config.external ?? config.build.rollupOptions.external));
+  if (config.externals && !config.external) pre.push(webpackExternalsPlugin(config.externals));
+  {
+    const dirs = toArray(config.resolve?.modules).filter((d) => typeof d === 'string' && path.isAbsolute(d));
+    if (dirs.length) pre.push(modulesPlugin(dirs));
+  }
   if (configOptions.alias && (Array.isArray(configOptions.alias) ? configOptions.alias.length : Object.keys(configOptions.alias).length)) pre.push(aliasPlugin(configOptions.alias));
   const rules = config.module?.rules;
   const post = [];
@@ -1458,20 +1615,23 @@ async function init(params) {
   const externals = inputOptions.external !== firstExternal ? toArray(inputOptions.external) : [];
   // Plugins written for webpack's compiler get one together; they are applied once, before the first build.
   const compilerPlugins = [];
-  if (wp.plugins.length) {
+  // (A webpack config that only lists minimizers, terser-webpack-plugin for example, needs the compiler as well.)
+  if (wp.plugins.length || toArray(config.optimization?.minimizer ?? []).some((m) => m && m !== '...')) {
     wp.active = true;
     await wpInit();
     compilerPlugins.push(wpAdapter());
     if (wp.provide) compilerPlugins.push(provideAdapter());
   }
   // A project that lists its own plugin for these languages keeps it; otherwise Less, Sass and Stylus are compiled when installed.
-  const ownPreprocessor = [...pre, ...list, ...post].some((plugin) => /less|sass|scss|stylus/i.test(plugin?.name ?? ''));
+  // (so does a webpack rule that names sass-loader, less-loader or stylus-loader.)
+  const ruleLoaders = flatten(rules ?? []).flatMap(function expand(r) { return [r, ...flatten(r.rules ?? []).flatMap(expand), ...flatten(r.oneOf ?? []).flatMap(expand)]; }).flatMap((r) => normalizeUse(r).map((u) => String(u.loader ?? '')));
+  const ownPreprocessor = [...pre, ...list, ...post].some((plugin) => /less|sass|scss|stylus/i.test(plugin?.name ?? '')) || ruleLoaders.some((l) => /(?:^|[\\/])(?:sass|less|stylus)-loader(?:[\\/]|$)/.test(l));
   const preprocessors = await stylePlugin(root, config.css ?? {}, cli.mode, !ownPreprocessor);
   plugins = [...(externals.length ? [externalPlugin(externals)] : []), ...(preprocessors ? [preprocessors] : []), ...pre, ...compilerPlugins, ...parcelPlugins, ...list, ...post];
   const hooks = {};
   for (const name of HOOKS) hooks[name] = hooksOf(name).length > 0;
   hooks.transform = hooksOf('transform').length > 0;
-  const input = config.input ?? config.build?.rollupOptions?.input ?? config.build?.lib?.entry;
+  const input = config.input ?? config.build?.rollupOptions?.input ?? config.build?.lib?.entry ?? webpackEntries(config.entry, config.context);
   federationOptions ??= config.federation ?? config.moduleFederation ?? null;
   return {
     // Functions and promises cannot be carried out of the host (a regular expression goes as its source and flags); what is left is plain data.
@@ -1485,6 +1645,9 @@ async function init(params) {
       .filter((a) => typeof a?.find === 'string' && typeof a.replacement === 'string' && path.isAbsolute(a.replacement)).map((a) => [a.find, a.replacement]),
     conditions: resolveExtras.conditions,
     mainFields: resolveExtras.mainFields,
+    extensions: Array.isArray(config.resolve?.extensions) ? config.resolve.extensions.filter((e) => typeof e === 'string') : [],
+    sourcemap: devtoolMode(config.devtool),
+    publicPath: typeof config.output?.publicPath === 'string' && config.output.publicPath !== 'auto' ? config.output.publicPath : null,
     input: input ? (typeof input === 'string' ? [input] : Array.isArray(input) ? input : Object.values(input)) : [],
   };
 }

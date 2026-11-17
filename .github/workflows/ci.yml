@@ -90,6 +90,7 @@ jobs:
       - run: node tools/run-loaders.mjs
       - run: node tools/run-plugins.mjs
       - run: node tools/run-assets.mjs
+      - run: node tools/run-webpack-conformance.mjs
       - run: node tools/run-css.mjs
       - run: node tools/run-target.mjs
       - run: node tools/test-npm-wrapper.mjs
@@ -223,6 +224,7 @@ jobs:
       - run: node tools/run-loaders.mjs
       - run: node tools/run-plugins.mjs
       - run: node tools/run-assets.mjs
+      - run: node tools/run-webpack-conformance.mjs
       - run: node tools/run-css.mjs
       - run: node tools/run-target.mjs
       - run: node tools/test-npm-wrapper.mjs

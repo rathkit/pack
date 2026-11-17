@@ -1,0 +1,1 @@
+module.exports = { mode: 'production', target: 'node', module: { rules: [{ test: /\.js$/, use: ['thread-loader', { loader: 'babel-loader', options: { presets: [['@babel/preset-env', { targets: { ie: '11' }, modules: false }]], babelrc: false, configFile: false } }] }] } };

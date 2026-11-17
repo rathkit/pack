@@ -1,0 +1,1 @@
+module.exports = { mode: 'production', target: 'node', module: { rules: [{ test: /\.css$/, use: ['css-loader', { loader: 'postcss-loader', options: { postcssOptions: { plugins: [['autoprefixer', { overrideBrowserslist: ['chrome 50'] }]] } } }] }] } };

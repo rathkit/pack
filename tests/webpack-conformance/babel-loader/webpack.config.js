@@ -1,0 +1,1 @@
+module.exports = { mode: 'development', target: 'node', module: { rules: [{ test: /\.js$/, exclude: /node_modules/, use: { loader: 'babel-loader', options: { presets: [['@babel/preset-env', { targets: { ie: '11' }, modules: false }]], babelrc: false, configFile: false } } }] } };

@@ -1,0 +1,1 @@
+module.exports = { mode: 'production', target: 'node', resolve: { extensions: ['.ts', '.js'], extensionAlias: { '.js': ['.ts', '.js'] } }, module: { rules: [{ test: /\.ts$/, loader: 'esbuild-loader', options: { loader: 'ts' } }] } };
