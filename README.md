@@ -24,6 +24,7 @@ table: [docs/benchmarks.md](docs/benchmarks.md). One machine, one day: run
 the container recipe in [rathkit/pack-bench](https://github.com/rathkit/pack-bench) for yours.
 
 Which of esbuild's command line options and JavaScript API options `rkp` has, and which are not done: [docs/esbuild-conformance.md](docs/esbuild-conformance.md).
+Coming from another tool: [migration guides](docs/migrate/README.md) for esbuild, Vite, webpack and Rollup, with commands that were run.
 
 ## Install
 
@@ -197,8 +198,7 @@ rkp bundle src/main.ts --outfile dist/app.mjs
 - `--watch` builds again when a file the build read changes (and plugins' `addWatchFile` files): plugins hear it. On Linux it hears of changes through file events (inotify); elsewhere it polls the files every 80 ms.
   through `watchChange`, a changed config starts everything again, and Ctrl-C ends it cleanly. Modules whose files
   did not change are kept between builds (no reading, parsing or scanning again; without plugins).
-- `rkp analyze META.json [--outfile REPORT.html]
-rkp serve ENTRY... [--port N] [--host H]` is a development server with the same options as `bundle`.
+- `rkp serve ENTRY... [--port N] [--host H]` is a development server with the same options as `bundle`.
   The build stays in memory (with source maps) and is served over HTTP, together with your `index.html` (its entry
   `<script src>` is pointed at the built file; the style sheets and the reload client are added), `public/` and
   the project's files. A rebuild tells open pages: style sheet edits are swapped in place, anything else reloads
@@ -374,6 +374,7 @@ rkp serve ENTRY... [--port N] [--host H] [the options above] [--define KEY=VALUE
     [--alias NAME=PATH]... [--tsconfig FILE | --no-tsconfig]
     [--jsx automatic|classic] [--jsx-import-source S] [--jsx-factory F] [--jsx-fragment F]
     [--experimental-decorators] [--decorator-metadata] [--strict-null-checks] [--original-paths] [--platform-browser] [--mode M] [--env-dir D] [--env-prefix P]... [--no-env-files]
+rkp analyze META.json [--outfile REPORT.html]
 ```
 
 `tsconfig.json` is found automatically and supplies `paths`, `baseUrl`, `jsx`,

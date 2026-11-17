@@ -1,0 +1,10 @@
+{
+  "name": "sample",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/main.js --bundle --outfile=dist/main.js --format=esm --minify --sourcemap --platform=browser --define:__APP_VERSION__='\"1.2.3\"' --loader:.txt=text --alias:@=./src",
+    "build:api": "node build.mjs"
+  },
+  "devDependencies": { "esbuild": "^0.28.2" }
+}
