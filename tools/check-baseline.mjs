@@ -118,7 +118,13 @@ function build(rkp, workload, mode, work, runs, memory, pin) {
     const r = spawnSync(cmd[0], cmd.slice(1), { encoding: 'utf8', maxBuffer: 1 << 26 });
     if (r.status !== 0) throw new Error(`${workload} ${mode}: rkp exited with ${r.status}\n${r.stderr}`);
     if (memory) {
-      const kb = parseMaxRss(existsSync(log) ? readFileSync(log, 'utf8') : '');
+      let timeText = '';
+      try {
+        timeText = readFileSync(log, 'utf8');
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+      }
+      const kb = parseMaxRss(timeText);
       if (kb != null) rss.push(kb);
     }
   }
@@ -155,7 +161,13 @@ function main() {
   if (jsonOut) writeFileSync(jsonOut, `${JSON.stringify(measured, null, 2)}\n`);
 
   if (update) {
-    const was = existsSync(BASELINE) ? JSON.parse(readFileSync(BASELINE, 'utf8')) : {};
+    // Read it and take a missing file as empty, instead of looking for the file and then reading it (the file could change in between).
+    let was = {};
+    try {
+      was = JSON.parse(readFileSync(BASELINE, 'utf8'));
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
     const file = {
       note: 'Output bytes, gzip bytes, map bytes and peak memory (KB, the first four CPUs) of rkp on the workloads in test-deps/baseline, from tools/check-baseline.mjs; rewrite with --update when the output changes on purpose.',
       tolerance: { ...DEFAULT_TOLERANCE, ...was.tolerance },
