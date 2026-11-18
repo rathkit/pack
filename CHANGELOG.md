@@ -45,6 +45,12 @@ about stability.
 
 - webpack configs: `resolve.extensions`, `devtool`, `output.publicPath` and `optimization.minimizer` are read and honored, the hooks of `RealContentHashPlugin` and
   chunk group iterables exist for subresource-integrity style plugins, and more `output.*` defaults are present for plugins that read them.
+- webpack `optimization.splitChunks.cacheGroups` now decide the chunk layout (with `--splitting`). `test` (a RegExp, a string or a function, all run in the plugin host
+  in one call), `name`, `chunks` (`initial`, `async`, `all`), `priority`, `minChunks`, `minSize` and `enforce` are followed: a group with a `name` makes one file with that
+  name, one without makes a file for each set of entries and lazy chunks that need its modules. An entry, or a module `import()` loads, never leaves its own file. A group
+  that would make chunks that import each other is given up with a warning that names it. Only the groups a config lists apply (webpack's implicit `defaultVendors` and
+  `default` do not), and a build without cache groups writes the same bytes as before. `maxSize` and the other size-splitting settings, `runtimeChunk`, `moduleIds` and
+  `chunkIds` do not apply to Pack's output (`docs/webpack-conformance.md` says why).
 - Plugin host, Rollup and Vite plugins: `getModuleInfo(id)` is known while transform hooks run, so `@rollup/plugin-commonjs` runs; an `options` hook that replaces
   `input` is honored for the entries and for `buildStart` (`@rollup/plugin-multi-entry`); a chunk's `modules` leaves out modules that were shaken out entirely, as Rollup's
   does (`rollup-plugin-import-css` and `rollup-plugin-styles` decide what to emit from it); config hooks get a config with `build`, `server`, `preview` and
@@ -88,7 +94,8 @@ about stability.
 - A bundle of 96 KB of text or more is minified in pieces, and a constant declared at the top level of a piece is not written at its one read, because
   another piece may read it. A whole-bundle count of reads would allow it; lodash-es is about 1.6 KB larger without it.
 - Of esbuild's options, the ones Pack does not support are listed in `docs/esbuild-conformance.md`; among them are the formats `umd`, `amd` and `system`.
-- `SplitChunksPlugin` settings are accepted but none decides how chunks are laid out, because Pack has no manual-chunks facility. The other gaps of the webpack, Rollup and
+- `SplitChunksPlugin`: `chunks` and `name` as functions, `filename`, `reuseExistingChunk`, the request limits (`maxAsyncRequests`, `maxInitialRequests`) and webpack's implicit
+  default groups are not followed; the Windows path form of a group's `test` is written but only Linux ran it. The other gaps of the webpack, Rollup and
   Vite plugin tables are listed in `docs/webpack-conformance.md` and `docs/rollup-vite-conformance.md`.
 
 ## 0.3.0-beta.0 - 2026-11-16
