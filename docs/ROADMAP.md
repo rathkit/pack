@@ -74,8 +74,8 @@ CSS and libraries: the CSS pipeline, library mode and legacy targets.
 Conformance suites: esbuild, webpack, Rollup and Vite, each with its own examples and most-used plugins passing; migration guides.
 
 - [x] [2.8](https://github.com/rathkit/pack/issues/14) esbuild conformance: every CLI flag and JS API option audited `P0`
-- [ ] [2.9](https://github.com/rathkit/pack/issues/15) webpack conformance: configuration options and the 30 most used loaders and plugins `P0`
-- [ ] [2.10](https://github.com/rathkit/pack/issues/16) Rollup and Vite conformance: the 50 most used plugins of each `P0`
+- [x] [2.9](https://github.com/rathkit/pack/issues/15) webpack conformance: configuration options and the 30 most used loaders and plugins `P0`
+- [x] [2.10](https://github.com/rathkit/pack/issues/16) Rollup and Vite conformance: the 50 most used plugins of each `P0`
 - [ ] [2.6](https://github.com/rathkit/pack/issues/17) SplitChunksPlugin settings and plugins that read compilation internals `P1`
 - [x] [4.1](https://github.com/rathkit/pack/issues/18) Migration guides from Vite, webpack, esbuild and Rollup `P1`
 - [x] [4.6](https://github.com/rathkit/pack/issues/19) rkp migrate: detect the tool in a project and print or write the equivalent `P2`
