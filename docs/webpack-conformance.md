@@ -105,7 +105,8 @@ package not listed may work.
 
 More that have a fixture: `source-map-loader`, `expose-loader`, `imports-loader`, `exports-loader`, `null-loader`, `yaml-loader`,
 `json5-loader`, `circular-dependency-plugin`, `case-sensitive-paths-webpack-plugin`, `assets-webpack-plugin`,
-`node-polyfill-webpack-plugin`, `webpack-subresource-integrity`, `webpack-merge`.
+`webpack-subresource-integrity`, `webpack-merge`. `node-polyfill-webpack-plugin` has a fixture that shows only that the plugin loads and the build runs: its
+polyfills are not applied (gap 7).
 
 ## SplitChunksPlugin settings
 
@@ -134,9 +135,11 @@ tags), `webpack-manifest-plugin`, `assets-webpack-plugin`, `webpack-bundle-analy
 
 ## Gaps
 
-Drafted for issues in `night-drafts/15-gaps.md` (not filed):
+Each of these is a candidate for an issue:
 1. `output.filename` / `chunkFilename` templates with folders or `[contenthash]` are not followed.
 2. `output.library` and `libraryTarget` (UMD, var, assign) are not read.
 3. Rule conditions `issuer`, `issuerLayer`, `dependency`, `mimetype`; `resolve.plugins`, `symlinks`, `roots`; `externalsType`; experiments `css`, `layers`, `asyncWebAssembly`.
 4. `worker-loader` needs webpack's child compilation of a worker entry with the web worker template plugins.
+5. Externals with a global (`{ react: 'React' }`, `var X`) are imported by name instead of being read from the global.
 6. `optimization.splitChunks` `cacheGroups` do not decide the layout (no `vendors` chunk), nor do the size and request limits. Fixture to add: a `vendors` cache group names a file that holds the package.
+7. `node-polyfill-webpack-plugin` loads, but its polyfills are not applied: in a browser build (`--platform-browser`) `import 'path'` is "Cannot find 'path'", because the `resolve.fallback` entries the plugin adds for Node's built-in modules are not read. On a Node build the built-in module is used, which is why the fixture passes.
