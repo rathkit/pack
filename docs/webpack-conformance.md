@@ -134,6 +134,10 @@ What a group does, exactly:
 - `name`, a string: the group makes one chunk, `<name>.js`. Without a `name` (or with a function, which is not followed) the group makes one chunk for each set of
   roots that need the modules, so it never joins modules different roots need: `<key>-<hash>.js`.
 - A root is never moved out of its own chunk: an entry, or a module an `import()` loads, stays in its file even when a group's `test` matches it.
+- Run order: a chunk's modules run when the file loads, and a file runs after the files it imports. The modules a group takes therefore run before the
+  rest of the chunk they came from, not between them as webpack's runtime runs them: a package that reads a global an earlier app module sets
+  (`import './setup.js'; import './vendor/lib.js'` where `lib.js` reads `globalThis.X` at the top level) sees it unset. The same limit applies to
+  the shared chunks Pack makes without groups. A wrapped CommonJS module runs when it is first required, so it is not affected.
 - A group that would make chunks that import each other (a `vendors` chunk whose package calls a module of the app's own chunk, which imports the package) is
   given up, with a warning that names it; its modules stay where they would be without it. The output never has a chunk cycle.
 
@@ -153,8 +157,8 @@ What a group does, exactly:
 | `optimization.runtimeChunk` | n/a: there is no webpack runtime (the module loader and chunk table) to put in a chunk of its own; esm chunks import each other | `cfg-splitchunks-sizes` |
 | `optimization.moduleIds`, `chunkIds` | n/a: there are no module or chunk ids in the output (modules are bindings in a scope, chunks are files named by `name` or by a hash) | `cfg-splitchunks-sizes` |
 
-Not checked on Windows (no runner for it here): the path form `test` sees (forward slashes, from the path the resolver gives) and that a module's path
-matches the one the group was tested with are written to be the same string on every system, but only Linux runs the fixtures; the Windows CI legs are the first run there.
+Windows: each module path (and a string `test`) is made canonical before testing: the real path when the file exists (no 8.3 short names, symlinks resolved),
+forward slashes and an upper-case drive letter. That code is not run on Windows here (only Linux ran the fixtures); the Windows CI legs are its first run.
 
 ## Plugins that read the compilation
 

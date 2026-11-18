@@ -1848,7 +1848,13 @@ function readSplitGroups(config, mode) {
 function matchSplitGroups(paths) {
   const found = [];
   const failed = new Set();
-  const asPath = (v) => String(v).replace(/\\/g, '/');
+  // The canonical form of a path: the real path when the file exists (no short 8.3 names, symlinks resolved), forward slashes, an upper-case drive letter.
+  const asPath = (v) => {
+    let text = String(v);
+    try { text = fs.realpathSync.native(text); } catch {}
+    text = text.replace(/\\/g, '/');
+    return /^[a-z]:\//.test(text) ? text[0].toUpperCase() + text.slice(1) : text;
+  };
   paths.forEach((id, index) => {
     const form = asPath(id);
     const module = new NormalModule(form, { esm: true, code: moduleInfo.get(id)?.code ?? null });

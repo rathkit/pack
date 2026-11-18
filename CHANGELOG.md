@@ -95,7 +95,7 @@ about stability.
   another piece may read it. A whole-bundle count of reads would allow it; lodash-es is about 1.6 KB larger without it.
 - Of esbuild's options, the ones Pack does not support are listed in `docs/esbuild-conformance.md`; among them are the formats `umd`, `amd` and `system`.
 - `SplitChunksPlugin`: `chunks` and `name` as functions, `filename`, `reuseExistingChunk`, the request limits (`maxAsyncRequests`, `maxInitialRequests`) and webpack's implicit
-  default groups are not followed; the Windows path form of a group's `test` is written but only Linux ran it. The other gaps of the webpack, Rollup and
+  default groups are not followed; the modules a group takes run before the rest of the chunk they came from (webpack keeps the original order); the Windows path form of a group's `test` is written but only Linux ran it. The other gaps of the webpack, Rollup and
   Vite plugin tables are listed in `docs/webpack-conformance.md` and `docs/rollup-vite-conformance.md`.
 
 ## 0.3.0-beta.0 - 2026-11-16
