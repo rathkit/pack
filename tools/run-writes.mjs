@@ -4,7 +4,7 @@
 //   node tools/run-writes.mjs
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, lstatSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import https from 'node:https';
 import http from 'node:http';
 import { tmpdir } from 'node:os';
@@ -48,14 +48,14 @@ const project = (sb) => {
 };
 const snapshot = (sb) => {
   const out = new Map();
+  // The entries of a folder say what they are (a link is skipped), so no file is looked at and then read.
   const walk = (dir) => {
-    for (const name of readdirSync(dir)) {
-      const full = join(dir, name);
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
       const rel = relative(sb, full);
       if (rel === 'proj/node_modules') continue;
-      const st = lstatSync(full);
-      if (st.isDirectory()) walk(full);
-      else if (st.isFile()) out.set(rel, createHash('sha1').update(readFileSync(full)).digest('hex'));
+      if (entry.isDirectory()) walk(full);
+      else if (entry.isFile()) out.set(rel, createHash('sha1').update(readFileSync(full)).digest('hex'));
     }
   };
   walk(sb);
@@ -91,10 +91,13 @@ const cases = [
 ];
 
 const matches = (pattern, name) => new RegExp('^' + pattern.split('*').map((s) => s.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('[^/]*') + '$').test(name);
-const request = (url) =>
+// `ca`: for https, the certificate the server made for itself (it is the only one the request trusts: validation stays on).
+const request = (url, ca) =>
   new Promise((resolve) => {
-    const lib = url.startsWith('https') ? https : http;
-    const req = lib.get(url, { rejectUnauthorized: false, timeout: 2000 }, (res) => {
+    const secure = url.startsWith('https');
+    if (secure && !ca) return resolve(0);
+    const lib = secure ? https : http;
+    const req = lib.get(url, { ...(secure ? { ca } : {}), timeout: 2000 }, (res) => {
       res.resume();
       resolve(res.statusCode);
     });
@@ -117,7 +120,13 @@ for (const c of cases) {
     let status = 0;
     for (let i = 0; i < 40 && status !== 200; i++) {
       await new Promise((r) => setTimeout(r, 250));
-      status = await request(`${c.args.includes('--https') ? 'https' : 'http'}://localhost:${c.serve}/`);
+      let cert;
+      try {
+        cert = readFileSync(join(sb, 'home/.cache/rathkit/dev-cert.pem'));
+      } catch {
+        // the server has not made it yet
+      }
+      status = await request(`${c.args.includes('--https') ? 'https' : 'http'}://localhost:${c.serve}/`, cert);
     }
     await new Promise((r) => setTimeout(r, 300));
     child.kill('SIGINT');
