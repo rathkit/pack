@@ -52,7 +52,7 @@ name, as far as I know it; the order is rough. A plugin not listed may work.
 | 32 | `rollup-plugin-delete` | works | a folder's files are removed at `buildStart` | `rollup-delete` |
 | 33 | `rollup-plugin-dts` | works | a `.d.ts` entry | `rollup-dts` |
 | 34 | `rollup-plugin-peer-deps-external` | works | a peer dependency stays an import | `rollup-peer-deps-external` |
-| 35 | `rollup-plugin-node-polyfills` | works | `path` | `rollup-node-polyfills` |
+| 35 | `rollup-plugin-node-polyfills` | partly | loads and runs. On a Node build `path` is the built-in module; on a browser build (`--platform-browser`) it is the plugin's, checked by hand | `rollup-node-polyfills` |
 | 36 | `rollup-plugin-license` | works | `banner` | `rollup-license` |
 | 37 | `rollup-plugin-sourcemaps` | works | a `//# sourceMappingURL` next to a dependency | `rollup-sourcemaps` |
 | 38 | `rollup-plugin-svelte` | works | a `.svelte` component | `rollup-svelte` |
@@ -63,7 +63,7 @@ name, as far as I know it; the order is rough. A plugin not listed may work.
 | 43 | `rollup-plugin-node-externals` | works | dependencies stay imports | `rollup-node-externals` |
 | 44 | `rollup-plugin-preserve-shebang` | works |  | `rollup-preserve-shebang` |
 | 45 | `rollup-plugin-cleanup` | works | comments are removed | `rollup-cleanup` |
-| 46 | `rollup-plugin-polyfill-node` | works | `path` | `rollup-polyfill-node` |
+| 46 | `rollup-plugin-polyfill-node` | partly | loads and runs. On a Node build `path` is the built-in module; on a browser build (`--platform-browser`) it is the plugin's, checked by hand | `rollup-polyfill-node` |
 | 47 | `rollup-plugin-web-worker-loader` | works | `web-worker:` imports | `rollup-web-worker-loader` |
 | 48 | `rollup-plugin-glsl` | works |  | `rollup-glsl` |
 | 49 | `rollup-plugin-analyzer` | works |  | `rollup-analyzer` |
@@ -94,7 +94,7 @@ Vite's own plugins (the CSS, asset, JSON and `import.meta.glob` ones) are built 
 | 14 | `vite-plugin-compression2` | works | `.gz` written (the plugin adds a plugin to the resolved config) | `vite-compression2` |
 | 15 | `vite-plugin-static-copy` | works |  | `vite-static-copy` |
 | 16 | `vite-plugin-html` | works | `inject.data` in an HTML entry | `vite-html` |
-| 17 | `vite-plugin-node-polyfills` | works | `path` | `vite-node-polyfills` |
+| 17 | `vite-plugin-node-polyfills` | partly | loads and runs on a Node build; a browser build (`--platform-browser`) stops with `No matching export in 'path'` | `vite-node-polyfills` |
 | 18 | `vite-plugin-wasm` | works | the `.wasm` file is emitted; the run is not checked (the plugin fetches it, a browser feature) | `vite-wasm` |
 | 19 | `vite-plugin-mkcert` | works | serve only | `vite-mkcert` |
 | 20 | `vite-plugin-solid` | works | JSX for Solid | `vite-solid` |
@@ -118,7 +118,7 @@ Vite's own plugins (the CSS, asset, JSON and `import.meta.glob` ones) are built 
 | 38 | `vite-plugin-vue-devtools` | works | serve only | `vite-vue-devtools` |
 | 39 | `vite-plugin-sitemap` | works | `sitemap.xml` is written | `vite-sitemap` |
 | 40 | `vite-plugin-qrcode` | works | serve only | `vite-qrcode` |
-| 41 | `vite-plugin-node-stdlib-browser` | works | `path` | `vite-node-stdlib-browser` |
+| 41 | `vite-plugin-node-stdlib-browser` | partly | loads and runs. On a Node build `path` is the built-in module; on a browser build (`--platform-browser`) it is the plugin's, checked by hand | `vite-node-stdlib-browser` |
 | 42 | `vite-plugin-pages` | works | `~pages` | `vite-pages` |
 | 43 | `vite-plugin-require` | works | `require()` in a module | `vite-require` |
 | 44 | `@originjs/vite-plugin-federation` | partly | loads and builds with no remotes; see the federation suite for module federation | `vite-federation-originjs` |
@@ -148,3 +148,4 @@ Each of these is a candidate for an issue:
 3. `vite-plugin-babel` imports `@babel/core` as a default export, which Babel 8 does not have; it fails to load in Node too, so there is no fixture (`@rollup/plugin-babel` is covered).
 4. `vite-plugin-top-level-await` fails with "missing field `type`" under Vite 8 itself with the pinned `@swc/core`; top-level await needs no plugin here (it is native, for the esm format).
 5. `@vitejs/plugin-legacy` is skipped (one bundle, no `nomodule` pass).
+6. `vite-plugin-node-polyfills` on a browser build (`--platform-browser`): `import path from 'path'` stops with "No matching export in 'path'", where the other three Node polyfill plugins supply the module.
