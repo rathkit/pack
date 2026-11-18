@@ -5,3 +5,15 @@ overrides:
   undici: ">=7.30.1 <8"
 # axios (through @module-federation) pulls in follow-redirects at 1.16.1, which forwards a custom credential header on a cross-origin redirect (GHSA); 1.16.2 is the first fixed release.
   follow-redirects: ">=1.16.2 <2"
+  # Advisories (GitHub Dependabot, 2026-11-18) of copies that fixture plugins pull in. Each override lifts only the vulnerable range, so the pinned
+  # workload packages (react, lodash-es, three, rxjs, typescript 5, acorn) and the direct pins are not touched.
+  "glob@>=9 <14.0.2": ">=14.0.2"
+  "minimatch@>=7 <11.0.1": ">=11.0.1"
+  "braces@<3.0.3": ">=3.0.3"
+  "micromatch@<4.0.8": ">=4.0.8"
+  "decode-uri-component@<0.5.1": ">=0.5.1"
+  "serialize-javascript@<7.1.3": ">=7.1.3"
+  "tar@<7.5.21": ">=7.5.21"
+  "pacote@<21.5.1": ">=21.5.1"
+  "sigstore@<4.1.1": ">=4.1.1"
+  "postcss@<8.5.23": ">=8.5.23 <9"
