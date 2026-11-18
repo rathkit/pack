@@ -3,11 +3,12 @@
 // A fixture has: main.js (the entry), webpack.config.js, expected.txt (what `node dist/main.js` prints), and optionally
 //   no-entry    (an empty file) the entry comes from the config's `entry`, none is given on the command line
 //   flags.json  extra command line flags (an array), `run.json` false to skip the run (output checked only),
-//   check.mjs   default export (outdir, fixtureDir) => null | problem text, to check files the build wrote.
+//   check.mjs   default export (outdir, fixtureDir) => null | problem text, to check files the build wrote (the build's own stderr is
+//               in <fixtureDir>/build-stderr.txt).
 // Loaders and plugins are the real packages from test-deps/ (RATHKIT_TEST_DEPS names another folder with a node_modules).
 //   node tools/run-webpack-conformance.mjs [name...]
 import { spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -35,6 +36,7 @@ for (const name of names) {
   const out = join(dir, 'dist');
   const flags = json(join(src, 'flags.json'), []);
   const b = spawnSync(bin, ['bundle', ...(existsSync(join(src, 'no-entry')) ? [] : ['main.js']), '--outdir', out, '--config', 'webpack.config.js', ...flags], { cwd: dir, encoding: 'utf8' });
+  writeFileSync(join(dir, 'build-stderr.txt'), b.stderr);
   let problem = null;
   if (b.status !== 0) problem = `bundler failed: ${b.stderr.trim()}`;
   else {

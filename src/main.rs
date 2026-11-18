@@ -2036,6 +2036,26 @@ fn run_build(job: &Job) -> Outcome {
             eprintln!("error: {message}");
         }
         let _ = host.build_end(failure.as_deref());
+        // webpack's `optimization.splitChunks.cacheGroups` the config lists: every group's `test` runs here, once for all the modules,
+        // and the bundler is told which groups each module matches. Without such groups nothing happens.
+        if !host.info.split_groups.is_empty() && bundle_options.splitting {
+            let modules: Vec<&rathkit_pack::graph::Module> = graph.modules.iter().filter(|m| m.css.is_none() && m.asset.is_none()).collect();
+            let paths: Vec<String> = modules.iter().map(|m| m.path.to_string_lossy().into_owned()).collect();
+            match host.split_matches(&paths) {
+                Ok(found) => {
+                    let mut groups = rathkit_pack::bundle::ModuleGroups { groups: host.info.split_groups.clone(), matches: Default::default() };
+                    for (module, hits) in modules.iter().zip(found) {
+                        if !hits.is_empty() {
+                            groups.matches.insert(module.path.clone(), hits);
+                        }
+                    }
+                    bundle_options.module_groups = groups;
+                }
+                Err(message) => eprintln!("warning: optimization.splitChunks.cacheGroups: {message}; the chunks are made without them"),
+            }
+        } else if !host.info.split_groups.is_empty() {
+            eprintln!("warning: optimization.splitChunks.cacheGroups only shape the chunks with --splitting (the esm format); this build makes one file");
+        }
     }
     if entries.len() > job.entries.len() {
         // Every chunk a plugin asked for is a file of its own.

@@ -1,0 +1,2 @@
+VENDOR-LIB hello main
+VENDOR-LIB hello lazy

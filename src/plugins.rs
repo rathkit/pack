@@ -44,6 +44,8 @@ pub struct HostInfo {
     pub extensions: Vec<String>,
     pub sourcemap: Option<String>,
     pub public_path: Option<String>,
+    /// The cache groups of webpack's `optimization.splitChunks` the config lists (see `split_matches`).
+    pub split_groups: Vec<crate::bundle::ChunkGroup>,
     /// The host was started for style sheets alone (no config): only they are sent to it, not every script.
     pub style_only: bool,
 }
@@ -340,6 +342,25 @@ impl PluginHost {
         host.info.extensions = strings("extensions");
         host.info.sourcemap = result.get("sourcemap").and_then(Json::as_str).map(str::to_string);
         host.info.public_path = result.get("publicPath").and_then(Json::as_str).map(str::to_string);
+        if let Some(list) = result.get("splitGroups").and_then(Json::as_array) {
+            for item in list {
+                let text = |k: &str| item.get(k).and_then(Json::as_str).map(str::to_string);
+                let number = |k: &str| item.get(k).and_then(Json::as_f64).unwrap_or(0.0);
+                host.info.split_groups.push(crate::bundle::ChunkGroup {
+                    key: text("key").unwrap_or_default(),
+                    name: text("name"),
+                    chunks: match text("chunks").as_deref() {
+                        Some("initial") => crate::bundle::GroupChunks::Initial,
+                        Some("all") => crate::bundle::GroupChunks::All,
+                        _ => crate::bundle::GroupChunks::Async,
+                    },
+                    priority: number("priority") as i64,
+                    min_chunks: number("minChunks").max(1.0) as usize,
+                    min_size: number("minSize").max(0.0) as usize,
+                    enforce: item.get("enforce").and_then(Json::as_bool).unwrap_or(false),
+                });
+            }
+        }
         host.info.style_only = result.get("styleOnly").and_then(Json::as_bool).unwrap_or(false);
         host.info.federation = result.get("federation").filter(|f| !matches!(f, Json::Null)).cloned();
         if let Some(Json::Object(hooks)) = result.get("hooks") {
@@ -583,6 +604,23 @@ impl PluginHost {
             }
         }
         Ok(chunks)
+    }
+
+    /// Runs the `test` of every cache group on the modules in one call, and returns for each path the groups (indexes into
+    /// `info.split_groups`) it matches.
+    pub fn split_matches(&self, paths: &[String]) -> Result<Vec<Vec<usize>>, String> {
+        let result = self.call("splitGroups", &format!("{{\"paths\":{}}}", string_list(paths)))?;
+        let mut matches = vec![Vec::new(); paths.len()];
+        for pair in result.get("matches").and_then(Json::as_array).unwrap_or(&[]) {
+            if let Some([index, groups]) = pair.as_array() {
+                if let (Some(i), Some(list)) = (index.as_f64(), groups.as_array()) {
+                    if let Some(slot) = matches.get_mut(i as usize) {
+                        *slot = list.iter().filter_map(|g| g.as_f64().map(|g| g as usize)).collect();
+                    }
+                }
+            }
+        }
+        Ok(matches)
     }
 
     /// Tells the host the shape of the finished graph: `moduleParsed` runs for each module, and
