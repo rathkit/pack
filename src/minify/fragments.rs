@@ -51,6 +51,11 @@ pub struct Layout {
 /// Bundles smaller than this are not worth cutting.
 const MIN_BYTES: usize = 96 * 1024;
 
+/// How many pieces a bundle is cut into, on every machine. The cuts decide what is written (a declaration is never joined to one on the other
+/// side of a cut, and the names are chosen by group), so they must not depend on the number of cores: the same bundle gives the same text on a
+/// machine of one core and on one of sixty-four. 32 is what a machine of eight threads cut into (`threads * 4`), the machine of the published runs.
+const PIECES: usize = 32;
+
 /// As `minify`, for a bundle whose layout is known, saying where every token went when asked.
 pub fn minify_chunk(source: &str, layout: &Layout, options: &Options, anchors: Option<&mut Vec<Anchor>>) -> Result<String, String> {
     // `RATHKIT_FRAGMENTS`: `off` minifies in one pass; `whole` does too but treats the layout's
@@ -86,7 +91,6 @@ fn workers() -> usize {
 /// into parts of about the same size.
 fn pieces(len: usize, layout: &Layout) -> Vec<std::ops::Range<usize>> {
     let (head, tail) = (layout.head, layout.tail.min(len));
-    let threads = workers();
     // The runs of text between the fixed ranges.
     let mut regions: Vec<std::ops::Range<usize>> = Vec::new();
     let mut from = head;
@@ -103,10 +107,10 @@ fn pieces(len: usize, layout: &Layout) -> Vec<std::ops::Range<usize>> {
     // `RATHKIT_FRAGMENT_BYTES` sets both the least size worth cutting and the size of a piece
     // (the tests use a small one to cut small programs into many pieces).
     let forced = std::env::var("RATHKIT_FRAGMENT_BYTES").ok().and_then(|v| v.parse::<usize>().ok());
-    if forced.is_none() && (size < MIN_BYTES || threads < 2) {
+    if forced.is_none() && size < MIN_BYTES {
         return Vec::new();
     }
-    let target = forced.unwrap_or_else(|| (size / (threads * 4)).clamp(24 * 1024, 2 * 1024 * 1024));
+    let target = forced.unwrap_or_else(|| (size / PIECES).clamp(24 * 1024, 2 * 1024 * 1024));
     let mut out = Vec::new();
     for region in regions {
         let first = out.len();
@@ -951,10 +955,19 @@ export { counter as total, bump };
     fn a_bundle_of_a_hundred_kilobytes_is_cut_and_a_small_one_is_not() {
         // Lines of 1 KB, each a statement.
         let layout = |len: usize| Layout { head: 0, tail: len, cuts: (1..=len / 1024).map(|i| i * 1024).collect(), reserved: Vec::new(), ..Layout::default() };
-        if workers() > 1 {
-            assert!(pieces(120 * 1024, &layout(120 * 1024)).len() > 1);
-            assert!(pieces(60 * 1024, &layout(60 * 1024)).is_empty());
-        }
+        assert!(pieces(120 * 1024, &layout(120 * 1024)).len() > 1);
+        assert!(pieces(60 * 1024, &layout(60 * 1024)).is_empty());
+    }
+
+    #[test]
+    fn the_number_of_pieces_does_not_depend_on_the_number_of_cores() {
+        // 3.2 MB of statements of 1 KB: `size / PIECES` is 100 KB, so about 32 pieces. Cutting by `threads * 4` gave 8 on two cores, 16 on four
+        // (a hosted runner) and 64 on sixteen, and each count wrote a different text.
+        let len = 3_200 * 1024;
+        let layout = Layout { head: 0, tail: len, cuts: (1..=len / 1024).map(|i| i * 1024).collect(), reserved: Vec::new(), ..Layout::default() };
+        let n = pieces(len, &layout).len();
+        assert!((28..=36).contains(&n), "{n} pieces");
+        assert_eq!(pieces(len, &layout), pieces(len, &layout));
     }
 
     #[test]
