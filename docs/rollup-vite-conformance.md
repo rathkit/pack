@@ -142,7 +142,7 @@ Vite's own plugins (the CSS, asset, JSON and `import.meta.glob` ones) are built 
 
 ## Not supported, and not in the lists
 
-Drafted for issues in `night-drafts/16-gaps.md` (not filed):
+Each of these is a candidate for an issue:
 1. `vite-plugin-singlefile`: an HTML entry's page is not in the `bundle` that `generateBundle` receives, so the plugin cannot inline the script into it.
 2. `vite-plugin-md` (Markdown as a Vue component): `plugin-vue`'s `?vue&type=script&setup=true&lang.ts` request for an `.md` file is read as the file's own type, and the output is a string.
 3. `vite-plugin-babel` imports `@babel/core` as a default export, which Babel 8 does not have; it fails to load in Node too, so there is no fixture (`@rollup/plugin-babel` is covered).

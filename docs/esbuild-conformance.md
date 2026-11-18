@@ -149,7 +149,7 @@ option. Their effects are checked with small plugins in `tests/plugins/esbuild-p
 
 ## Larger gaps
 
-Each is drafted as an issue in `night-drafts/14-gaps.md` (title, body, labels). They are numbered as the rows above name them.
+Each is a candidate for an issue. They are numbered as the rows above name them.
 
 1. `--loader` with `js`, `jsx`, `ts`, `tsx`, `json`, `copy`, `global-css`, `default`.
 2. Output naming: one file per entry without `--splitting`, a single entry's file named after it, `--outbase`, `entryPoints` objects.
