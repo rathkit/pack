@@ -73,13 +73,13 @@ CSS and libraries: the CSS pipeline, library mode and legacy targets.
 
 Conformance suites: esbuild, webpack, Rollup and Vite, each with its own examples and most-used plugins passing; migration guides.
 
-- [ ] [2.8](https://github.com/rathkit/pack/issues/14) esbuild conformance: every CLI flag and JS API option audited `P0`
+- [x] [2.8](https://github.com/rathkit/pack/issues/14) esbuild conformance: every CLI flag and JS API option audited `P0`
 - [ ] [2.9](https://github.com/rathkit/pack/issues/15) webpack conformance: configuration options and the 30 most used loaders and plugins `P0`
 - [ ] [2.10](https://github.com/rathkit/pack/issues/16) Rollup and Vite conformance: the 50 most used plugins of each `P0`
 - [ ] [2.6](https://github.com/rathkit/pack/issues/17) SplitChunksPlugin settings and plugins that read compilation internals `P1`
-- [ ] [4.1](https://github.com/rathkit/pack/issues/18) Migration guides from Vite, webpack, esbuild and Rollup `P1`
-- [ ] [4.6](https://github.com/rathkit/pack/issues/19) rkp migrate: detect the tool in a project and print or write the equivalent `P2`
-- [ ] [4.2](https://github.com/rathkit/pack/issues/20) Bundle analyzer built on --metafile `P2`
+- [x] [4.1](https://github.com/rathkit/pack/issues/18) Migration guides from Vite, webpack, esbuild and Rollup `P1`
+- [x] [4.6](https://github.com/rathkit/pack/issues/19) rkp migrate: detect the tool in a project and print or write the equivalent `P2`
+- [x] [4.2](https://github.com/rathkit/pack/issues/20) Bundle analyzer built on --metafile `P2`
 
 ### 0.5.0-beta.0
 
