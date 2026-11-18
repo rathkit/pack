@@ -31,6 +31,19 @@ fn tune_allocator() {}
 /// they are touched, so a big one costs address space and nothing else.
 const STACK_BYTES: usize = 1 << 30;
 
+/// The working directory. On Windows it is written out in full: the system may hand out the 8.3 short form of a folder (`RUNNER~1` for
+/// `runneradmin`, in the temporary folder), while the paths of the modules are canonical, and a plugin that matches a pattern against them
+/// (`createFilter` resolves its patterns from the working directory) would not match.
+fn working_dir() -> std::path::PathBuf {
+    let cwd = std::env::current_dir().expect("working directory");
+    if cfg!(windows) {
+        if let Ok(full) = std::fs::canonicalize(&cwd) {
+            return rathkit_pack::resolve::without_verbatim_prefix(&full);
+        }
+    }
+    cwd
+}
+
 fn main() -> ExitCode {
     match std::thread::Builder::new().name("rkp".to_string()).stack_size(STACK_BYTES).spawn(real_main) {
         Ok(handle) => handle.join().unwrap_or(ExitCode::FAILURE),
@@ -1062,7 +1075,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
             _ => entries.push(arg.clone()),
         }
     }
-    let cwd = std::env::current_dir().expect("working directory");
+    let cwd = working_dir();
     // No --target: the project's browserslist (a variable, a file, or package.json) says which engines the output must run in.
     if !target_given {
         let env = std::env::var("BROWSERSLIST_ENV").or_else(|_| std::env::var("NODE_ENV")).unwrap_or_else(|_| "production".to_string());
@@ -1210,6 +1223,25 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
         for (position, field) in host.info.main_fields.iter().enumerate() {
             if !options.resolve.main_fields.contains(field) {
                 options.resolve.main_fields.insert(position.min(options.resolve.main_fields.len()), field.clone());
+            }
+        }
+        // webpack's `resolve.extensions`, unless the command line gave its own; `...` is the default list.
+        if !host.info.extensions.is_empty() && options.resolve.extensions == rathkit_pack::resolve::ResolveOptions::default().extensions {
+            let defaults = options.resolve.extensions.clone();
+            options.resolve.extensions = host.info.extensions.iter().flat_map(|e| if e == "..." { defaults.clone() } else { vec![e.clone()] }).collect();
+        }
+        // webpack's `devtool` and `output.publicPath`, unless the command line gave them.
+        if bundle_options.sourcemap == rathkit_pack::bundle::SourceMapMode::None {
+            match host.info.sourcemap.as_deref() {
+                Some("linked") => bundle_options.sourcemap = rathkit_pack::bundle::SourceMapMode::Linked,
+                Some("inline") => bundle_options.sourcemap = rathkit_pack::bundle::SourceMapMode::Inline,
+                Some("external") => bundle_options.sourcemap = rathkit_pack::bundle::SourceMapMode::External,
+                _ => {}
+            }
+        }
+        if !public_path_given {
+            if let Some(path) = &host.info.public_path {
+                options.public_path = path.clone();
             }
         }
         if entries.is_empty() {

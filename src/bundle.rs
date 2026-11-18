@@ -328,6 +328,8 @@ pub struct ChunkInfo {
     pub facade_module: Option<String>,
     /// The modules in the chunk: path and size of the original text.
     pub modules: Vec<(String, usize)>,
+    /// Those of `modules` that were shaken out entirely (Rollup's `chunk.modules` leaves them out).
+    pub shaken_out: Vec<String>,
     /// Chunks and external modules the chunk imports when it loads.
     pub imports: Vec<String>,
     /// Chunks and external modules it may import later.
@@ -1063,6 +1065,7 @@ impl<'a> Bundler<'a> {
             let mut info = ChunkInfo { file: chunk.file.clone(), name: chunk.file.rsplit_once('.').map_or(chunk.file.clone(), |(s, _)| s.to_string()), is_entry, is_dynamic_entry: !is_entry && first_root.is_some(), ..ChunkInfo::default() };
             info.facade_module = first_root.map(|r| graph.module(r).path.to_string_lossy().into_owned());
             info.modules = chunk.modules.iter().map(|&m| (graph.module(m).path.to_string_lossy().into_owned(), graph.module(m).source.len())).collect();
+            info.shaken_out = chunk.modules.iter().filter(|&&m| { let shake = &self.shaken.modules[m.index()]; !shake.live.is_empty() && !shake.live.iter().any(|&l| l) }).map(|&m| graph.module(m).path.to_string_lossy().into_owned()).collect();
             for &dep in &links.deps[c] {
                 info.imports.push(self.plan.chunks[dep].file.clone());
             }

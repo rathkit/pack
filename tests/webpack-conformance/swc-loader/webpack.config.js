@@ -1,0 +1,1 @@
+module.exports = { mode: 'production', target: 'node', resolve: { extensions: ['.ts', '.js'] }, module: { rules: [{ test: /\.ts$/, use: { loader: 'swc-loader', options: { jsc: { parser: { syntax: 'typescript' }, target: 'es2019' } } } }] } };

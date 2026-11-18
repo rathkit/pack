@@ -43,6 +43,14 @@ about stability.
 - `--external` takes one `*` anywhere in the name (`@scope/*`, `*.png`), and a package name also covers its subpaths (`react/jsx-runtime`). A build that would
   write over one of its own inputs stops, as esbuild's does; `--allow-overwrite` lets it.
 
+- webpack configs: `resolve.extensions`, `devtool`, `output.publicPath` and `optimization.minimizer` are read and honored, the hooks of `RealContentHashPlugin` and
+  chunk group iterables exist for subresource-integrity style plugins, and more `output.*` defaults are present for plugins that read them.
+- Plugin host, Rollup and Vite plugins: `getModuleInfo(id)` is known while transform hooks run, so `@rollup/plugin-commonjs` runs; an `options` hook that replaces
+  `input` is honored for the entries and for `buildStart` (`@rollup/plugin-multi-entry`); a chunk's `modules` leaves out modules that were shaken out entirely, as Rollup's
+  does (`rollup-plugin-import-css` and `rollup-plugin-styles` decide what to emit from it); config hooks get a config with `build`, `server`, `preview` and
+  `optimizeDeps`, and `build.rollupOptions.external` from a config hook is honored; the resolved config has `preview`, `createResolver` and the plugin list; a hook filter
+  given as a glob matches as a glob; and a loaded module whose code opens with an assignment is not read as the file's own type (`vite-plugin-wasm`).
+
 ### Added
 
 - An optional cache for the minifier, off unless `RATHKIT_CACHE=on` (or `1`, `true`, `yes`): a one-shot minified build keeps what the minifier made of each chunk of 16 KB
@@ -62,6 +70,11 @@ about stability.
   `entryPoints`, `absWorkingDir`, `bundle: true`, `charset: 'utf8'`, `logLevel`, `color`, `logLimit` and `allowOverwrite`. `docs/esbuild-conformance.md` lists every esbuild
   option with its status and a probe that CI runs (`tools/run-esbuild-conformance.mjs`, 114 probes).
 
+- Conformance tables with a fixture for each supported row, built with the real packages: `docs/webpack-conformance.md` (configuration options, the plugins that ship with
+  webpack, the 30 most used loaders and plugins, the `SplitChunksPlugin` settings and the plugins that read the compilation; 75 fixtures) and
+  `docs/rollup-vite-conformance.md` (53 Rollup and 50 Vite plugins; 103 fixtures). They run in CI (`tools/run-webpack-conformance.mjs`,
+  `tools/run-rollup-vite-conformance.mjs`).
+
 ### Known gaps
 
 - Source maps still add 20 to 25% to a minified build on the TypeScript compiler, three.js, React, rxjs, Zod and the 500-module TypeScript app (#25).
@@ -72,6 +85,8 @@ about stability.
 - The minified text of a bundle can differ by a few bytes between machines with different numbers of cores, because the pieces the minifier works on
   are split by the number of threads. The output is the same for the same number of cores.
 - Of esbuild's options, the ones Pack does not support are listed in `docs/esbuild-conformance.md`; among them are the formats `umd`, `amd` and `system`.
+- `SplitChunksPlugin` settings are accepted but none decides how chunks are laid out, because Pack has no manual-chunks facility. The other gaps of the webpack, Rollup and
+  Vite plugin tables are listed in `docs/webpack-conformance.md` and `docs/rollup-vite-conformance.md`.
 
 ## 0.3.0-beta.0 - 2026-11-16
 

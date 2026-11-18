@@ -36,7 +36,7 @@
     "rxjs/min-map": {
       "bytes": 24641,
       "gzip": 7435,
-      "map": 228232,
+      "map": 228709,
       "rssKb": 11524
     },
     "lodash/plain": {
@@ -52,7 +52,7 @@
     "lodash/min-map": {
       "bytes": 76519,
       "gzip": 26741,
-      "map": 778704,
+      "map": 775694,
       "rssKb": 23032
     },
     "three/plain": {

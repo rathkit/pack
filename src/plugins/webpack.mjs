@@ -571,7 +571,9 @@ class WebpackError extends Error {
 
 // ---- modules and chunks as plugins see them ---------------------------------------------------
 
-const relativeId = (id) => (path.isAbsolute(id) ? path.relative(root, id).split(path.sep).join('/') || id : id.replace(/^\0/, ''));
+// On Windows a file on another drive has no relative path: path.relative gives it back absolute.
+const otherDrive = (id) => path.isAbsolute(id) && path.isAbsolute(path.relative(root, id));
+const relativeId = (id) => (path.isAbsolute(id) ? (otherDrive(id) ? id.split(path.sep).join('/') : path.relative(root, id).split(path.sep).join('/') || id) : id.replace(/^\0/, ''));
 
 class NormalModule {
   constructor(id, info = {}) {
@@ -610,7 +612,7 @@ class NormalModule {
     return typeof requestShortener?.shorten === 'function' ? requestShortener.shorten(this.resource) : relativeId(this.resource);
   }
   libIdent() {
-    return './' + relativeId(this.resource);
+    return otherDrive(this.resource) ? relativeId(this.resource) : './' + relativeId(this.resource);
   }
   nameForCondition() {
     return this.resource.split('?')[0];
@@ -743,6 +745,12 @@ class ChunkGroup {
   }
   getChildren() {
     return [];
+  }
+  get childrenIterable() {
+    return new Set();
+  }
+  get parentsIterable() {
+    return new Set();
   }
   isInitial() {
     return true;
@@ -1615,6 +1623,16 @@ class ModuleFederationPlugin {
   apply() {}
 }
 
+/** Only its hooks: plugins that rewrite content hashes (subresource integrity) tap `updateHash`; no content hash is computed from them here. */
+const realContentHashHooks = new WeakMap();
+class RealContentHashPlugin {
+  static getCompilationHooks(compilation) {
+    if (!realContentHashHooks.has(compilation)) realContentHashHooks.set(compilation, { updateHash: new SyncBailHook(['content', 'oldHash']) });
+    return realContentHashHooks.get(compilation);
+  }
+  apply() {}
+}
+
 const webpackNamespace = {
   version: '5.99.0',
   WebpackError,
@@ -1640,7 +1658,7 @@ const webpackNamespace = {
   NormalModuleReplacementPlugin,
   EntryPlugin,
   ...noopPlugins,
-  optimize: { LimitChunkCountPlugin: noopPlugins.LimitChunkCountPlugin, MinChunkSizePlugin: noopPlugins.MinChunkSizePlugin, ModuleConcatenationPlugin: noopPlugins.ModuleConcatenationPlugin, SplitChunksPlugin: noopPlugins.SplitChunksPlugin, RuntimeChunkPlugin: noopPlugins.RuntimeChunkPlugin, AggressiveMergingPlugin: noopPlugins.AggressiveMergingPlugin, AggressiveSplittingPlugin: noopPlugins.AggressiveSplittingPlugin },
+  optimize: { LimitChunkCountPlugin: noopPlugins.LimitChunkCountPlugin, MinChunkSizePlugin: noopPlugins.MinChunkSizePlugin, ModuleConcatenationPlugin: noopPlugins.ModuleConcatenationPlugin, SplitChunksPlugin: noopPlugins.SplitChunksPlugin, RuntimeChunkPlugin: noopPlugins.RuntimeChunkPlugin, AggressiveMergingPlugin: noopPlugins.AggressiveMergingPlugin, AggressiveSplittingPlugin: noopPlugins.AggressiveSplittingPlugin, RealContentHashPlugin },
   node: { NodeTargetPlugin: class { apply() {} }, NodeTemplatePlugin: class { apply() {} }, NodeEnvironmentPlugin: class { apply() {} } },
   web: { FetchCompileWasmPlugin: class { apply() {} }, JsonpTemplatePlugin: class { apply() {} } },
   library: { EnableLibraryPlugin: class { apply() {} }, AbstractLibraryPlugin: class {} },
@@ -1687,7 +1705,7 @@ const wpOptions = () => {
     devtool: c.devtool ?? (cli.sourcemap ? 'source-map' : false),
     target: c.target ?? 'web',
     externals: c.externals ?? [],
-    output: { path: path.resolve(root, outDir), publicPath: 'auto', filename: '[name].js', chunkFilename: '[name].js', assetModuleFilename: '[hash][ext][query]', hashFunction: 'sha256', hashDigest: 'hex', hashDigestLength: 20, hashSalt: undefined, uniqueName: '', clean: false, environment: {}, module: false, globalObject: 'self', charset: true, crossOriginLoading: false, compareBeforeEmit: true, iife: true, pathinfo: false, library: undefined, ...(c.output ?? {}) },
+    output: { path: path.resolve(root, outDir), publicPath: 'auto', filename: '[name].js', chunkFilename: '[name].js', assetModuleFilename: '[hash][ext][query]', sourceMapFilename: '[file].map[query]', hotUpdateChunkFilename: '[id].[fullhash].hot-update.js', hotUpdateMainFilename: '[runtime].[fullhash].hot-update.json', hotUpdateGlobal: 'webpackHotUpdate', chunkLoadingGlobal: 'webpackChunk', webassemblyModuleFilename: '[hash].module.wasm', scriptType: false, hashFunction: 'sha256', hashDigest: 'hex', hashDigestLength: 20, hashSalt: undefined, uniqueName: '', clean: false, environment: {}, module: false, globalObject: 'self', charset: true, crossOriginLoading: false, compareBeforeEmit: true, iife: true, pathinfo: false, library: undefined, ...(c.output ?? {}) },
     resolve: c.resolve ?? {},
     resolveLoader: c.resolveLoader ?? {},
     module: c.module ?? { rules: [] },
@@ -1744,6 +1762,17 @@ async function wpInit() {
   for (const plugin of wp.plugins) {
     if (typeof plugin === 'function') plugin.call(compiler, compiler);
     else plugin.apply(compiler);
+  }
+  // webpack applies `optimization.minimizer` after the plugins, when it minimizes: terser-webpack-plugin, css-minimizer-webpack-plugin and the like.
+  // `'...'` stands for webpack's default minimizer, which is this bundler's own `--minify`.
+  const optimization = compiler.options.optimization ?? {};
+  const wanted = wp.config?.optimization?.minimize ?? (!!cli.minify || ((compiler.options.mode ?? 'production') === 'production' && (optimization.minimizer ?? []).some((m) => m !== '...')));
+  if (wanted) {
+    for (const minimizer of optimization.minimizer ?? []) {
+      if (minimizer === '...' || !minimizer) continue;
+      if (typeof minimizer === 'function') minimizer.call(compiler, compiler);
+      else minimizer.apply(compiler);
+    }
   }
   compiler.hooks.environment.call();
   compiler.hooks.afterEnvironment.call();
@@ -1969,7 +1998,7 @@ const wpAdapter = () => ({
     }
     return resolved.external ? { id: resolved.id, external: true } : { id: resolved.id };
   },
-  // A module a plugin ignored is an empty one.
+  // A module a plugin ignored is an empty one (webpack's would throw when it is run).
   load(id) {
     return id.startsWith('\0rathkit:ignored:') ? { code: 'module.exports = {};', moduleType: 'js' } : null;
   },

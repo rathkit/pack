@@ -1,0 +1,1 @@
+module.exports = { mode: 'production', target: 'node', optimization: { splitChunks: { chunks: (chunk) => chunk.name !== 'skip', name: (module, chunks, key) => key + '-' + chunks.map((c) => c.name).join('-'), cacheGroups: { shared: { test: (module) => /lazy/.test(module.resource || ''), name(module, chunks, key) { return 'shared'; }, chunks: 'all' } } } } };

@@ -39,6 +39,11 @@ pub struct HostInfo {
     /// `resolve.conditions` and `resolve.mainFields` the plugins ask for (Vite's `config` and `configEnvironment` hooks).
     pub conditions: Vec<String>,
     pub main_fields: Vec<String>,
+    /// webpack's `resolve.extensions` (`"..."` stands for the default list), `devtool` as a source map mode (`linked`, `inline`, `external`)
+    /// and `output.publicPath`, when the config has them.
+    pub extensions: Vec<String>,
+    pub sourcemap: Option<String>,
+    pub public_path: Option<String>,
     /// The host was started for style sheets alone (no config): only they are sent to it, not every script.
     pub style_only: bool,
 }
@@ -154,7 +159,7 @@ fn chunk_json(file_name: &str, is_entry: bool, info: Option<&ChunkInfo>) -> Stri
     let Some(info) = info else {
         return format!("{{\"fileName\":{},\"name\":{},\"isEntry\":{is_entry},\"type\":\"chunk\",\"exports\":[],\"imports\":[],\"dynamicImports\":[],\"modules\":{{}}}}", quote(file_name), quote(name));
     };
-    let modules: Vec<String> = info.modules.iter().map(|(id, len)| format!("{}:{{\"renderedLength\":{len},\"originalLength\":{len},\"removedExports\":[],\"renderedExports\":[],\"code\":null}}", quote(id))).collect();
+    let modules: Vec<String> = info.modules.iter().filter(|(id, _)| !info.shaken_out.contains(id)).map(|(id, len)| format!("{}:{{\"renderedLength\":{len},\"originalLength\":{len},\"removedExports\":[],\"renderedExports\":[],\"code\":null}}", quote(id))).collect();
     let ids: Vec<String> = info.modules.iter().map(|(id, _)| id.clone()).collect();
     format!(
         "{{\"type\":\"chunk\",\"fileName\":{},\"name\":{},\"isEntry\":{},\"isDynamicEntry\":{},\"isImplicitEntry\":false,\"facadeModuleId\":{},\"exports\":{},\"imports\":{},\"dynamicImports\":{},\"importedBindings\":{{}},\"referencedFiles\":[],\"implicitlyLoadedBefore\":[],\"modules\":{{{}}},\"moduleIds\":{},\"preliminaryFileName\":{}}}",
@@ -332,6 +337,9 @@ impl PluginHost {
         host.info.input = strings("input");
         host.info.conditions = strings("conditions");
         host.info.main_fields = strings("mainFields");
+        host.info.extensions = strings("extensions");
+        host.info.sourcemap = result.get("sourcemap").and_then(Json::as_str).map(str::to_string);
+        host.info.public_path = result.get("publicPath").and_then(Json::as_str).map(str::to_string);
         host.info.style_only = result.get("styleOnly").and_then(Json::as_bool).unwrap_or(false);
         host.info.federation = result.get("federation").filter(|f| !matches!(f, Json::Null)).cloned();
         if let Some(Json::Object(hooks)) = result.get("hooks") {
