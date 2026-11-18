@@ -311,7 +311,7 @@ pub fn build_with_fs(fs: Box<dyn FileSystem>, cwd: &Path, entries: &[String], op
         let (external, builtins) = (options.external.clone(), options.node_builtins);
         let root = cwd.to_path_buf();
         host.set_resolver(Some(Arc::new(move |source: &str, importer: Option<&str>, kind: &str| {
-            if (builtins && is_node_builtin(source)) || external.iter().any(|e| e == source) {
+            if (builtins && is_node_builtin(source)) || external.iter().any(|e| external_matches(e, source)) {
                 return Some((source.to_string(), true));
             }
             let dir = importer.map(Path::new).and_then(|p| p.parent()).map(Path::to_path_buf).unwrap_or_else(|| root.clone());
@@ -1030,10 +1030,35 @@ impl<'a> Context<'a> {
         if self.options.packages_external && is_package_name(specifier) && !self.options.resolve.alias.iter().any(|a| a.matches(specifier)) {
             return true;
         }
-        self.options.external.iter().any(|e| match e.strip_suffix("/*") {
-            Some(prefix) => specifier.starts_with(prefix) && specifier[prefix.len()..].starts_with('/'),
-            None => e == specifier,
-        })
+        self.options.external.iter().any(|e| external_matches(e, specifier))
+    }
+}
+
+/// Whether the external `pattern` (`--external:NAME`) names `specifier`: the same text; a `*` stands for any text (`@scope/*`,
+/// `*.png`, `lib-*-core`; one `*`, as in esbuild); and a package name also names what is inside the package (`react` and `react/jsx-runtime`).
+pub fn external_matches(pattern: &str, specifier: &str) -> bool {
+    if let Some((head, tail)) = pattern.split_once('*') {
+        return specifier.len() >= head.len() + tail.len() && specifier.starts_with(head) && specifier.ends_with(tail);
+    }
+    let package_like = !pattern.starts_with(['.', '/']) && !pattern.ends_with('/');
+    pattern == specifier || (package_like && specifier.strip_prefix(pattern).is_some_and(|rest| rest.starts_with('/')))
+}
+
+#[cfg(test)]
+mod external_tests {
+    use super::external_matches;
+
+    #[test]
+    fn external_patterns() {
+        assert!(external_matches("react", "react"));
+        assert!(external_matches("react", "react/jsx-runtime"));
+        assert!(!external_matches("react", "react-dom"));
+        assert!(external_matches("@scope/*", "@scope/pkg/deep"));
+        assert!(external_matches("de*", "dep"));
+        assert!(external_matches("*.png", "a/b.png"));
+        assert!(external_matches("lib-*-core", "lib-x-core"));
+        assert!(!external_matches("lib-*-core", "lib-core"));
+        assert!(!external_matches("./a", "./a/b"));
     }
 }
 

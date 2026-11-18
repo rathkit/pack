@@ -23,6 +23,9 @@ through the kernel's file events; macOS and Windows still poll. The type-check c
 table: [docs/benchmarks.md](docs/benchmarks.md). One machine, one day: run
 the container recipe in [rathkit/pack-bench](https://github.com/rathkit/pack-bench) for yours.
 
+Which of esbuild's command line options and JavaScript API options `rkp` has, and which are not done: [docs/esbuild-conformance.md](docs/esbuild-conformance.md).
+Coming from another tool: [migration guides](docs/migrate/README.md) for esbuild, Vite, webpack and Rollup, with commands that were run.
+
 ## Install
 
 ```
@@ -58,7 +61,10 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   `--pure:NAME` (calls of a name, or of a chain such as `styled.div`, and tagged templates of it, are free of effects, so an unused one
   is removed when what it is given has no effects either); `--preserve-symlinks`; `--metafile=FILE` (JSON in the shape of esbuild's metafile: every
   module with what it imports, every file written with the modules in it, what it imports and exports and its entry point;
-  `bytesInOutput` is an estimate, the modules' original sizes scaled to the file's size).
+  `bytesInOutput` is an estimate, the modules' original sizes scaled to the file's size). `rkp analyze meta.json --outfile report.html`
+  turns a metafile into one HTML page (a treemap by package, the packages and modules of each output with their sizes, what imports a
+  module, a filter box; style and script are inline, the page fetches nothing and the metafile is inside it). Without `--outfile` the page
+  is on the standard output.
   A word that starts with a dash and is not an option is an error, not a file.
 - Pages: `rkp bundle index.html --outdir dist` builds the module scripts the page points at, writes the page again with
   the built files (and their style sheets) in place, runs plugins' `transformIndexHtml` with the built files as `bundle`
@@ -192,6 +198,12 @@ rkp bundle src/main.ts --outfile dist/app.mjs
 - `--watch` builds again when a file the build read changes (and plugins' `addWatchFile` files): plugins hear it. On Linux it hears of changes through file events (inotify); elsewhere it polls the files every 80 ms.
   through `watchChange`, a changed config starts everything again, and Ctrl-C ends it cleanly. Modules whose files
   did not change are kept between builds (no reading, parsing or scanning again; without plugins).
+- `rkp migrate [DIR] [--write]` says which of esbuild, Vite, webpack and Rollup a project uses (a config file, a dependency, a
+  package.json script that runs `esbuild`, or a file that imports it) and prints the `rkp` commands that do the same build, with notes
+  on what does not carry over, as in [docs/migrate/](docs/migrate/README.md). The config files are read as text for the plain strings the
+  commands need (`outDir`, `entry`, `output.file`, `format`): what is not a plain string is left to `--config`, which reads the file
+  for real. `--write` adds the commands to the `scripts` of package.json as `build:rkp` and `dev:rkp` (`build:rkp-vite`, ... when there
+  are several tools; an esbuild script `x` becomes `x:rkp`), and never changes a script that is there.
 - `rkp serve ENTRY... [--port N] [--host H]` is a development server with the same options as `bundle`.
   The build stays in memory (with source maps) and is served over HTTP, together with your `index.html` (its entry
   `<script src>` is pointed at the built file; the style sheets and the reload client are added), `public/` and
@@ -368,6 +380,8 @@ rkp serve ENTRY... [--port N] [--host H] [the options above] [--define KEY=VALUE
     [--alias NAME=PATH]... [--tsconfig FILE | --no-tsconfig]
     [--jsx automatic|classic] [--jsx-import-source S] [--jsx-factory F] [--jsx-fragment F]
     [--experimental-decorators] [--decorator-metadata] [--strict-null-checks] [--original-paths] [--platform-browser] [--mode M] [--env-dir D] [--env-prefix P]... [--no-env-files]
+rkp analyze META.json [--outfile REPORT.html]
+rkp migrate [DIR] [--write]
 ```
 
 `tsconfig.json` is found automatically and supplies `paths`, `baseUrl`, `jsx`,

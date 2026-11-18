@@ -14,6 +14,9 @@
 //     runs agree to well under 1%, and the margin is for the difference between the machine that wrote the baseline and a shared CI
 //     runner (kernel, libc, page size). The process is limited to the first four CPUs (taskset), the count of a hosted runner,
 //     because the bundler starts a worker per CPU and its memory depends on how many.
+// A map cell depends on where the repository is checked out: the map names each source by its path relative to the output, so the same binary gives
+// a bigger map in a folder with a longer name (a difference of 0.4 to 0.5% was measured between two folders whose names differ by seven characters).
+// The baseline holds what the CI runner measures (a fixed path); a map cell that moves by about that much on another machine is the path, not the bundler.
 // Peak memory is read with GNU time (`/usr/bin/time -f %M`), so it is measured on Linux only; elsewhere the sizes are still checked and
 // memory is skipped with a note. Time is not gated here (a shared runner is too noisy): it is checked on the maintainer's machine before
 // a release (docs/RELEASING.md).

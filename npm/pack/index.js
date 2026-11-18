@@ -50,7 +50,29 @@ class BuildError extends Error {
   }
 }
 
-const KEYS = new Set(['entries', 'cwd', 'env', 'signal', 'outfile', 'outdir', 'format', 'globalName', 'globals', 'minify', 'keepNames', 'sourcemap', 'sourcesContent', 'splitting', 'treeShaking', 'platform', 'external', 'conditions', 'mainFields', 'alias', 'define', 'loader', 'assetNames', 'publicPath', 'jsx', 'jsxImportSource', 'jsxFactory', 'jsxFragment', 'decoratorMetadata', 'experimentalDecorators', 'strictNullChecks', 'tsconfig', 'config', 'mode', 'envDir', 'envPrefix', 'envFiles', 'banner', 'footer', 'drop', 'packages', 'resolveExtensions', 'preserveSymlinks', 'metafile', 'pure', 'entryNames', 'chunkNames', 'outExtension', 'legalComments', 'inject', 'jsxDev', 'tsconfigRaw', 'target', 'dts', 'dtsDir', 'dtsBundle', 'hmr', 'reactRefresh', 'https', 'plugins', 'federation', 'originalPaths', 'corsOrigins', 'port', 'host']);
+const KEYS = new Set(['entries', 'cwd', 'env', 'signal', 'outfile', 'outdir', 'format', 'globalName', 'globals', 'minify', 'keepNames', 'sourcemap', 'sourcesContent', 'splitting', 'treeShaking', 'platform', 'external', 'conditions', 'mainFields', 'alias', 'define', 'loader', 'assetNames', 'publicPath', 'jsx', 'jsxImportSource', 'jsxFactory', 'jsxFragment', 'decoratorMetadata', 'experimentalDecorators', 'strictNullChecks', 'tsconfig', 'config', 'mode', 'envDir', 'envPrefix', 'envFiles', 'banner', 'footer', 'drop', 'packages', 'resolveExtensions', 'preserveSymlinks', 'allowOverwrite', 'metafile', 'pure', 'entryNames', 'chunkNames', 'outExtension', 'legalComments', 'inject', 'jsxDev', 'tsconfigRaw', 'target', 'dts', 'dtsDir', 'dtsBundle', 'hmr', 'reactRefresh', 'https', 'plugins', 'federation', 'originalPaths', 'corsOrigins', 'port', 'host']);
+
+/**
+ * esbuild's spellings of options that mean what this program's do: `entryPoints` (file names; esbuild's object and `{ in, out }` forms are
+ * not supported), `absWorkingDir`, `bundle: true` (this program always bundles), `charset: 'utf8'`, and the messages' `logLevel`, `color`
+ * and `logLimit`, which change nothing in the output. Any other esbuild-only option is still a TypeError.
+ */
+function esbuildNames(options) {
+  const { entryPoints, absWorkingDir, bundle, charset, logLevel, color, logLimit, ...rest } = options;
+  if (entryPoints !== undefined) {
+    if (rest.entries !== undefined) throw new TypeError('rkp: give entries or entryPoints, not both');
+    const list = [].concat(entryPoints);
+    if (!list.every((e) => typeof e === 'string')) throw new TypeError('rkp: entryPoints are file names (the object and { in, out } forms are not supported)');
+    rest.entries = list;
+  }
+  if (absWorkingDir !== undefined) {
+    if (rest.cwd !== undefined) throw new TypeError('rkp: give cwd or absWorkingDir, not both');
+    rest.cwd = absWorkingDir;
+  }
+  if (bundle === false) throw new TypeError('rkp: bundle: false is not supported, this program always bundles');
+  if (charset !== undefined && charset !== 'utf8') throw new TypeError(`rkp: charset: '${charset}' is not supported, the output keeps non-ASCII characters as they are ('utf8')`);
+  return rest;
+}
 
 /** The command line for options. A key that is not an option is an error, so a typo is not ignored. */
 function toArgs(options, cleanups) {
@@ -128,6 +150,7 @@ function toArgs(options, cleanups) {
   add('--packages', options.packages);
   if (options.resolveExtensions) args.push('--resolve-extensions', options.resolveExtensions.join(','));
   if (options.preserveSymlinks) args.push('--preserve-symlinks');
+  if (options.allowOverwrite) args.push('--allow-overwrite');
   if (options.metafile) args.push(`--metafile=${resolve(options.cwd ?? process.cwd(), options.metafile)}`);
   add('--mode', options.mode);
   add('--env-dir', options.envDir);
@@ -196,7 +219,7 @@ async function withPluginObjects(options, cleanups, command) {
 async function build(options = {}) {
   const cleanups = [];
   try {
-    options = await withPluginObjects(options, cleanups, 'build');
+    options = await withPluginObjects(esbuildNames(options), cleanups, 'build');
     const { entries, args } = toArgs(options, cleanups);
     if (!entries.length) throw new TypeError('rkp: build needs entries');
     const r = await run(['bundle', ...entries, ...args], options);
@@ -224,7 +247,7 @@ async function build(options = {}) {
 /** Starts the development server. Resolves once it is listening, with its address and a way to stop it. */
 async function serve(options = {}) {
   const cleanups = [];
-  options = await withPluginObjects(options, cleanups, 'serve');
+  options = await withPluginObjects(esbuildNames(options), cleanups, 'serve');
   const { entries, args } = toArgs(options, cleanups);
   const child = spawn(binaryPath(), ['serve', ...entries, ...args], { cwd: options.cwd, env: options.env ? { ...process.env, ...options.env } : process.env, signal: options.signal, stdio: ['ignore', 'pipe', 'pipe'] });
   let stderr = '';

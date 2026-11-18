@@ -76,13 +76,110 @@ fn real_main() -> ExitCode {
         Some((cmd, rest)) if cmd == "serve" => bundle_command(rest, true),
         // The optional checker, a separate program found the way cargo finds `cargo-*` (src/checker.rs); nothing of it is in rkp.
         Some((cmd, rest)) if cmd == "check" => check_command(rest),
+        // A page for reading a metafile: `rkp analyze META.json [--outfile REPORT.html]` (src/analyze.rs).
+        Some((cmd, rest)) if cmd == "analyze" => analyze_command(rest),
+        // Which tool a project builds with, and the equivalent commands: `rkp migrate [DIR] [--write]` (src/migrate.rs).
+        Some((cmd, rest)) if cmd == "migrate" => migrate_command(rest),
         Some((cmd, files)) if cmd == "--graph" && !files.is_empty() => graph(files),
         Some((cmd, files)) if cmd == "--resolve-dump" && !files.is_empty() => resolve_dump(files),
         Some((cmd, files)) if cmd == "--ts-verdicts" && !files.is_empty() => ts_verdicts(files),
         Some((cmd, files)) if cmd == "--link-dump" && !files.is_empty() => link_dump(files),
         _ => {
-            eprintln!("usage: rkp bundle <entry>... | serve <entry>... | check <file.ts>... | --version\n       rkp --lex-check|--parse-check|--parse-verdicts|--script-verdicts|--bench <file.js>... (development aids)\n       rkp --scopes <file.js>\n       rkp bundle <entry.js>... [--outfile FILE | --outdir DIR --splitting] [--format esm|cjs|iife] [--no-treeshake] [--define KEY=VALUE]... [--loader .ext=NAME]... [--jsx automatic|classic] [--external NAME]... [--condition NAME]...\n       rkp --graph <entry.js>... [--quiet] [--threads N] [--external NAME]... [--condition NAME]...");
+            eprintln!("usage: rkp bundle <entry>... | serve <entry>... | analyze <meta.json> | migrate [dir] [--write] | check <file.ts>... | --version\n       rkp --lex-check|--parse-check|--parse-verdicts|--script-verdicts|--bench <file.js>... (development aids)\n       rkp --scopes <file.js>\n       rkp bundle <entry.js>... [--outfile FILE | --outdir DIR --splitting] [--format esm|cjs|iife] [--no-treeshake] [--define KEY=VALUE]... [--loader .ext=NAME]... [--jsx automatic|classic] [--external NAME]... [--condition NAME]...\n       rkp --graph <entry.js>... [--quiet] [--threads N] [--external NAME]... [--condition NAME]...");
             ExitCode::from(2)
+        }
+    }
+}
+
+/// `rkp migrate [DIR] [--write]`: the tools of a project (esbuild, Vite, webpack, Rollup) and the `rkp` commands that replace them; `--write`
+/// adds them to the scripts of package.json under new names.
+fn migrate_command(args: &[String]) -> ExitCode {
+    let (mut dir, mut write) = (None, false);
+    for arg in args {
+        match arg.as_str() {
+            "--write" => write = true,
+            a if a.starts_with("--") => {
+                eprintln!("error: rkp migrate: unknown option {a}");
+                return ExitCode::from(2);
+            }
+            _ if dir.is_none() => dir = Some(arg.clone()),
+            _ => {
+                eprintln!("error: rkp migrate takes one folder");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let dir = std::path::PathBuf::from(dir.unwrap_or_else(|| ".".to_string()));
+    if !dir.is_dir() {
+        eprintln!("error: {}: not a folder", dir.display());
+        return ExitCode::from(2);
+    }
+    let found = rathkit_pack::migrate::detect(&dir);
+    print!("{}", rathkit_pack::migrate::report(&dir, &found));
+    if found.is_empty() {
+        return ExitCode::from(1);
+    }
+    if write {
+        match rathkit_pack::migrate::write(&dir, &found) {
+            Ok(log) => log.iter().for_each(|line| println!("{line}")),
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::from(1);
+            }
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+/// `rkp analyze META.json [--outfile REPORT.html]`: the HTML report of a metafile, on the standard output unless a file is named.
+fn analyze_command(args: &[String]) -> ExitCode {
+    let (mut input, mut outfile) = (None, None);
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--outfile" => outfile = it.next().cloned(),
+            a if a.starts_with("--outfile=") => outfile = Some(a["--outfile=".len()..].to_string()),
+            a if a.starts_with("--") => {
+                eprintln!("error: rkp analyze: unknown option {a}");
+                return ExitCode::from(2);
+            }
+            _ if input.is_none() => input = Some(arg.clone()),
+            _ => {
+                eprintln!("error: rkp analyze takes one metafile");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let Some(input) = input else {
+        eprintln!("usage: rkp analyze META.json [--outfile REPORT.html]   (META.json is made by rkp bundle --metafile=META.json)");
+        return ExitCode::from(2);
+    };
+    let text = match std::fs::read_to_string(&input) {
+        Ok(text) => text,
+        Err(e) => {
+            eprintln!("error: {input}: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let page = match rathkit_pack::analyze::report(&text) {
+        Ok(page) => page,
+        Err(e) => {
+            eprintln!("error: {input}: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    match outfile {
+        Some(file) => match std::fs::write(&file, page) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {file}: {e}");
+                ExitCode::from(1)
+            }
+        },
+        None => {
+            use std::io::Write;
+            let _ = std::io::stdout().write_all(page.as_bytes());
+            ExitCode::SUCCESS
         }
     }
 }
@@ -568,6 +665,14 @@ fn link_dump(entries: &[String]) -> ExitCode {
 
 /// `rkp bundle ENTRY... [--outfile FILE]`: builds one ES module file from the entries.
 fn bundle_command(args: &[String], serve: bool) -> ExitCode {
+    // esbuild's spellings (`--outfile=FILE`, `--external:NAME`, ...) are rewritten into the ones below (src/cli_compat.rs).
+    let args = &match rathkit_pack::cli_compat::esbuild_spellings(args) {
+        Ok(args) => args,
+        Err(message) => {
+            eprintln!("error: {message}");
+            return ExitCode::from(2);
+        }
+    };
     loop {
         match bundle_once(args, serve) {
             Done::Exit(code) => return code,
@@ -582,6 +687,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     let mut options = GraphOptions::default();
     let mut outfile: Option<String> = None;
     let mut treeshake = true;
+    let mut allow_overwrite = false;
     let mut hmr = false;
     let mut react_refresh: Option<bool> = None;
     let mut https = false;
@@ -624,6 +730,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
         match arg.as_str() {
             "--outfile" => outfile = it.next().cloned(),
             "--no-treeshake" => treeshake = false,
+            "--allow-overwrite" => allow_overwrite = true,
             // --hmr (serve): modules are replaced in the running page instead of reloading it.
             "--hmr" => hmr = true,
             // --react-refresh / --no-react-refresh (with --hmr): components keep their state; by default on when the project has react-refresh.
@@ -679,11 +786,10 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
                         "cjs" => rathkit_pack::bundle::Format::Cjs,
                         "iife" => rathkit_pack::bundle::Format::Iife,
                         "esm" | "es" => rathkit_pack::bundle::Format::Esm,
-                        _ if value.contains(',') => {
-                            eprintln!("error: --format is esm, cjs or iife, or a list of esm and cjs; not '{name}'");
+                        _ => {
+                            eprintln!("error: --format is esm, cjs or iife (or a list of esm and cjs), not '{name}' (umd, amd and system are not supported)");
                             return Done::Exit(ExitCode::from(2));
                         }
-                        _ => rathkit_pack::bundle::Format::Esm,
                     };
                     if !formats.contains(&format) {
                         formats.push(format);
@@ -1322,7 +1428,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
         return Done::Exit(ExitCode::from(2));
     }
     let exports_target = write_exports.clone();
-    let job = std::sync::Arc::new(Job { cwd, entries, options, bundle_options, treeshake, outfile, outdir, host: plugin_host, config_file, watch, serve: serve_state, bind: (host_name, port), restart_files, workers, pages, metafile, dts: dts.then(|| (dts_dir, tsconfig_path.clone(), dts_bundle)), https: https.then(|| (https_cert, https_key)), more_builds: exports_target.is_some() });
+    let job = std::sync::Arc::new(Job { allow_overwrite, cwd, entries, options, bundle_options, treeshake, outfile, outdir, host: plugin_host, config_file, watch, serve: serve_state, bind: (host_name, port), restart_files, workers, pages, metafile, dts: dts.then(|| (dts_dir, tsconfig_path.clone(), dts_bundle)), https: https.then(|| (https_cert, https_key)), more_builds: exports_target.is_some() });
     if let Some(host) = &job.host {
         // Child compilers of webpack plugins build one entry as a script that sets a global.
         let for_children = job.clone();
@@ -1352,6 +1458,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
 
 /// Everything one build needs, fixed once the command line and the config are read.
 struct Job {
+    allow_overwrite: bool,
     cwd: std::path::PathBuf,
     entries: Vec<String>,
     options: rathkit_pack::graph::GraphOptions,
@@ -1558,6 +1665,7 @@ fn run_formats(job: &Job, formats: &[rathkit_pack::bundle::Format]) -> Outcome {
             }
         }
         let run = Job {
+            allow_overwrite: job.allow_overwrite,
             cwd: job.cwd.clone(),
             entries,
             options: job.options.clone(),
@@ -2090,6 +2198,21 @@ fn run_build(job: &Job) -> Outcome {
             cache.store(graph);
         }
         return outcome;
+    }
+    // A build that would write over one of its own input files stops, as esbuild does (`--allow-overwrite` says it is meant).
+    if let (Ok(output), false) = (&result, job.allow_overwrite) {
+        let real = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| rathkit_pack::graph::absolute(cwd, &p.to_string_lossy()));
+        let mut planned: Vec<std::path::PathBuf> = Vec::new();
+        match (&outdir, &outfile) {
+            (Some(dir), _) => planned.extend(output.files.iter().map(|f| std::path::Path::new(dir).join(&f.name))),
+            (None, Some(file)) => planned.push(std::path::PathBuf::from(file)),
+            _ => {}
+        }
+        let planned: Vec<std::path::PathBuf> = planned.iter().map(|p| real(p)).collect();
+        if let Some(module) = graph.modules.iter().find(|m| planned.contains(&real(&m.path))) {
+            eprintln!("error: refusing to overwrite the input file {} (pass --allow-overwrite to do it anyway)", module.path.display());
+            return outcome;
+        }
     }
     let mut status = match result {
         Ok(output) if outdir.is_some() => {
