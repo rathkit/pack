@@ -48,7 +48,8 @@ all came from the config file (the command line has none of them). `mode: 'produ
 | `target: 'node'` | `--platform=node` (the default); `target: 'web'`: `--platform=browser` |
 | `resolve.extensions`, `resolve.mainFields`, `resolve.conditionNames` | `--resolve-extensions`, `--main-fields=`, `--conditions=` |
 | `devServer` | `rkp serve ENTRY` (`--port`, `--host`, `--https`, `--hmr`) |
-| `optimization.splitChunks`, `runtimeChunk` | not done: dynamic `import()` makes chunks with `--splitting` and `--outdir`; the settings are ignored |
+| `optimization.splitChunks.cacheGroups` | done with `--splitting`: `test`, `name`, `chunks`, `priority`, `minChunks`, `minSize` and `enforce` decide the chunks; webpack's implicit groups are not added (see `docs/webpack-conformance.md`) |
+| `optimization.splitChunks` size settings (`maxSize`), `runtimeChunk` | not done: no webpack runtime, chunks are not cut by size; dynamic `import()` makes chunks with `--splitting` and `--outdir` |
 
 ## What is different
 

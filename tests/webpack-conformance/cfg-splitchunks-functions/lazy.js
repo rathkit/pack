@@ -1,1 +1,1 @@
-module.exports = 'lazy';
+export default 'lazy';

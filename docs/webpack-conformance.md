@@ -44,7 +44,7 @@ webpack's runtime or its caches do nothing.
 | `target` | partly | `web` and `node` as the bundler's own platform; no `electron-*`, `webworker`, browserslist query | `cfg-target-web` |
 | `node` (`__dirname`, `__filename`, `global`) | partly | | `cfg-node-dirname` |
 | `optimization.minimize`, `minimizer` (with `'...'`) | works | the plugins listed run; `'...'` is the bundler's own `--minify` | `terser-webpack-plugin`, `css-minimizer-webpack-plugin` |
-| `optimization.splitChunks` | partly | accepted, layout not followed; see the SplitChunksPlugin section | `cfg-splitchunks` |
+| `optimization.splitChunks` | works (the `cacheGroups` you list) | the cache groups decide the layout; the size-splitting settings and webpack's implicit groups are n/a; see the SplitChunksPlugin section | `cfg-splitchunks*` |
 | `optimization.runtimeChunk`, `moduleIds`, `chunkIds`, `usedExports`, `sideEffects`, `concatenateModules`, `innerGraph` | n/a | tree shaking and scope hoisting are always on | |
 | `experiments` (`topLevelAwait`, `outputModule`) | works | top-level await needs the esm format | `cfg-experiments` |
 | `experiments` (`asyncWebAssembly`, `layers`, `css`, `lazyCompilation`) | no | gap 3 | |
@@ -110,18 +110,55 @@ polyfills are not applied (gap 7).
 
 ## SplitChunksPlugin settings
 
-`optimization.splitChunks` is read, and every setting in it is accepted without an error, but none of them decides where a module goes: Pack splits
-a dynamic `import()` into its own chunk, and (with `--splitting`, esm output) a module several chunks share into a common chunk, always. A program
-built with any of these settings behaves the same as with webpack's; the number and names of its chunk files can differ. What each fixture
-checks is that the build succeeds and the program prints what it prints with webpack.
+`optimization.splitChunks.cacheGroups` that the config lists decide where modules go. Everything below needs `--splitting` (the esm output format), as
+chunks do; without it the build is one file and a warning says so.
+
+Only groups the config writes are applied. webpack's own `defaultVendors` and `default` groups (what `splitChunks: { chunks: 'all' }` implies in
+webpack) are not added: they would change the output of every build with a dynamic `import()`. A config with `splitChunks` and no `cacheGroups` makes
+the chunks Pack always makes (`cfg-splitchunks`); a program built either way prints the same.
+
+What a group does, exactly:
+
+- `test` (a RegExp, a string, a function of the module, or none for every module) runs in the plugin host, for all modules in one call after the graph is built.
+  A RegExp or a string is tested against the module's file path (`module.nameForCondition()`); a string matches the start of the path. Paths are given to
+  `test` with forward slashes, on every system, so `/[\\/]node_modules[\\/]/` works and a pattern that spells only `\\` does not on Windows.
+  A function gets the module (`resource`, `nameForCondition()`, `type`, `size()`) and `{ chunkGraph, moduleGraph }` (webpack's real ones are not there: they
+  are empty objects). A `test` that throws matches nothing, with a warning. A style sheet or an asset is never in a group.
+- A module is reached from roots: the entries, and the modules an `import()` loads. `chunks: 'initial'` matches modules an entry reaches without an
+  `import()` on the way, `'async'` (the default, as in webpack) modules only `import()` reaches, `'all'` both. A function `chunks` is not supported: the group is left out, with a warning.
+- `minChunks` (default 1) is the number of roots, of the kinds `chunks` allows, that reach the module.
+- `minSize` is the total text size of the modules the group takes, in bytes (webpack's default, 20000 in production and 10000 otherwise, when not given; a
+  number, or `{ javascript }`). A group below it is not applied, and its modules go to the next group that matches or stay where they were. For a group
+  without a `name` the size is that of one chunk. `enforce: true` ignores `minSize` and `minChunks`.
+- `priority` (default 0): of the groups that match a module, the highest wins; on a tie, the one listed first.
+- `name`, a string: the group makes one chunk, `<name>.js`. Without a `name` (or with a function, which is not followed) the group makes one chunk for each set of
+  roots that need the modules, so it never joins modules different roots need: `<key>-<hash>.js`.
+- A root is never moved out of its own chunk: an entry, or a module an `import()` loads, stays in its file even when a group's `test` matches it.
+- Run order: a chunk's modules run when the file loads, and a file runs after the files it imports. The modules a group takes therefore run before the
+  rest of the chunk they came from, not between them as webpack's runtime runs them: a package that reads a global an earlier app module sets
+  (`import './setup.js'; import './vendor/lib.js'` where `lib.js` reads `globalThis.X` at the top level) sees it unset. The same limit applies to
+  the shared chunks Pack makes without groups. A wrapped CommonJS module runs when it is first required, so it is not affected.
+- A group that would make chunks that import each other (a `vendors` chunk whose package calls a module of the app's own chunk, which imports the package) is
+  given up, with a warning that names it; its modules stay where they would be without it. The output never has a chunk cycle.
 
 | Setting | Status | Fixture |
 |---|---|---|
-| `chunks` (`'async'`, `'initial'`, `'all'`, a function) | accepted, layout not followed | `cfg-splitchunks`, `cfg-splitchunks-functions` |
-| `cacheGroups` (`test` as a RegExp or a function, `name` as a string or a function, `priority`, `enforce`, `reuseExistingChunk`, `filename`, `minChunks`, `false` to turn one off) | accepted, layout not followed: no `vendors` chunk is made | `cfg-splitchunks-cachegroups`, `cfg-splitchunks-functions` |
-| `minSize`, `maxSize`, `maxAsyncSize`, `maxInitialSize`, `minSizeReduction`, `enforceSizeThreshold` | accepted, not followed | `cfg-splitchunks-sizes` |
-| `minChunks`, `maxAsyncRequests`, `maxInitialRequests`, `automaticNameDelimiter`, `name`, `usedExports`, `hidePathInfo` | accepted, not followed | `cfg-splitchunks-sizes` |
-| `optimization.runtimeChunk`, `moduleIds`, `chunkIds` | n/a (there is no webpack runtime) | `cfg-splitchunks-sizes` |
+| `cacheGroups[key].test` (RegExp, string, function, none) | works | `cfg-splitchunks-groups`, `cfg-splitchunks-cachegroups` (a CommonJS package in `node_modules`), `cfg-splitchunks-functions` |
+| `name` (a string) | works | `cfg-splitchunks-groups` |
+| `chunks` (`'initial'`, `'async'`, `'all'`) | works | `cfg-splitchunks-chunks` |
+| `priority` | works | `cfg-splitchunks-priority` |
+| `minChunks` | works | `cfg-splitchunks-minchunks` |
+| `minSize` (and `enforce`) | works | `cfg-splitchunks-minsize` |
+| group cycles | works: the group is given up with a warning | `cfg-splitchunks-cycle` |
+| `cacheGroups[key]: false` (and `defaultVendors: false`) | works: no group | `cfg-splitchunks-cachegroups` |
+| `chunks` or `name` as a function | not supported: a `chunks` function leaves the group out, a `name` function makes the group unnamed | `cfg-splitchunks-functions` |
+| `filename`, `reuseExistingChunk`, `automaticNameDelimiter`, `usedExports`, `hidePathInfo`, `maxAsyncRequests`, `maxInitialRequests` | accepted, not followed (the chunk file is named by `name`; a chunk has no request limit) | `cfg-splitchunks-cachegroups` |
+| `maxSize`, `maxAsyncSize`, `maxInitialSize`, `minSizeReduction`, `enforceSizeThreshold` | n/a: they cut a chunk into pieces by size, so that each request loads a small file; Pack keeps a chunk whole, and code of one module is never split across files | `cfg-splitchunks-sizes` |
+| `optimization.runtimeChunk` | n/a: there is no webpack runtime (the module loader and chunk table) to put in a chunk of its own; esm chunks import each other | `cfg-splitchunks-sizes` |
+| `optimization.moduleIds`, `chunkIds` | n/a: there are no module or chunk ids in the output (modules are bindings in a scope, chunks are files named by `name` or by a hash) | `cfg-splitchunks-sizes` |
+
+Windows: each module path (and a string `test`) is made canonical before testing: the real path when the file exists (no 8.3 short names, symlinks resolved),
+forward slashes and an upper-case drive letter. That code is not run on Windows here (only Linux ran the fixtures); the Windows CI legs are its first run.
 
 ## Plugins that read the compilation
 
@@ -141,5 +178,5 @@ Each of these is a candidate for an issue:
 3. Rule conditions `issuer`, `issuerLayer`, `dependency`, `mimetype`; `resolve.plugins`, `symlinks`, `roots`; `externalsType`; experiments `css`, `layers`, `asyncWebAssembly`.
 4. `worker-loader` needs webpack's child compilation of a worker entry with the web worker template plugins.
 5. Externals with a global (`{ react: 'React' }`, `var X`) are imported by name instead of being read from the global.
-6. `optimization.splitChunks` `cacheGroups` do not decide the layout (no `vendors` chunk), nor do the size and request limits. Fixture to add: a `vendors` cache group names a file that holds the package.
+6. `optimization.splitChunks`: webpack's implicit `defaultVendors` and `default` groups are not applied (only the groups a config lists are); `chunks` and `name` as functions, `filename`, `reuseExistingChunk` and the request limits are not followed (see the SplitChunksPlugin section).
 7. `node-polyfill-webpack-plugin` loads, but its polyfills are not applied: in a browser build (`--platform-browser`) `import 'path'` is "Cannot find 'path'", because the `resolve.fallback` entries the plugin adds for Node's built-in modules are not read. On a Node build the built-in module is used, which is why the fixture passes.

@@ -259,6 +259,46 @@ pub struct Options {
     /// The folder the output tree starts at: the source file `root/a/b.ts` is written as `a/b.js`. Default: the folder the sources share.
     pub preserve_root: Option<std::path::PathBuf>,
     pub preserve_entries: usize,
+    /// Named groups that decide which chunk a module goes to (webpack's `splitChunks.cacheGroups`): see `ModuleGroups`.
+    pub module_groups: ModuleGroups,
+}
+
+/// Which modules a group may take, by how they are reached.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum GroupChunks {
+    /// Modules an entry reaches without a dynamic `import()` on the way.
+    Initial,
+    /// Modules only a dynamic `import()` reaches.
+    #[default]
+    Async,
+    All,
+}
+
+/// A named set of modules that is made one chunk (with a `name`) or one chunk for each set of roots that need the modules (without).
+/// Only the modules `ModuleGroups::matches` lists can be in it; a root (an entry, or a module `import()` loads) is never moved out of its own chunk.
+#[derive(Clone, Debug)]
+pub struct ChunkGroup {
+    /// What messages call the group, and the stem of the file of an unnamed group.
+    pub key: String,
+    /// The stem of the one file the group makes.
+    pub name: Option<String>,
+    pub chunks: GroupChunks,
+    /// Of the groups that match one module the highest wins; with the same priority, the first.
+    pub priority: i64,
+    /// The roots that must reach a module (of the kinds `chunks` allows) for the group to take it.
+    pub min_chunks: usize,
+    /// The least total text size of the modules of the group (of one chunk, for an unnamed group).
+    pub min_size: usize,
+    /// Ignore `min_size` and `min_chunks`.
+    pub enforce: bool,
+}
+
+/// The input of the chunk layout besides entries and dynamic imports: groups, and for each module (by path) the groups it matches.
+/// webpack's cache groups fill it in; `output.manualChunks` could, with named groups that `enforce`.
+#[derive(Clone, Debug, Default)]
+pub struct ModuleGroups {
+    pub groups: Vec<ChunkGroup>,
+    pub matches: HashMap<std::path::PathBuf, Vec<usize>>,
 }
 
 /// How an entry written as CommonJS hands out its exports.
@@ -286,7 +326,7 @@ pub enum SourceMapMode {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { splitting: false, format: Format::Esm, global_name: None, globals: Vec::new(), original_paths: false, browser: false, minify: crate::minify::Options::default(), keep_scans: false, on_modules: None, sourcemap: SourceMapMode::None, sources_content: true, map_base: None, file_name: None, hot: false, hmr: false, react_refresh: false, entry_names: Vec::new(), federation: None, banner_js: None, footer_js: None, banner_css: None, footer_css: None, drop_console: false, drop_debugger: false, entry_template: None, chunk_template: None, out_extensions: Vec::new(), legal_comments: crate::legal::LegalComments::Eof, target: crate::target::Target::ESNEXT, cjs_exports: CjsExports::Named, preserve_modules: false, preserve_root: None, preserve_entries: 0 }
+        Options { splitting: false, format: Format::Esm, global_name: None, globals: Vec::new(), original_paths: false, browser: false, minify: crate::minify::Options::default(), keep_scans: false, on_modules: None, sourcemap: SourceMapMode::None, sources_content: true, map_base: None, file_name: None, hot: false, hmr: false, react_refresh: false, entry_names: Vec::new(), federation: None, banner_js: None, footer_js: None, banner_css: None, footer_css: None, drop_console: false, drop_debugger: false, entry_template: None, chunk_template: None, out_extensions: Vec::new(), legal_comments: crate::legal::LegalComments::Eof, target: crate::target::Target::ESNEXT, cjs_exports: CjsExports::Named, preserve_modules: false, preserve_root: None, preserve_entries: 0, module_groups: ModuleGroups::default() }
     }
 }
 
@@ -353,6 +393,8 @@ struct Chunk {
     /// Named by the build (an entry the command line or a plugin gave a file name): templates leave it be.
     given: bool,
     is_entry: bool,
+    /// The `ModuleGroups` group the chunk was made for.
+    group: Option<usize>,
 }
 
 /// How chunks refer to one another.
@@ -476,6 +518,7 @@ struct Bundler<'a> {
     /// ES modules that run when first loaded, not at startup.
     wrapped: HashSet<ModuleId>,
     splitting: bool,
+    module_groups: ModuleGroups,
     plan: ChunkPlan,
     /// Whether output text is tagged with where it came from (see `mark_copy`).
     single_name: String,
@@ -638,6 +681,7 @@ impl<'a> Bundler<'a> {
             globals: Vec::new(),
             wrapped: HashSet::new(),
             splitting: false,
+            module_groups: ModuleGroups::default(),
             plan: ChunkPlan::default(),
             single_name: "bundle.js".to_string(),
             mapping: false,
@@ -676,6 +720,7 @@ impl<'a> Bundler<'a> {
         self.format = options.format;
         self.splitting = (self.preserve || (options.splitting && options.format == Format::Esm)) && options.format != Format::Iife && !options.hmr;
         self.global_name = options.global_name.clone();
+        self.module_groups = options.module_groups.clone();
         self.globals = options.globals.clone();
         let graph = self.graph;
         self.mapping = options.sourcemap != SourceMapMode::None;
@@ -795,10 +840,25 @@ impl<'a> Bundler<'a> {
             }
         }
         let order = self.execution_order(&roots, &forced);
-        self.plan = if self.preserve { self.preserve_plan(&roots, options) } else if self.splitting { self.split_plan(&roots) } else { self.single_plan() };
-        self.federation_waits();
-        let names = self.allocate_names();
-        let links = self.chunk_links(&root_exports, &order);
+        // Groups can make chunks that import from each other (a vendors chunk whose package calls back into the app's own chunk): the
+        // layout is made again without the group of a chunk that is in a cycle, and a warning names it. The chunks of the
+        // roots alone have no cycle, so this ends.
+        let mut dropped: HashSet<usize> = HashSet::new();
+        let (names, links) = loop {
+            self.plan = if self.preserve { self.preserve_plan(&roots, options) } else if self.splitting { self.split_plan(&roots, &dropped) } else { self.single_plan() };
+            self.ready_calls.clear();
+            self.federation_waits();
+            let names = self.allocate_names();
+            let links = self.chunk_links(&root_exports, &order);
+            if self.splitting && !self.preserve && !self.module_groups.groups.is_empty() {
+                if let Some(group) = self.group_in_cycle(&links) {
+                    eprintln!("warning: the chunk group '{}' would make chunks that import each other; its modules stay in their own chunks", self.module_groups.groups[group].key);
+                    dropped.insert(group);
+                    continue;
+                }
+            }
+            break (names, links);
+        };
         if let Err(message) = if self.preserve { Ok(()) } else { self.rename_chunks(&links, options) } {
             return Err(vec![Diagnostic { severity: crate::graph::Severity::Error, message, file: None, pos: None }]);
         }
@@ -1922,7 +1982,7 @@ impl<'a> Bundler<'a> {
             of_module[m.index()] = Some(0);
         }
         let root_chunk = graph.entries.iter().map(|&e| (e, 0)).collect();
-        ChunkPlan { chunks: vec![Chunk { file: self.single_name.clone(), modules, roots: graph.entries.clone(), base: String::new(), given: true, is_entry: true }], of_module, root_chunk }
+        ChunkPlan { chunks: vec![Chunk { file: self.single_name.clone(), modules, roots: graph.entries.clone(), base: String::new(), given: true, is_entry: true, group: None }], of_module, root_chunk }
     }
 
     /// `--preserve-modules`: every module is a file of its own, named by where its source is (from the folder the sources share). The
@@ -1994,7 +2054,7 @@ impl<'a> Bundler<'a> {
             }
             let file = name_of(id, &mut used);
             let base = file.rsplit_once('/').map_or(file.as_str(), |(_, b)| b).rsplit_once('.').map_or(file.as_str(), |(b, _)| b).to_string();
-            chunks.push(Chunk { file, modules: if own { vec![id] } else { Vec::new() }, roots: if root { vec![id] } else { Vec::new() }, base, given: true, is_entry: false });
+            chunks.push(Chunk { file, modules: if own { vec![id] } else { Vec::new() }, roots: if root { vec![id] } else { Vec::new() }, base, given: true, is_entry: false, group: None });
             let index = chunks.len() - 1;
             if own {
                 of_module[id.index()] = Some(index);
@@ -2012,7 +2072,7 @@ impl<'a> Bundler<'a> {
 
     /// Groups modules by which roots can reach them: modules reachable from exactly the same
     /// roots share a chunk, so a module used by two entries is in a chunk of its own.
-    fn split_plan(&self, roots: &[ModuleId]) -> ChunkPlan {
+    fn split_plan(&self, roots: &[ModuleId], dropped: &HashSet<usize>) -> ChunkPlan {
         let graph = self.graph;
         let words = roots.len().div_ceil(64).max(1);
         let mut reach: Vec<Vec<u64>> = vec![vec![0; words]; graph.modules.len()];
@@ -2044,7 +2104,10 @@ impl<'a> Bundler<'a> {
                 stack.extend(self.bound_modules(id));
             }
         }
-        let mut by_signature: std::collections::BTreeMap<Vec<u64>, usize> = std::collections::BTreeMap::new();
+        let grouped = self.assign_groups(roots, &reach, dropped);
+        // Modules reachable from exactly the same roots share a chunk; a module a group took goes to the chunk of the group instead
+        // (one chunk for a named group, one for each set of roots for an unnamed one).
+        let mut by_signature: std::collections::BTreeMap<(Option<usize>, Vec<u64>), usize> = std::collections::BTreeMap::new();
         let mut chunks: Vec<Chunk> = Vec::new();
         let mut of_module = vec![None; graph.modules.len()];
         let mut signatures: Vec<Vec<u64>> = Vec::new();
@@ -2053,9 +2116,15 @@ impl<'a> Bundler<'a> {
             if !self.included(module.id) || bits.iter().all(|w| *w == 0) {
                 continue;
             }
-            let index = *by_signature.entry(bits.clone()).or_insert_with(|| {
-                chunks.push(Chunk { file: String::new(), modules: Vec::new(), roots: Vec::new(), base: String::new(), given: false, is_entry: false });
-                signatures.push(bits.clone());
+            let (group, key_bits) = match &grouped[module.id.index()] {
+                Some((g, true)) => (Some(*g), Vec::new()),
+                Some((g, false)) => (Some(*g), bits.clone()),
+                None => (None, bits.clone()),
+            };
+            let index = *by_signature.entry((group, key_bits)).or_insert_with(|| {
+                chunks.push(Chunk { file: String::new(), modules: Vec::new(), roots: Vec::new(), base: String::new(), given: false, is_entry: false, group });
+                // A chunk of a group holds no root, so it is never a root's own: all bits set keeps it from looking like one.
+                signatures.push(if group.is_some() { vec![u64::MAX; bits.len()] } else { bits.clone() });
                 chunks.len() - 1
             });
             chunks[index].modules.push(module.id);
@@ -2071,7 +2140,7 @@ impl<'a> Bundler<'a> {
             let chunk = match exclusive {
                 Some(c) => c,
                 None => {
-                    chunks.push(Chunk { file: String::new(), modules: Vec::new(), roots: Vec::new(), base: String::new(), given: false, is_entry: false });
+                    chunks.push(Chunk { file: String::new(), modules: Vec::new(), roots: Vec::new(), base: String::new(), given: false, is_entry: false, group: None });
                     chunks.len() - 1
                 }
             };
@@ -2082,7 +2151,11 @@ impl<'a> Bundler<'a> {
         let mut used: HashSet<String> = HashSet::new();
         let entry_count = graph.entries.len();
         let order_of_root: HashMap<ModuleId, usize> = roots.iter().enumerate().map(|(i, &r)| (r, i)).collect();
-        for chunk in chunks.iter_mut() {
+        // The chunks of groups are named last, so a name a group asks for never takes the file name of an entry.
+        let mut naming: Vec<usize> = (0..chunks.len()).collect();
+        naming.sort_by_key(|&c| chunks[c].group.is_some());
+        for chunk_index in naming {
+            let chunk = &mut chunks[chunk_index];
             // A virtual module's id (`\0virtual:x`) is not a file name; characters a file name cannot hold are replaced.
             let stem = |id: ModuleId| {
                 let name = graph.module(id).path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "chunk".to_string());
@@ -2105,7 +2178,17 @@ impl<'a> Bundler<'a> {
                 text
             };
             let mut ext = ".js";
-            let (base, name_base, given, is_entry) = match chunk.roots.first() {
+            let group_stem = chunk.group.map(|g| {
+                let group = &self.module_groups.groups[g];
+                let clean = |text: &str| text.chars().map(|c| if c.is_control() || "\"#$%&*+,:;<=>?[]^`{|}\\/".contains(c) { '_' } else { c }).collect::<String>();
+                match &group.name {
+                    Some(name) => (clean(name), clean(name)),
+                    None => (format!("{}-{digest}", clean(&group.key)), clean(&group.key)),
+                }
+            });
+            let (base, name_base, given, is_entry) = match (&group_stem, chunk.roots.first()) {
+                (Some((file, name)), _) => (file.clone(), name.clone(), false, false),
+                (None, first) => match first {
                 Some(&root) if order_of_root[&root] < entry_count => match self.entry_names.get(order_of_root[&root]).and_then(|n| n.as_deref()) {
                     Some(given) if given.ends_with(".mjs") => {
                         ext = ".mjs";
@@ -2123,6 +2206,7 @@ impl<'a> Bundler<'a> {
                 },
                 Some(&root) => (format!("{}-{digest}", stem(root)), stem(root), false, false),
                 None => (format!("chunk-{digest}"), "chunk".to_string(), false, false),
+                },
             };
             chunk.base = name_base;
             chunk.given = given;
@@ -2136,6 +2220,109 @@ impl<'a> Bundler<'a> {
             chunk.file = name;
         }
         ChunkPlan { chunks, of_module, root_chunk }
+    }
+
+    /// Which group takes each module: `Some((group, named))` (an unnamed group makes one chunk for each set of roots), or `None` for a
+    /// module that stays in the chunk its roots make. A root is never taken. `chunks` decides which modules a group may take (reached
+    /// by an entry without a dynamic `import()`, only by dynamic ones, or both), `min_chunks` counts the roots of those kinds that reach
+    /// the module, the highest `priority` wins among the groups that match, and a group whose modules (in one chunk, when unnamed) total
+    /// less than `min_size` takes none of them (the next group that matches may). `enforce` ignores both minimums.
+    fn assign_groups(&self, roots: &[ModuleId], reach: &[Vec<u64>], dropped: &HashSet<usize>) -> Vec<Option<(usize, bool)>> {
+        let graph = self.graph;
+        let mut taken: Vec<Option<(usize, bool)>> = vec![None; graph.modules.len()];
+        let groups = &self.module_groups.groups;
+        if groups.is_empty() || self.module_groups.matches.is_empty() {
+            return taken;
+        }
+        let entry_count = graph.entries.len().min(roots.len());
+        let root_set: HashSet<ModuleId> = roots.iter().copied().collect();
+        let count_in = |bits: &[u64], from: usize, to: usize| -> usize { (from..to).filter(|i| bits[i / 64] >> (i % 64) & 1 == 1).count() };
+        // The modules each group could take: its test matched, and how the module is reached suits it.
+        let mut candidates: Vec<(ModuleId, Vec<usize>)> = Vec::new();
+        for module in &graph.modules {
+            let id = module.id;
+            let bits = &reach[id.index()];
+            if !self.included(id) || root_set.contains(&id) || bits.iter().all(|w| *w == 0) || module.css.is_some() || module.asset.is_some() {
+                continue;
+            }
+            let Some(matching) = self.module_groups.matches.get(&module.path) else { continue };
+            let (initial, deferred) = (count_in(bits, 0, entry_count), count_in(bits, entry_count, roots.len()));
+            let mut eligible: Vec<usize> = matching.iter().copied().filter(|g| *g < groups.len() && !dropped.contains(g)).collect();
+            eligible.retain(|&g| {
+                let group = &groups[g];
+                let (suits, count) = match group.chunks {
+                    GroupChunks::Initial => (initial > 0, initial),
+                    GroupChunks::Async => (initial == 0, deferred),
+                    GroupChunks::All => (true, initial + deferred),
+                };
+                suits && (group.enforce || count >= group.min_chunks)
+            });
+            if !eligible.is_empty() {
+                eligible.sort_by_key(|&g| (std::cmp::Reverse(groups[g].priority), g));
+                candidates.push((id, eligible));
+            }
+        }
+        // A group (or a chunk of an unnamed one) that is too small is given up, and its modules go to their next choice.
+        let mut refused: HashSet<(ModuleId, usize)> = HashSet::new();
+        loop {
+            let mut sizes: HashMap<(usize, Vec<u64>), (usize, Vec<ModuleId>)> = HashMap::new();
+            for (id, eligible) in &candidates {
+                let Some(&g) = eligible.iter().find(|g| !refused.contains(&(*id, **g))) else { continue };
+                let key = if groups[g].name.is_some() { Vec::new() } else { reach[id.index()].clone() };
+                let entry = sizes.entry((g, key)).or_insert((0, Vec::new()));
+                entry.0 += graph.module(*id).source.len();
+                entry.1.push(*id);
+            }
+            let mut changed = false;
+            for ((g, _), (size, members)) in &sizes {
+                if !groups[*g].enforce && *size < groups[*g].min_size {
+                    for m in members {
+                        changed |= refused.insert((*m, *g));
+                    }
+                }
+            }
+            if !changed {
+                for (id, eligible) in &candidates {
+                    if let Some(&g) = eligible.iter().find(|g| !refused.contains(&(*id, **g))) {
+                        taken[id.index()] = Some((g, groups[g].name.is_some()));
+                    }
+                }
+                return taken;
+            }
+        }
+    }
+
+    /// A cycle among the chunks that has a chunk of a group in it, as the group to give up (the first such chunk's), or `None`.
+    fn group_in_cycle(&self, links: &ChunkLinks) -> Option<usize> {
+        let n = self.plan.chunks.len();
+        // 0: not seen, 1: on the path, 2: done.
+        let mut state = vec![0u8; n];
+        for start in 0..n {
+            if state[start] != 0 {
+                continue;
+            }
+            let mut path: Vec<(usize, usize)> = vec![(start, 0)];
+            state[start] = 1;
+            while let Some(&(node, next)) = path.last() {
+                if next < links.deps[node].len() {
+                    path.last_mut().unwrap().1 += 1;
+                    let to = links.deps[node][next];
+                    if state[to] == 1 {
+                        let at = path.iter().position(|(c, _)| *c == to).unwrap_or(0);
+                        if let Some(g) = path[at..].iter().find_map(|(c, _)| self.plan.chunks[*c].group) {
+                            return Some(g);
+                        }
+                    } else if state[to] == 0 {
+                        state[to] = 1;
+                        path.push((to, 0));
+                    }
+                } else {
+                    state[node] = 2;
+                    path.pop();
+                }
+            }
+        }
+        None
     }
 
     /// The module a binding is declared in, if it is one of the bundle's (not an outside module).

@@ -1804,6 +1804,84 @@ async function wpBuildStart() {
   await c.hooks.finishMake.promise(compilation);
 }
 
+/**
+ * `optimization.splitChunks.cacheGroups` as the bundler's chunk groups: only the groups the config lists (webpack's implicit `defaultVendors` and
+ * `default` are not added). Returns the specs for the bundler, and keeps each group's `test` here, since a function cannot leave the host.
+ * `chunks` is `'initial'`, `'async'` (webpack's default) or `'all'` (a function is not supported: the group is left out, with a warning);
+ * `name` is a string (a function or none: one chunk for each set of entries and lazy chunks that need the modules); `priority`,
+ * `minChunks`, `minSize` (a number, or `{ javascript }`; webpack's default 20000 in production, 10000 otherwise) and `enforce` are the
+ * settings of the group, or of `splitChunks` itself.
+ */
+let splitGroupTests = [];
+function readSplitGroups(config, mode) {
+  splitGroupTests = [];
+  const sc = config?.optimization?.splitChunks;
+  const specs = [];
+  if (!sc || typeof sc !== 'object' || !sc.cacheGroups || typeof sc.cacheGroups !== 'object') return specs;
+  const number = (v, d) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
+  const size = (v, d) => (typeof v === 'number' && Number.isFinite(v) ? v : v && typeof v === 'object' && typeof v.javascript === 'number' ? v.javascript : d);
+  for (const [key, raw] of Object.entries(sc.cacheGroups)) {
+    if (!raw) continue;
+    const g = typeof raw === 'string' || typeof raw === 'function' || raw instanceof RegExp ? { test: raw } : raw;
+    if (typeof g !== 'object') continue;
+    const chunks = g.chunks ?? sc.chunks ?? 'async';
+    if (chunks !== 'initial' && chunks !== 'async' && chunks !== 'all') {
+      console.error(`warning: the cache group '${key}' has a "chunks" that is not 'initial', 'async' or 'all'; it is left out`);
+      continue;
+    }
+    const name = typeof g.name === 'string' ? g.name : typeof g.name === 'undefined' && typeof sc.name === 'string' ? sc.name : null;
+    specs.push({
+      key,
+      name,
+      chunks,
+      priority: number(g.priority, 0),
+      minChunks: Math.max(1, number(g.minChunks ?? sc.minChunks, 1)),
+      minSize: Math.max(0, size(g.minSize ?? sc.minSize, mode === 'production' ? 20000 : 10000)),
+      enforce: !!g.enforce,
+    });
+    splitGroupTests.push(g.test);
+  }
+  return specs;
+}
+
+/** Which cache groups each module matches, for a batch of module paths: `[[index into paths, [group indexes]], ...]`. Paths are tested in forward-slash form. */
+function matchSplitGroups(paths) {
+  const found = [];
+  const failed = new Set();
+  // The canonical form of a path: the real path when the file exists (no short 8.3 names, symlinks resolved), forward slashes, an upper-case drive letter.
+  const asPath = (v) => {
+    let text = String(v);
+    try { text = fs.realpathSync.native(text); } catch {}
+    text = text.replace(/\\/g, '/');
+    return /^[a-z]:\//.test(text) ? text[0].toUpperCase() + text.slice(1) : text;
+  };
+  paths.forEach((id, index) => {
+    const form = asPath(id);
+    const module = new NormalModule(form, { esm: true, code: moduleInfo.get(id)?.code ?? null });
+    const hits = [];
+    splitGroupTests.forEach((test, g) => {
+      let ok;
+      try {
+        if (test === undefined || test === true) ok = true;
+        else if (test === false || test === null) ok = false;
+        else if (typeof test === 'function') ok = !!test(module, { chunkGraph: wp.compilation?.chunkGraph ?? {}, moduleGraph: wp.compilation?.moduleGraph ?? {} });
+        else if (test instanceof RegExp) ok = ((test.lastIndex = 0), test.test(module.nameForCondition()));
+        else if (typeof test === 'string') ok = module.nameForCondition().startsWith(asPath(test));
+        else ok = false;
+      } catch (error) {
+        ok = false;
+        if (!failed.has(g)) {
+          failed.add(g);
+          console.error(`warning: the "test" of a cache group threw (${error?.message ?? error}); the group matches no module it threw for`);
+        }
+      }
+      if (ok) hits.push(g);
+    });
+    if (hits.length) found.push([index, hits]);
+  });
+  return found;
+}
+
 /** The finished module graph becomes the compilation's modules. */
 async function wpModules(modules) {
   const compilation = wp.compilation;

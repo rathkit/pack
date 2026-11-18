@@ -328,7 +328,7 @@ fn webpack(dir: &Path, package: Option<&Json>) -> Option<Finding> {
     serve.push_str(" --hmr");
     finding.commands.push(("dev:rkp".to_string(), serve));
     if text.contains("splitChunks") {
-        finding.notes.push("optimization.splitChunks is ignored; dynamic import() makes chunks with --splitting --outdir".to_string());
+        finding.notes.push("optimization.splitChunks.cacheGroups shape the chunks with --splitting (test, name, chunks, priority, minChunks, minSize, enforce); size splitting (maxSize) and runtimeChunk do not apply, and webpack's implicit groups are not added".to_string());
     }
     finding.notes.push("mode, output and devtool are not read from the config: they are on the command above (docs/migrate/webpack.md)".to_string());
     Some(finding)

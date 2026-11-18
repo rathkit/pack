@@ -1696,6 +1696,7 @@ async function init(params) {
     mainFields: resolveExtras.mainFields,
     extensions: Array.isArray(config.resolve?.extensions) ? config.resolve.extensions.filter((e) => typeof e === 'string') : [],
     sourcemap: devtoolMode(config.devtool),
+    splitGroups: readSplitGroups(config, config.mode ?? cli.mode ?? 'production'),
     publicPath: typeof config.output?.publicPath === 'string' && config.output.publicPath !== 'auto' ? config.output.publicPath : null,
     input: input ? (typeof input === 'string' ? [input] : Array.isArray(input) ? input : Object.values(input)) : [],
   };
@@ -1839,6 +1840,11 @@ const handlers = {
     if (wp.active) await wpModules(modules);
     for (const m of modules) if (!parsedEarly.has(m.id)) for (const plugin of hooksOf('moduleParsed')) await callHook(plugin, 'moduleParsed', [moduleInfo.get(m.id)]);
     return null;
+  },
+
+  /** The cache groups of `optimization.splitChunks` each module matches, all the tests run in this one call. */
+  async splitGroups({ paths }) {
+    return { matches: matchSplitGroups(paths) };
   },
 
   async watchFiles() {
