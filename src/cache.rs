@@ -61,7 +61,7 @@ fn fnv(data: &[u8]) -> u64 {
 /// Everything but the text that the answer depends on.
 fn context(layout: &Layout, options: &Options, with_anchors: bool) -> String {
     let mode = std::env::var("RATHKIT_FRAGMENTS").unwrap_or_default();
-    format!("{} {options:?} {layout:?} anchors={with_anchors} fragments={mode} workers={}", program(), crate::par::workers())
+    format!("{} {options:?} {layout:?} anchors={with_anchors} fragments={mode}", program())
 }
 
 struct Reader<'a>(&'a [u8]);

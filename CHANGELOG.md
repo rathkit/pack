@@ -51,6 +51,11 @@ about stability.
   `optimizeDeps`, and `build.rollupOptions.external` from a config hook is honored; the resolved config has `preview`, `createResolver` and the plugin list; a hook filter
   given as a glob matches as a glob; and a loaded module whose code opens with an assignment is not read as the file's own type (`vite-plugin-wasm`).
 
+- The minified text of a bundle no longer depends on the number of cores. A bundle of 96 KB of text or more is cut into 32 pieces on every machine; it was cut by the
+  number of threads, and not at all on one core, so the same bundle gave a different text on one, two, four and sixteen cores (lodash-es was 1.6 KB smaller on one core, three.js
+  differed at every count). A machine of eight threads writes what it wrote before, so the benchmark figures stand; others may see a few bytes of difference from
+  0.3.0-beta.0.
+
 ### Added
 
 - An optional cache for the minifier, off unless `RATHKIT_CACHE=on` (or `1`, `true`, `yes`): a one-shot minified build keeps what the minifier made of each chunk of 16 KB
@@ -82,8 +87,6 @@ about stability.
 - The cache does not make the development server or watch mode start faster; their time is in parsing and scanning (#26).
 - A bundle of 96 KB of text or more is minified in pieces, and a constant declared at the top level of a piece is not written at its one read, because
   another piece may read it. A whole-bundle count of reads would allow it; lodash-es is about 1.6 KB larger without it.
-- The minified text of a bundle can differ by a few bytes between machines with different numbers of cores, because the pieces the minifier works on
-  are split by the number of threads. The output is the same for the same number of cores.
 - Of esbuild's options, the ones Pack does not support are listed in `docs/esbuild-conformance.md`; among them are the formats `umd`, `amd` and `system`.
 - `SplitChunksPlugin` settings are accepted but none decides how chunks are laid out, because Pack has no manual-chunks facility. The other gaps of the webpack, Rollup and
   Vite plugin tables are listed in `docs/webpack-conformance.md` and `docs/rollup-vite-conformance.md`.
