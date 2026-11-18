@@ -100,10 +100,10 @@ Performance bars met: time, size and memory at or beyond the other benchmarked t
 The Nx plugin: inferred tasks, executors, init, library builds, a repository of its own, tested against Nx versions.
 
 - [ ] [9.1](https://github.com/rathkit/pack/issues/29) Spike: an Nx workspace builds an app and a library with rkp through a custom executor `P0`
-- [ ] [9.2](https://github.com/rathkit/pack/issues/30) The rathkit/nx repository and the @rathkit/nx package *(maintainer)* `P0`
+- [ ] [9.2](https://github.com/rathkit/pack/issues/30) The rathkit/nx-plugin repository and the @rathkit/nx-plugin package *(maintainer)* `P0`
 - [ ] [9.3](https://github.com/rathkit/pack/issues/31) Nx inferred tasks (createNodesV2): build, serve, watch with inputs, outputs, cache and dependsOn `P0`
 - [ ] [9.4](https://github.com/rathkit/pack/issues/32) Nx executors build and serve for project.json `P1`
-- [ ] [9.5](https://github.com/rathkit/pack/issues/33) Nx init generator, so nx add @rathkit/nx works `P0`
+- [ ] [9.5](https://github.com/rathkit/pack/issues/33) Nx init generator, so nx add @rathkit/nx-plugin works `P0`
 - [ ] [9.9](https://github.com/rathkit/pack/issues/34) Nx buildable and publishable libraries (library mode, declarations, exports) `P1`
 - [ ] [9.10](https://github.com/rathkit/pack/issues/35) Nx version matrix in CI and cache-correctness tests `P0`
 
