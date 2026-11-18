@@ -80,6 +80,10 @@ about stability.
   `docs/rollup-vite-conformance.md` (53 Rollup and 50 Vite plugins; 103 fixtures). They run in CI (`tools/run-webpack-conformance.mjs`,
   `tools/run-rollup-vite-conformance.mjs`).
 
+- The README states what Pack writes, changes and deletes ("What Pack writes and deletes"), and `tools/run-writes.mjs` checks it in CI on Linux: it runs each command in a sandbox
+  with its own home, cache and temporary folders, compares the whole folder before and after, and fails on anything unstated. One thing is written outside the project
+  without a name: `rkp serve --https` keeps a certificate and key for `localhost` in the user cache folder.
+
 ### Known gaps
 
 - Source maps still add 20 to 25% to a minified build on the TypeScript compiler, three.js, React, rxjs, Zod and the 500-module TypeScript app (#25).

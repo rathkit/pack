@@ -469,6 +469,30 @@ The oracles that need outside packages (`acorn`, `typescript`, a project with a 
 location (`ACORN_DIR`, `TS_MODULE`, a project path argument); without them `cargo test` skips those comparisons and says so.
 The numbers above were measured on the development machine against its own `node_modules`.
 
+## What Pack writes and deletes
+
+Pack writes the files you ask for, changes the files you point it at, and deletes none of yours. `node tools/run-writes.mjs` checks this section: it
+runs each command in a folder of its own (with `HOME`, the cache folder and the temporary folder inside it), compares the whole folder before and
+after, and fails if anything appears, changes or goes that is not listed here.
+
+- **`rkp bundle`** writes the file of `--outfile`, or the files in `--outdir`, and what the options ask for next to them: `.map` files
+  (`--sourcemap`), `.LEGAL.txt` (`--legal-comments=linked` or `external`), `.d.ts` files (`--dts`; `--dts-dir` names their folder), the file of
+  `--metafile`, the files of a module federation build (`remoteEntry.js`, `mf-manifest.json`, an `@mf-types` folder and its zip), and, for a page,
+  the page, its scripts and style sheets, the images it names and the files of `public/`.
+- **It never empties an output folder.** A file that is already there stays unless the build writes a file of the same name. A page build writes a
+  stand-in script for each style sheet and removes it again, inside the output folder.
+- **A build that would write over one of its own input files stops** with an error; `--allow-overwrite` lets it.
+- **`--write-exports[=FILE]`** edits `main`, `module`, `types` and `exports` in the `package.json` (or the file named) and keeps its other fields.
+- **`rkp migrate`** prints; with `--write` it adds scripts (`build:rkp`, `dev:rkp`) to `package.json` and never changes a script that is there.
+  **`rkp analyze`** prints, or writes the page named by `--outfile`.
+- **`rkp serve`** writes nothing, and keeps pages in memory. With `--https` it makes a certificate and private key for `localhost` once and keeps
+  them (mode 0600) in your cache folder (`$XDG_CACHE_HOME/rathkit/` or `~/.cache/rathkit/` on Linux): the one thing Pack writes outside the project
+  without being told a name.
+- **The minifier cache** is off unless `RATHKIT_CACHE=on`; then it writes under `$XDG_CACHE_HOME/rathkit/minify` (or `RATHKIT_CACHE_DIR`), keeps that
+  folder under 512 MB by removing its oldest entries, and deletes nothing else.
+- **Temporary folders.** The HTTPS certificate request, the declarations of a federation build and the optional checker each make a private folder
+  in the system's temporary folder and remove it when they are done.
+
 ## Requirements
 
 Rust (stable) to build. Node.js **24 or later** is needed only when plugins are used (`--config`, `.parcelrc`, `serve` with
