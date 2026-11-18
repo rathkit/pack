@@ -571,7 +571,9 @@ class WebpackError extends Error {
 
 // ---- modules and chunks as plugins see them ---------------------------------------------------
 
-const relativeId = (id) => (path.isAbsolute(id) ? path.relative(root, id).split(path.sep).join('/') || id : id.replace(/^\0/, ''));
+// On Windows a file on another drive has no relative path: path.relative gives it back absolute.
+const otherDrive = (id) => path.isAbsolute(id) && path.isAbsolute(path.relative(root, id));
+const relativeId = (id) => (path.isAbsolute(id) ? (otherDrive(id) ? id.split(path.sep).join('/') : path.relative(root, id).split(path.sep).join('/') || id) : id.replace(/^\0/, ''));
 
 class NormalModule {
   constructor(id, info = {}) {
@@ -610,7 +612,7 @@ class NormalModule {
     return typeof requestShortener?.shorten === 'function' ? requestShortener.shorten(this.resource) : relativeId(this.resource);
   }
   libIdent() {
-    return './' + relativeId(this.resource);
+    return otherDrive(this.resource) ? relativeId(this.resource) : './' + relativeId(this.resource);
   }
   nameForCondition() {
     return this.resource.split('?')[0];

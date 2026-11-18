@@ -858,7 +858,10 @@ const contextify = (context, request) => {
   const split = (r) => r.split('!').map((part) => {
     const [file, ...q] = part.split('?');
     if (!path.isAbsolute(file)) return part;
-    let rel = path.relative(context, file).split(path.sep).join('/');
+    const relative = path.relative(context, file);
+    // On Windows a file on another drive has no relative path: path.relative gives it back absolute, and it stays as it was.
+    if (path.isAbsolute(relative)) return part;
+    let rel = relative.split(path.sep).join('/');
     if (!rel.startsWith('.')) rel = './' + rel;
     return [rel, ...q].join('?');
   });
