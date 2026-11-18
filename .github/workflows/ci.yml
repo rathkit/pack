@@ -98,6 +98,7 @@ jobs:
       - run: node tools/check-promises.mjs
       - run: node tools/run-split.mjs
       - run: node tools/run-worstcase.mjs
+      - run: node tools/run-writes.mjs
       - run: node tools/run-library.mjs
       - run: node tools/run-esbuild-conformance.mjs
       - run: node tools/run-migrate.mjs
