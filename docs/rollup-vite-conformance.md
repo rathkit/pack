@@ -144,8 +144,8 @@ Vite's own plugins (the CSS, asset, JSON and `import.meta.glob` ones) are built 
 
 Each of these is a candidate for an issue:
 1. `vite-plugin-singlefile`: an HTML entry's page is not in the `bundle` that `generateBundle` receives, so the plugin cannot inline the script into it.
-2. `vite-plugin-md` (Markdown as a Vue component): `plugin-vue`'s `?vue&type=script&setup=true&lang.ts` request for an `.md` file is read as the file's own type, and the output is a string.
+2. `vite-plugin-md` (Markdown as a Vue component; not installed in `test-deps` any more, because its dependencies carry known advisories and no fixture uses it, so this was checked once and is not rerun): `plugin-vue`'s `?vue&type=script&setup=true&lang.ts` request for an `.md` file is read as the file's own type, and the output is a string.
 3. `vite-plugin-babel` imports `@babel/core` as a default export, which Babel 8 does not have; it fails to load in Node too, so there is no fixture (`@rollup/plugin-babel` is covered).
-4. `vite-plugin-top-level-await` fails with "missing field `type`" under Vite 8 itself with the pinned `@swc/core`; top-level await needs no plugin here (it is native, for the esm format).
+4. `vite-plugin-top-level-await` (not installed in `test-deps` any more, for the same reason as `vite-plugin-md`) fails with "missing field `type`" under Vite 8 itself with the pinned `@swc/core`; top-level await needs no plugin here (it is native, for the esm format).
 5. `@vitejs/plugin-legacy` is skipped (one bundle, no `nomodule` pass).
 6. `vite-plugin-node-polyfills` on a browser build (`--platform-browser`): `import path from 'path'` stops with "No matching export in 'path'", where the other three Node polyfill plugins supply the module.
