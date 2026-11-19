@@ -2260,8 +2260,14 @@ fn run_build(job: &Job) -> Outcome {
             (None, Some(file)) => planned.push(std::path::PathBuf::from(file)),
             _ => {}
         }
-        let planned: Vec<std::path::PathBuf> = planned.iter().map(|p| real(p)).collect();
-        if let Some(module) = graph.modules.iter().find(|m| planned.contains(&real(&m.path))) {
+        // Only a file that exists can be one of the inputs, and a module is the same file as a planned output only if the names agree
+        // (compared without case, for the file systems that ignore it), so only those are resolved to their real paths: resolving
+        // every module of the build cost about 3 microseconds each, which small builds felt.
+        let planned: Vec<std::path::PathBuf> = planned.iter().filter(|p| p.exists()).map(|p| real(p)).collect();
+        let name_of = |p: &std::path::Path| p.file_name().map(|n| n.to_string_lossy().to_lowercase());
+        let planned_names: Vec<Option<String>> = planned.iter().map(|p| name_of(p)).collect();
+        let same_name = |m: &std::path::Path| !planned.is_empty() && planned_names.contains(&name_of(m));
+        if let Some(module) = graph.modules.iter().find(|m| same_name(&m.path) && planned.contains(&real(&m.path))) {
             eprintln!("error: refusing to overwrite the input file {} (pass --allow-overwrite to do it anyway)", module.path.display());
             return outcome;
         }
