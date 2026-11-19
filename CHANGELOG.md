@@ -16,7 +16,7 @@ What an alpha or beta does promise, and checks on every change (`tools/check-pro
 scripts in any package, a build that needs no network, provenance and checksums on every release. It promises nothing
 about stability.
 
-## Unreleased
+## 0.4.0-beta.0 - 2026-11-19
 
 ### Changed
 
@@ -101,6 +101,11 @@ about stability.
 - `SplitChunksPlugin`: `chunks` and `name` as functions, `filename`, `reuseExistingChunk`, the request limits (`maxAsyncRequests`, `maxInitialRequests`) and webpack's implicit
   default groups are not followed; the modules a group takes run before the rest of the chunk they came from (webpack keeps the original order); the Windows path form of a group's `test` is written but only Linux ran it. The other gaps of the webpack, Rollup and
   Vite plugin tables are listed in `docs/webpack-conformance.md` and `docs/rollup-vite-conformance.md`.
+- On the container benchmark of this release (docs/benchmarks.md), Pack is ahead of esbuild on time and memory in all 45 build cases, on minified size and gzip in all 30 minified
+  cases, on warm rebuild in all 30 cases and on HMR latency in all 14. Against the other tools, one time win of 0.3.0-beta.0 is gone: the warm minified rebuild of D3 is 9.7 ms for Pack,
+  as before, and 7.7 ms for Parcel 3, which was 9.9 ms in that run (Parcel 3's own runs vary by that much). Builds of very small projects take about 1 ms longer than with 0.3.0-beta.0 (date-fns
+  minified 14 to 15 ms, the monorepo plain 11 to 12 ms; esbuild takes 27 and 21 ms): the output-size work above costs 0.3 to 0.4 ms of it, and a check that the build does not overwrite
+  its own input cost 1.2 ms more until it was narrowed before this release.
 
 ## 0.3.0-beta.0 - 2026-11-16
 
