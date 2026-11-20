@@ -88,6 +88,7 @@ const cases = [
   { name: 'the minifier cache is off by default', args: ['bundle', 'src/big.js', '--minify', '--outfile', 'out/app.mjs'], created: ['proj/out/app.mjs'] },
   { name: 'RATHKIT_CACHE=on writes its entries in the cache folder', args: ['bundle', 'src/big.js', '--minify', '--outfile', 'out/app.mjs'], env: { RATHKIT_CACHE: 'on' }, created: ['proj/out/app.mjs', 'home/.cache/rathkit/minify/*.min'] },
   { name: 'rkp serve writes nothing', args: ['serve', 'index.html'], serve: 5391, created: [] },
+  { name: 'rkp serve --ready-file writes that file', args: ['serve', 'index.html', '--ready-file=ready.json'], serve: 5393, created: ['proj/ready.json'] },
   { name: 'rkp serve --https keeps a certificate and key in the cache folder', args: ['serve', 'index.html', '--https'], serve: 5392, created: ['home/.cache/rathkit/dev-cert.pem', 'home/.cache/rathkit/dev-key.pem'] },
 ];
 
