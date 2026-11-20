@@ -196,7 +196,11 @@ fn rollup_with_the_output_built_in_code_gets_an_outfile() {
     std::fs::write(dir.join("rollup.config.js"), "const output = (file) => ({ input: 'index.js', output: { name: 'X', file } });\nexport default [output('x.js')];\n").unwrap();
     std::fs::write(dir.join("index.js"), "export const x = 1;\n").unwrap();
     let out = stdout(&rkp(&dir, &["migrate"]));
-    assert!(out.contains("build:rkp: rkp bundle index.js --global-name=X --outfile dist/index.js") || out.contains("--outfile dist/index.js"), "{out}");
+    // The file name is built by a function: running the config gives it exactly (no stand-in).
+    assert!(out.contains("build:rkp: rkp bundle index.js --outfile x.js\n") && !out.contains("stand-in"), "{out}");
+    // Without running it, the stand-in is all the text gives.
+    let out = stdout(&rkp(&dir, &["migrate", "--no-run"]));
+    assert!(out.contains("--outfile dist/index.js") && out.contains("stand-in"), "{out}");
 }
 
 #[test]
@@ -232,4 +236,42 @@ fn a_config_in_a_subfolder_is_found_by_the_script_or_by_a_search() {
     std::fs::remove_file(dir.join("config/rollup.config.mjs")).unwrap();
     std::fs::write(dir.join("package.json"), "{\"scripts\":{\"build\":\"rollup -c ../rollup.config.js\"}}").unwrap();
     assert_eq!(rkp(&dir, &["migrate"]).status.code(), Some(1));
+}
+
+#[test]
+fn rollup_values_built_in_code_are_read_by_running_the_config() {
+    let dir = copy("rollup-code");
+    let out = stdout(&rkp(&dir, &["migrate"]));
+    assert!(out.contains("build:rkp: rkp bundle src/index.js --outfile dist/sample.js\n"), "{out}");
+    assert!(out.contains("build:rkp-2: rkp bundle src/index.js --outfile dist/sample.cjs --format=cjs --sourcemap\n"), "{out}");
+    assert!(out.contains("build:rkp-3: rkp bundle src/index.js --outfile dist/sample.umd.js --format=iife --global-name=Sample\n") , "{out}");
+    assert!(out.contains("rkp bundle src/a.js src/b.js --outdir dist/split --splitting\n"), "{out}");
+    assert!(out.contains("note: the values of rollup.config.js were read by running it"), "{out}");
+    // Every printed command builds.
+    for line in out.lines().filter_map(|l| l.trim_start().strip_prefix("build:rkp")) {
+        let command = line.split_once(": ").unwrap().1;
+        let args = words(command);
+        let built = rkp(&dir, &args[1..].iter().map(String::as_str).collect::<Vec<_>>());
+        assert!(built.status.success(), "{command}: {}", String::from_utf8_lossy(&built.stderr));
+    }
+    assert!(dir.join("dist/sample.cjs").is_file() && dir.join("dist/split").is_dir());
+    // `--write` adds every command under a name of its own.
+    stdout(&rkp(&dir, &["migrate", "--write"]));
+    assert!(script(&dir, "build:rkp-2").contains("--format=cjs"));
+    // `--no-run` reads the text only: the input is not a plain string, so there is no command.
+    let out = stdout(&rkp(&dir, &["migrate", "--no-run"]));
+    assert!(!out.contains("build:rkp") && !out.contains("were read by running it"), "{out}");
+}
+
+#[test]
+fn a_config_that_writes_or_runs_programs_is_not_run_to_completion() {
+    let dir = std::env::temp_dir().join(format!("rkp-migrate-unsafe-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("package.json"), "{\"type\":\"module\",\"devDependencies\":{\"rollup\":\"1\"}}").unwrap();
+    // Writes a file and starts a program while loading; under the permission model both are refused, so the config is not run and the
+    // text is all there is (the input is a variable: no command).
+    std::fs::write(dir.join("rollup.config.js"), "import fs from 'node:fs';\nimport { execSync } from 'node:child_process';\nconst input = 'a.js';\nfs.writeFileSync('written.txt', 'x');\nexecSync('echo hi > spawned.txt');\nexport default { input, output: { file: 'out.js' } };\n").unwrap();
+    let out = stdout(&rkp(&dir, &["migrate"]));
+    assert!(!out.contains("were read by running it"), "{out}");
+    assert!(!dir.join("written.txt").exists() && !dir.join("spawned.txt").exists());
 }
