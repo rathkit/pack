@@ -102,3 +102,43 @@ fn a_single_output_file_is_in_the_list_with_its_map() {
     assert_eq!(names, ["out/app.js", "out/app.js.map"]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A project laid out as `root/app` and `root/shared`; `app/src/main.js` imports `shared/lib.js`.
+fn checkout(root: &std::path::Path) {
+    std::fs::create_dir_all(root.join("app/src")).unwrap();
+    std::fs::create_dir_all(root.join("shared")).unwrap();
+    std::fs::write(root.join("app/src/main.js"), "import { lib } from '../../shared/lib.js';\nconsole.log(lib);\n").unwrap();
+    std::fs::write(root.join("shared/lib.js"), "export const lib = 1;\n").unwrap();
+}
+
+#[test]
+fn the_same_build_in_two_checkouts_writes_the_same_metafile() {
+    let base = scratch("checkouts");
+    let mut texts = Vec::new();
+    for name in ["one", "two"] {
+        // Different depths: the project itself is below the folder, and the folder is in different places.
+        let root = base.join(name).join(name);
+        checkout(&root);
+        let built = rkp(&root.join("app"), &["bundle", "src/main.js", "--outdir", "dist", "--splitting", "--metafile=meta.json"]);
+        assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+        texts.push(std::fs::read_to_string(root.join("app/meta.json")).unwrap());
+    }
+    assert_eq!(texts[0], texts[1]);
+    let meta = Json::parse(&texts[0]).unwrap();
+    // Inside the project the path starts at the project, outside it goes through `..`, outputs are named like inputs.
+    assert!(meta.get("inputs").unwrap().get("src/main.js").is_some(), "{}", texts[0]);
+    assert!(meta.get("inputs").unwrap().get("../shared/lib.js").is_some(), "{}", texts[0]);
+    assert!(meta.get("outputs").unwrap().get("dist/main.js").is_some(), "{}", texts[0]);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn an_output_folder_beside_the_project_is_named_through_dot_dot() {
+    let base = scratch("outside");
+    checkout(&base);
+    let built = rkp(&base.join("app"), &["bundle", "src/main.js", "--outdir", "../out", "--metafile=meta.json"]);
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    let meta = Json::parse(&std::fs::read_to_string(base.join("app/meta.json")).unwrap()).unwrap();
+    assert!(meta.get("outputs").unwrap().get("../out/bundle.js").is_some(), "{meta:?}");
+    let _ = std::fs::remove_dir_all(&base);
+}
