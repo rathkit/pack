@@ -6,7 +6,7 @@ Summary: 63 projects; 34 have one of the tools; 30 print a command that builds (
 
 Bugs this check found and fixed (tests in tests/migrate_command.rs): a vite.config that only configures Vitest or vite as a dependency of a library with no page printed a Vite command; Rollup configs with an input that is not a plain string printed the usage text as the command; a Rollup config that builds its output file in code printed a command that writes nothing; Vite base read from a variable was dropped without a word; rspack was not detected.
 
-Known differences from the corpus runner's command (not bugs of migrate; the guide says so): migrate adds --minify for Vite and does not carry --public-path when base is not a plain string (vite-react-ts-less takes it from VITE_BASE_PATH; the note says to add it); the library projects are built by the runner with --format esm --outfile out/NAME.mjs, which no config of theirs states.
+Known differences from the corpus runner's command (not bugs of migrate; the guide says so): migrate adds --minify for Vite and, since #124, carries --public-path when base is a constant or a variable that the project sets (vite-react-ts-less takes it from the constant VITE_BASE_PATH = '/' of config/constant.ts, so its command now has --public-path=/); the library projects are built by the runner with --format esm --outfile out/NAME.mjs, which no config of theirs states.
 
 | Project | Detected | rkp migrate command | Built | --write |
 |---|---|---|---|---|
@@ -42,7 +42,7 @@ Known differences from the corpus runner's command (not bugs of migrate; the gui
 | tanstack-query-simple | vite | `rkp bundle index.html --config vite.config.ts --outdir dist --minify` | ok | unchanged |
 | solid-template-unocss | vite | `rkp bundle index.html --config vite.config.ts --outdir dist --minify` | ok | unchanged |
 | vite-playground-tailwind-v3 | vite | `rkp bundle index.html --config vite.config.ts --outdir dist --minify` | ok | unchanged |
-| vite-react-ts-less | vite | `rkp bundle index.html --config vite.config.ts --outdir dist --minify` | ok | unchanged |
+| vite-react-ts-less | vite | `rkp bundle index.html --config vite.config.ts --outdir dist --minify --public-path=/` (since #124; before it had no --public-path and its page failed in a browser, #125) | ok | unchanged |
 | sass-postcss-no-config | vite | `rkp bundle index.html --config vite.config.js --outdir dist --minify` | ok | unchanged |
 
 Not detected (`rkp migrate` exits 1 and says so), 29 projects: mitt, nanoid, immer, clsx, ky, commander, semver, kleur, picocolors, json-server, defu, ufo, pathe, destr, scule, citty, consola, jotai, nanostores, ms, dequal, p-limit, p-map, chalk, ansi-styles, cac, flatbush, htm, uPlot. None has a config or build dependency of esbuild, Vite, webpack, Rollup or rspack; nanoid, immer, pathe, citty, jotai and cac list `vite` or a vite.config only for Vitest, which is what the detection should skip, and kleur builds with its own script.

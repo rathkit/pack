@@ -219,7 +219,7 @@ rkp bundle src/main.ts --outfile dist/app.mjs
 - `rkp migrate [DIR] [--write] [--no-run]` says which of esbuild, Vite, webpack and Rollup a project uses (a config file in the root, in a subfolder that a script names (`rollup -c build/rollup.config.js`) or two levels down, a dependency, a
   package.json script that runs `esbuild`, or a file that imports it) and prints the `rkp` commands that do the same build, with notes
   on what does not carry over, as in [docs/migrate/](docs/migrate/README.md). The config files are read as text for the plain strings the
-  commands need (`outDir`, `entry`, `output.file`, `format`): what is not a plain string is left to `--config`, which reads the file
+  commands need (`outDir`, `entry`, `output.file`, `format`): what is not a plain string is left to `--config` (a Vite `base` that is a constant, or a variable a `.env` file sets, is followed; `build.lib` and several pages in `rollupOptions.input` get library and multi-page commands), which reads the file
   for real. A Rollup config (JavaScript) whose input or output is not a plain string (a function, a list built in code) is run in Node's
   permission model (no writes, no child processes, 20 seconds at most) to read the exact values, one command for each output; if it cannot
   be run (a plugin is not installed, Node is too old, it needs to write) the text is used as before, and `--no-run` never runs it. `--write` adds the commands to the `scripts` of package.json as `build:rkp` and `dev:rkp` (`build:rkp-vite`, ... when there
