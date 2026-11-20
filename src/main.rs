@@ -1767,9 +1767,29 @@ fn write_pages(job: &Job, dir: &std::path::Path, output: &rathkit_pack::bundle::
             let Some(chunk) = built else { return Err(format!("{}: no built file for {}", page.file.display(), reference.src)) };
             let file = if is_sheet {
                 // A sheet is built as an entry: its rules are in the `.css` beside the (empty) script.
-                let sheet = format!("{}{css_extension}", chunk.file.rsplit_once('.').map_or(chunk.file.as_str(), |(stem, _)| stem));
+                let sheet_of = |file: &str| format!("{}{css_extension}", file.rsplit_once('.').map_or(file, |(stem, _)| stem));
+                let mut sheet = sheet_of(&chunk.file);
                 if !output.files.iter().any(|f| f.name == sheet) {
-                    return Err(format!("{}: no built style sheet for {}", page.file.display(), reference.src));
+                    // A script of the page imports the same sheet, so its rules are in a chunk that both load: the sheet of the first
+                    // chunk the stand-in imports that has one (the others are linked at the end of the head, as every sheet that is not named).
+                    let mut seen = vec![chunk.file.clone()];
+                    let mut at = 0;
+                    let mut found = None;
+                    while at < seen.len() && found.is_none() {
+                        if let Some(info) = output.chunks.iter().find(|c| c.file == seen[at]) {
+                            for name in &info.imports {
+                                if !seen.contains(name) && output.chunks.iter().any(|c| c.file == *name) {
+                                    seen.push(name.clone());
+                                    let own = sheet_of(name);
+                                    if found.is_none() && output.files.iter().any(|f| f.name == own) {
+                                        found = Some(own);
+                                    }
+                                }
+                            }
+                        }
+                        at += 1;
+                    }
+                    sheet = found.ok_or_else(|| format!("{}: no built style sheet for {}", page.file.display(), reference.src))?;
                 }
                 if !single {
                     let _ = std::fs::remove_file(dir.join(&chunk.file));
