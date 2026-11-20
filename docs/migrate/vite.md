@@ -47,7 +47,9 @@ Read: `define`, `resolve.alias`, `plugins`, and what plugins' `config` hooks set
 | `build.minify` (on by default in Vite) | `--minify` |
 | `build.sourcemap` | `--sourcemap`, `--sourcemap=inline` |
 | `build.target` | `--target=es2020,chrome80`, or a `browserslist` |
-| `base` | `--public-path=/app/` (also `import.meta.env.BASE_URL`) |
+| `base` | `--public-path=/app/` (also `import.meta.env.BASE_URL`). `rkp migrate` takes the value when the config writes it, or names a constant of the config or of a file it imports, or a variable (`process.env.NAME`, `import.meta.env.NAME`, `loadEnv`) that a `.env`, `.env.local`, `.env.production` or `.env.production.local` file of the project sets; when it cannot know, its note names the variable and asks for the value. A `base` of `/` is kept as `--public-path=/`; without a `base`, nothing is added |
+| `build.lib` | one `rkp bundle ENTRY --outfile OUTDIR/FILE` for each format, with the file name Vite gives (`fileName`, or the package name; `.js` or `.mjs`, `.cjs`, `.umd.cjs`, `.iife.js`), `--external` for `rollupOptions.external` and `--global` for `output.globals`. `umd` is an iife with `--global-name` (no wrapper that `require` reads). Several entries are one `--format esm,cjs --outdir` command, named after the entries |
+| `build.rollupOptions.input` (several pages) | `rkp bundle index.html about.html ... --outdir dist`. Pages with the same file name in different folders (`nested/index.html`) would overwrite one another in the output folder (rkp writes each page under its file name), so the command has `index.html` only and the note says so |
 | `mode`, `--mode staging` | `--mode staging` |
 | `envDir`, `envPrefix` | `--env-dir DIR`, `--env-prefix PREFIX` |
 | `build.lib` | `--format esm,cjs`, see the README's library mode |

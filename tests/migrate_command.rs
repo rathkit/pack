@@ -233,3 +233,88 @@ fn a_config_in_a_subfolder_is_found_by_the_script_or_by_a_search() {
     std::fs::write(dir.join("package.json"), "{\"scripts\":{\"build\":\"rollup -c ../rollup.config.js\"}}").unwrap();
     assert_eq!(rkp(&dir, &["migrate"]).status.code(), Some(1));
 }
+
+/// A project with Vite, a page, the config text and the extra files given as (name, text).
+fn vite_project(label: &str, config: &str, files: &[(&str, &str)]) -> PathBuf {
+    static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("rkp-migrate-vite-{label}-{}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("package.json"), "{\"devDependencies\":{\"vite\":\"1\"}}").unwrap();
+    std::fs::write(dir.join("index.html"), "<script type=module src=/main.js></script>").unwrap();
+    std::fs::write(dir.join("vite.config.js"), config).unwrap();
+    for (name, text) in files {
+        if let Some(parent) = Path::new(name).parent() {
+            std::fs::create_dir_all(dir.join(parent)).unwrap();
+        }
+        std::fs::write(dir.join(name), text).unwrap();
+    }
+    dir
+}
+
+#[test]
+fn vite_base_from_the_environment_or_a_constant_is_mapped_to_public_path() {
+    // A variable that a .env file of the project sets.
+    let dir = vite_project("env", "export default { base: process.env.VITE_BASE };\n", &[(".env.production", "VITE_BASE=\"/app/\"\n")]);
+    let out = stdout(&rkp(&dir, &["migrate"]));
+    assert!(out.contains("--minify --public-path=/app/") && !out.contains("note: base"), "{out}");
+    // `loadEnv` and a fallback when nothing sets it.
+    let dir = vite_project("load-env", "export default ({ mode }) => { const env = loadEnv(mode, process.cwd(), ''); return { base: env.APP_BASE || '/fallback/' }; };\n", &[]);
+    assert!(stdout(&rkp(&dir, &["migrate"])).contains("--public-path=/fallback/"));
+    // A variable that nothing sets: the note names it.
+    let dir = vite_project("unset", "export default { base: import.meta.env.APP_BASE };\n", &[]);
+    let out = stdout(&rkp(&dir, &["migrate"]));
+    assert!(out.contains("note: base is not a plain string in the config: it is read from the environment variable APP_BASE") && !out.contains("--minify --public-path"), "{out}");
+    // A constant of a file that the config imports, or of the config itself. An explicit `/` is kept: Vite's links are then absolute,
+    // and rkp's are relative without the flag.
+    let imported = |value: &str| vite_project("const", "import { VITE_BASE_PATH } from './config/constant';\nexport default { base: VITE_BASE_PATH };\n", &[("config/constant.ts", &format!("export const PORT = 1;\nexport const VITE_BASE_PATH = '{value}';\n"))]);
+    assert!(stdout(&rkp(&imported("/sub/"), &["migrate"])).contains("--public-path=/sub/"));
+    let out = stdout(&rkp(&imported("/"), &["migrate"]));
+    assert!(out.contains("--minify --public-path=/\n") && !out.contains("note: base"), "{out}");
+    let dir = vite_project("local", "const BASE = '/here/';\nexport default { base: BASE };\n", &[]);
+    assert!(stdout(&rkp(&dir, &["migrate"])).contains("--public-path=/here/"));
+    // A function result: the note says what the expression is.
+    let dir = vite_project("call", "export default { base: computeBase() };\n", &[]);
+    let out = stdout(&rkp(&dir, &["migrate"]));
+    assert!(out.contains("note: base is not a plain string in the config (computeBase(), from the config)"), "{out}");
+}
+
+#[test]
+fn vite_build_lib_is_mapped_to_library_commands() {
+    let dir = copy("vite-lib");
+    let out = stdout(&rkp(&dir, &["migrate"]));
+    assert!(!out.contains("rkp bundle index.html") && !out.contains("dev:rkp"), "{out}");
+    assert!(out.contains("build:rkp: rkp bundle src/index.js --outfile lib/sample.js --external vue --config vite.config.js\n"), "{out}");
+    assert!(out.contains("build:rkp-2: rkp bundle src/index.js --format=cjs --outfile lib/sample.cjs --external vue --config vite.config.js\n"), "{out}");
+    assert!(out.contains("build:rkp-3: rkp bundle src/index.js --format=iife --global-name=SampleLib --global vue=Vue --outfile lib/sample.umd.cjs --external vue --config vite.config.js\n"), "{out}");
+    assert!(out.contains("note: build.lib format umd: rkp has no UMD wrapper"), "{out}");
+    for line in out.lines().filter_map(|l| l.trim_start().strip_prefix("build:rkp")) {
+        let command = line.split_once(": ").unwrap().1;
+        let args = words(command);
+        let built = rkp(&dir, &args[1..].iter().map(String::as_str).collect::<Vec<_>>());
+        assert!(built.status.success(), "{command}: {}", String::from_utf8_lossy(&built.stderr));
+    }
+    for file in ["sample.js", "sample.cjs", "sample.umd.cjs"] {
+        assert!(dir.join("lib").join(file).is_file(), "{file}");
+    }
+    // Several entries and the default formats (es and cjs): one command with an output folder.
+    let dir = vite_project("lib-many", "export default { build: { lib: { entry: ['src/a.js', 'src/b.js'] } } };\n", &[]);
+    let out = stdout(&rkp(&dir, &["migrate"]));
+    assert!(out.contains("build:rkp: rkp bundle src/a.js src/b.js --format esm,cjs --outdir dist --config vite.config.js\n"), "{out}");
+}
+
+#[test]
+fn vite_multi_page_input_is_mapped_to_several_entries() {
+    let dir = copy("vite-multipage");
+    let out = stdout(&rkp(&dir, &["migrate"]));
+    assert!(out.contains("build:rkp: rkp bundle index.html about.html --config vite.config.js --outdir dist --minify\n"), "{out}");
+    let args = words(out.lines().find_map(|l| l.trim_start().strip_prefix("build:rkp: ")).unwrap());
+    let built = rkp(&dir, &args[1..].iter().map(String::as_str).collect::<Vec<_>>());
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    assert!(dir.join("dist/index.html").is_file() && dir.join("dist/about.html").is_file());
+    // Pages with the same file name in different folders would overwrite one another: the note says so, and the command has one page.
+    let dir = vite_project("clash", "export default { build: { rollupOptions: { input: { a: 'index.html', b: 'nested/index.html' } } } };\n", &[]);
+    let out = stdout(&rkp(&dir, &["migrate"]));
+    assert!(out.contains("build:rkp: rkp bundle index.html --config vite.config.js") && out.contains("share a file name"), "{out}");
+}
