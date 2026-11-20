@@ -495,13 +495,17 @@ impl<'a> Context<'a> {
                 Err(diagnostic) => shared.diagnostics.push(diagnostic),
             }
             shared.pending -= 1;
-            // A sleeper for each file waiting that this worker will not take; everyone when the last job is done. (Waking all of
-            // them for every file sends dozens of threads to fight over the lock, and a chain of imports has little for them to do.)
-            // This worker takes one of the queued files itself on its way round, so only the rest need helpers.
-            let added = shared.queue.len().saturating_sub(1).min(shared.sleeping);
+            // Files that wait for a helper: those beyond one for each worker that is busy (this one among them), because each of
+            // those takes a file from the queue when it is done, which is soon. (Waking a sleeper costs the waker a system call
+            // and the sleeper takes the lock for nothing when the file is gone by then: on a chain of imports, where only
+            // three files are ever in flight, that made every thread past the third a loss.)
+            let busy = shared.spawned - shared.sleeping;
+            let spare = shared.queue.len().saturating_sub(busy);
+            // A sleeper for each of them; everyone when the last job is done.
+            let added = spare.min(shared.sleeping);
             let done = shared.pending == 0;
-            // Files waiting that no sleeper will take (and this worker takes one itself) get workers of their own, up to the limit.
-            let backlog = shared.queue.len().saturating_sub(1).saturating_sub(shared.sleeping);
+            // The files that no sleeper will take get workers of their own, up to the limit.
+            let backlog = spare.saturating_sub(shared.sleeping);
             let more = if done { 0 } else { backlog.min(self.limit - shared.spawned) };
             shared.spawned += more;
             drop(shared);
@@ -1275,5 +1279,49 @@ mod entry_tests {
         assert_eq!(entry_specifier("/@rathkit/federation/core.js"), "/@rathkit/federation/core.js");
         assert_eq!(entry_specifier("src/main.js"), "./src/main.js");
         assert_eq!(entry_specifier("../x.js"), "../x.js");
+    }
+}
+
+#[cfg(test)]
+mod thread_tests {
+    use super::*;
+
+    /// A chain where each module imports the next three (only a few files are ever in flight), then a fan of a hundred leaves.
+    fn write_project(dir: &Path) {
+        let n = 300;
+        for i in 0..n {
+            let mut text = String::new();
+            for j in (i + 1)..(i + 4).min(n) {
+                text += &format!("import {{ f{j} }} from './m{j}.js';\n");
+            }
+            text += &format!("export function f{i}() {{ return {i}; }}\n");
+            std::fs::write(dir.join(format!("m{i}.js")), text).unwrap();
+        }
+        let mut main = String::from("import './m0.js';\n");
+        for k in 0..100 {
+            std::fs::write(dir.join(format!("leaf{k}.js")), format!("export const l{k} = {k};\n")).unwrap();
+            main += &format!("import './leaf{k}.js';\n");
+        }
+        std::fs::write(dir.join("main.js"), main).unwrap();
+    }
+
+    #[test]
+    fn every_thread_count_finds_the_same_modules_in_the_same_order() {
+        let dir = std::env::temp_dir().join(format!("rk-graph-threads-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        write_project(&dir);
+        let shape = |threads: usize| {
+            let options = GraphOptions { threads, ..GraphOptions::default() };
+            let graph = build(&dir, &["main.js".to_string()], &options);
+            assert!(!graph.has_errors(), "{:?}", graph.diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>());
+            graph.modules.iter().map(|m| (m.path.clone(), m.edges.len())).collect::<Vec<_>>()
+        };
+        let one = shape(1);
+        assert_eq!(one.len(), 401);
+        for threads in [2, 3, 4, 16] {
+            assert_eq!(shape(threads), one, "threads: {threads}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
