@@ -40,12 +40,17 @@ const ROLLUP_BUILT_IN: &[(&str, &str)] = &[
 
 /// Finds the tools of the project in `dir`, in the order esbuild, Vite, webpack, Rollup, rspack.
 pub fn detect(dir: &Path) -> Vec<Finding> {
+    detect_with(dir, true)
+}
+
+/// `detect`, and `run_config` says whether a Rollup config whose values are not plain strings may be run to read them.
+pub fn detect_with(dir: &Path, run_config: bool) -> Vec<Finding> {
     let package = std::fs::read_to_string(dir.join("package.json")).ok().and_then(|t| Json::parse(&t).ok());
     let mut found = Vec::new();
     found.extend(esbuild(dir, package.as_ref()));
     found.extend(vite(dir, package.as_ref()));
     found.extend(webpack(dir, package.as_ref()));
-    found.extend(rollup(dir, package.as_ref()));
+    found.extend(rollup(dir, package.as_ref(), run_config));
     found.extend(rspack(dir, package.as_ref()));
     found
 }
@@ -377,7 +382,7 @@ fn webpack(dir: &Path, package: Option<&Json>) -> Option<Finding> {
     Some(finding)
 }
 
-fn rollup(dir: &Path, package: Option<&Json>) -> Option<Finding> {
+fn rollup(dir: &Path, package: Option<&Json>, run: bool) -> Option<Finding> {
     let config = config_file(dir, "rollup.config", package);
     let mut evidence: Vec<String> = config.iter().cloned().collect();
     if has_dependency(package, "rollup") {
@@ -391,42 +396,48 @@ fn rollup(dir: &Path, package: Option<&Json>) -> Option<Finding> {
     subfolder_note(&mut finding, config.as_ref());
     let mut build = "rkp bundle".to_string();
     let mut no_input = false;
-    let mut input_name = None;
-    match literal_after(&text, "input") {
-        Some(input) => {
-            input_name = Some(input.trim_start_matches("./").to_string());
-            build.push_str(&format!(" {}", input.trim_start_matches("./")));
+    // What the text of the config does not give (an input or an output built in code) is read by running it, when that is safe.
+    let rolled = if run { config.as_deref().filter(|c| is_script(c)).filter(|_| !text_is_complete(&text)).and_then(|c| run_rollup_config(dir, c)) } else { None };
+    if rolled.is_some() {
+        no_input = true;
+    } else {
+        let mut input_name = None;
+        match literal_after(&text, "input") {
+            Some(input) => {
+                input_name = Some(input.trim_start_matches("./").to_string());
+                build.push_str(&format!(" {}", input.trim_start_matches("./")));
+            }
+            None => {
+                finding.notes.push("the config's input is not a plain string (or there is no config): no command is written; run `rkp bundle ENTRY... --outfile FILE` with the entries of the config".to_string());
+                no_input = true;
+            }
         }
-        None => {
-            finding.notes.push("the config's input is not a plain string (or there is no config): no command is written; run `rkp bundle ENTRY... --outfile FILE` with the entries of the config".to_string());
-            no_input = true;
+        // The settings of `output: { ... }`, and not the `name` or `format` of a plugin written beside it.
+        let output = text.find("output").map(|i| &text[i..text[i..].find('}').map_or(text.len(), |e| i + e)]).unwrap_or("");
+        match (literal_after(output, "dir"), literal_after(output, "file")) {
+            (_, Some(file)) => build.push_str(&format!(" --outfile {file}")),
+            (Some(dir), None) => build.push_str(&format!(" --outdir {dir} --splitting")),
+            _ => {
+                // A config that builds the file name or the output list in code: without an output `rkp bundle` prints the bundle and writes nothing.
+                let stem = input_name.as_deref().and_then(|i| i.rsplit('/').next()).map(|n| n.rsplit_once('.').map_or(n, |(a, _)| a).to_string()).unwrap_or_else(|| "index".to_string());
+                build.push_str(&format!(" --outfile dist/{stem}.js"));
+                finding.notes.push("the output file is not a plain string in the config: --outfile dist/... is a stand-in, set the file you publish".to_string());
+            }
         }
-    }
-    // The settings of `output: { ... }`, and not the `name` or `format` of a plugin written beside it.
-    let output = text.find("output").map(|i| &text[i..text[i..].find('}').map_or(text.len(), |e| i + e)]).unwrap_or("");
-    match (literal_after(output, "dir"), literal_after(output, "file")) {
-        (_, Some(file)) => build.push_str(&format!(" --outfile {file}")),
-        (Some(dir), None) => build.push_str(&format!(" --outdir {dir} --splitting")),
-        _ => {
-            // A config that builds the file name or the output list in code: without an output `rkp bundle` prints the bundle and writes nothing.
-            let stem = input_name.as_deref().and_then(|i| i.rsplit('/').next()).map(|n| n.rsplit_once('.').map_or(n, |(a, _)| a).to_string()).unwrap_or_else(|| "index".to_string());
-            build.push_str(&format!(" --outfile dist/{stem}.js"));
-            finding.notes.push("the output file is not a plain string in the config: --outfile dist/... is a stand-in, set the file you publish".to_string());
+        match literal_after(output, "format").as_deref() {
+            Some("cjs" | "commonjs") => build.push_str(" --format=cjs"),
+            Some("iife") => build.push_str(" --format=iife"),
+            Some("es" | "esm" | "module") | None => {}
+            Some(other) => finding.notes.push(format!("output.format '{other}' is not supported (esm, cjs and iife are); iife with --global-name is the form for a page")),
         }
-    }
-    match literal_after(output, "format").as_deref() {
-        Some("cjs" | "commonjs") => build.push_str(" --format=cjs"),
-        Some("iife") => build.push_str(" --format=iife"),
-        Some("es" | "esm" | "module") | None => {}
-        Some(other) => finding.notes.push(format!("output.format '{other}' is not supported (esm, cjs and iife are); iife with --global-name is the form for a page")),
-    }
-    if let Some(name) = literal_after(output, "name") {
-        build.push_str(&format!(" --global-name={name}"));
-    }
-    if literal_after(output, "sourcemap").is_some_and(|s| s == "inline") {
-        build.push_str(" --sourcemap=inline");
-    } else if flag_after(output, "sourcemap") {
-        build.push_str(" --sourcemap");
+        if let Some(name) = literal_after(output, "name") {
+            build.push_str(&format!(" --global-name={name}"));
+        }
+        if literal_after(output, "sourcemap").is_some_and(|s| s == "inline") {
+            build.push_str(" --sourcemap=inline");
+        } else if flag_after(output, "sourcemap") {
+            build.push_str(" --sourcemap");
+        }
     }
     let modules = imports_of(&text);
     if modules.iter().any(|m| m == "@rollup/plugin-terser" || m == "rollup-plugin-terser") {
@@ -452,7 +463,170 @@ fn rollup(dir: &Path, package: Option<&Json>) -> Option<Finding> {
     if !no_input {
         finding.commands.push(("build:rkp".to_string(), build));
     }
+    if let Some(items) = &rolled {
+        let minify = modules.iter().any(|m| m == "@rollup/plugin-terser" || m == "rollup-plugin-terser");
+        let config = config.as_deref().unwrap_or("the config");
+        finding.notes.push(format!("the values of {config} were read by running it (Node's permission model: no writes, no child processes)"));
+        let mut commands: Vec<String> = Vec::new();
+        for item in items {
+            for command in rolled_commands(item, minify, &mut finding.notes) {
+                if !commands.contains(&command) {
+                    commands.push(command);
+                }
+            }
+        }
+        if commands.is_empty() {
+            finding.notes.push("running the config gave no input that is a file name: no command is written; run `rkp bundle ENTRY... --outfile FILE` with the entries of the config".to_string());
+        }
+        for (i, command) in commands.into_iter().enumerate() {
+            finding.commands.push((if i == 0 { "build:rkp".to_string() } else { format!("build:rkp-{}", i + 1) }, command));
+        }
+    }
     Some(finding)
+}
+
+/// Whether the text of a Rollup config gives the input and the output file or folder as plain strings (nothing to run then).
+fn text_is_complete(text: &str) -> bool {
+    let output = text.find("output").map(|i| &text[i..text[i..].find('}').map_or(text.len(), |e| i + e)]).unwrap_or("");
+    literal_after(text, "input").is_some() && (literal_after(output, "file").is_some() || literal_after(output, "dir").is_some())
+}
+
+/// Whether a config file is JavaScript that Node can import (TypeScript is not run).
+fn is_script(file: &str) -> bool {
+    [".js", ".mjs", ".cjs"].iter().any(|e| file.ends_with(e))
+}
+
+/// Imports the config, calls it when it is a function, and prints what the commands need as one JSON line after a marker (a plugin may print
+/// too): `[{"input": [files] | null, "outputs": [{"file","dir","format","name","sourcemap"}], "plugins": [names]}]`. Absolute paths inside
+/// the project are made relative to it.
+const ROLLUP_PROBE: &str = r#"
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+// Paths are written with `/` (path.join on Windows gives `\\`).
+const rel = (v) => (typeof v !== 'string' ? v : (path.isAbsolute(v) && !path.relative(process.cwd(), v).startsWith('..') ? path.relative(process.cwd(), v) : v).replaceAll('\\', '/'));
+const str = (v) => (typeof v === 'string' ? rel(v) : undefined);
+const mod = await import(pathToFileURL(process.argv[1]).href);
+let config = mod.default ?? mod;
+if (typeof config === 'function') config = await config({});
+config = await config;
+const items = [];
+for (const item of [config].flat(Infinity)) {
+  const c = await item;
+  if (!c || typeof c !== 'object') continue;
+  const input = typeof c.input === 'string' ? [c.input] : Array.isArray(c.input) ? c.input : c.input && typeof c.input === 'object' ? Object.values(c.input) : [];
+  const outputs = [c.output].flat().filter((o) => o && typeof o === 'object').map((o) => ({ file: str(o.file), dir: str(o.dir), format: str(o.format), name: str(o.name), sourcemap: o.sourcemap === true ? true : str(o.sourcemap) }));
+  const plugins = [c.plugins].flat(Infinity).map((p) => p && p.name).filter((n) => typeof n === 'string');
+  items.push({ input: input.every((i) => typeof i === 'string') && input.length ? input.map(rel) : null, outputs, plugins });
+}
+console.log('\nRKP-ROLLUP-CONFIG:' + JSON.stringify(items));
+process.exit(0);
+"#;
+
+/// Runs the Rollup config `file` of `dir` in Node's permission model (reads only: no file writes, no child processes, no workers or
+/// addons) for at most 20 seconds, and returns what it says, or None when it cannot be run (no Node, Node without the permission
+/// model, or the config throws, for instance because its plugins are not installed).
+fn run_rollup_config(dir: &Path, file: &str) -> Option<Vec<Json>> {
+    let node = std::env::var_os("RATHKIT_NODE").unwrap_or_else(|| "node".into());
+    let path = dir.join(file).canonicalize().ok()?;
+    let cwd = dir.canonicalize().ok()?;
+    for flag in ["--permission", "--experimental-permission"] {
+        let child = std::process::Command::new(&node)
+            .args([flag, "--allow-fs-read=*", "--no-warnings", "--input-type=module", "-e", ROLLUP_PROBE])
+            .arg(&path)
+            .current_dir(&cwd)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        let Ok(mut child) = child else { return None };
+        let started = std::time::Instant::now();
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) if started.elapsed() > std::time::Duration::from_secs(20) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+                Err(_) => break None,
+            }
+        };
+        let mut out = String::new();
+        if let Some(mut stdout) = child.stdout.take() {
+            let _ = std::io::Read::read_to_string(&mut stdout, &mut out);
+        }
+        if status.is_some_and(|s| s.success()) {
+            let line = out.lines().find_map(|l| l.strip_prefix("RKP-ROLLUP-CONFIG:"))?;
+            return Json::parse(line).ok()?.as_array().map(|a| a.to_vec());
+        }
+    }
+    None
+}
+
+/// The commands for one config of the list a probe returned (one for each output).
+fn rolled_commands(item: &Json, minify: bool, notes: &mut Vec<String>) -> Vec<String> {
+    let Some(inputs) = item.get("input").and_then(Json::as_array) else {
+        notes.push("a config in the list has no input that is a file name (or a name that is a path): no command for it".to_string());
+        return Vec::new();
+    };
+    let inputs: Vec<&str> = inputs.iter().filter_map(Json::as_str).map(|i| i.trim_start_matches("./")).collect();
+    let terser = minify || item.get("plugins").and_then(Json::as_array).is_some_and(|p| p.iter().filter_map(Json::as_str).any(|n| n == "terser"));
+    let mut outputs: Vec<&Json> = item.get("outputs").and_then(Json::as_array).map(|o| o.iter().collect()).unwrap_or_default();
+    let none = Json::Object(Vec::new());
+    if outputs.is_empty() {
+        outputs.push(&none);
+    }
+    let mut commands = Vec::new();
+    for output in outputs {
+        let text = |key: &str| output.get(key).and_then(Json::as_str);
+        let mut command = format!("rkp bundle {}", inputs.join(" "));
+        match (text("file"), text("dir")) {
+            (Some(file), _) => command.push_str(&format!(" --outfile {file}")),
+            (None, Some(dir)) => command.push_str(&format!(" --outdir {dir} --splitting")),
+            _ => {
+                let stem = inputs[0].rsplit('/').next().map(|n| n.rsplit_once('.').map_or(n, |(a, _)| a)).unwrap_or("index");
+                command.push_str(&format!(" --outfile dist/{stem}.js"));
+                notes.push("the config names no output file or folder: --outfile dist/... is a stand-in, set the file you publish".to_string());
+            }
+        }
+        let mut global_name = text("name");
+        match text("format") {
+            Some("cjs" | "commonjs") => {
+                command.push_str(" --format=cjs");
+                global_name = None;
+            }
+            Some("iife") => command.push_str(" --format=iife"),
+            Some("es" | "esm" | "module") | None => global_name = None,
+            // UMD is the format of a library that is loaded by a script tag or `require`: the iife with the name is the nearest that rkp writes.
+            Some(other @ ("umd" | "amd" | "system")) => {
+                if global_name.is_some() && other == "umd" {
+                    command.push_str(" --format=iife");
+                    notes.push("output.format 'umd' is written as --format=iife with --global-name (no AMD or CommonJS wrapper); build a second command with --format=cjs when `require` has to work".to_string());
+                } else {
+                    notes.push(format!("output.format '{other}' is not supported (esm, cjs and iife are): no command for {}", text("file").or(text("dir")).unwrap_or("that output")));
+                    continue;
+                }
+            }
+            Some(other) => {
+                notes.push(format!("output.format '{other}' is not supported (esm, cjs and iife are): no command for it"));
+                continue;
+            }
+        }
+        if let Some(name) = global_name.take() {
+            command.push_str(&format!(" --global-name={name}"));
+        }
+        match output.get("sourcemap") {
+            Some(Json::Bool(true)) => command.push_str(" --sourcemap"),
+            Some(Json::String(s)) if s == "inline" => command.push_str(" --sourcemap=inline"),
+            _ => {}
+        }
+        if terser {
+            command.push_str(" --minify");
+        }
+        commands.push(command);
+    }
+    commands
 }
 
 /// rspack: its config is webpack's, so the command is webpack's with the output folder.
@@ -519,10 +693,8 @@ pub fn write(dir: &Path, found: &[Finding]) -> Result<Vec<String>, String> {
     let mut added: Vec<(String, String)> = Vec::new();
     for f in found {
         for (name, command) in &f.commands {
-            let name = match (several, name.strip_suffix(":rkp")) {
-                (true, Some(base)) => format!("{base}:rkp-{}", f.tool),
-                _ => name.clone(),
-            };
+            // `build:rkp` is `build:rkp-vite` when there are several tools, and `build:rkp-2` is `build:rkp-vite-2`.
+            let name = if several && name.contains(":rkp") { name.replacen(":rkp", &format!(":rkp-{}", f.tool), 1) } else { name.clone() };
             if existing.contains(&name) || added.iter().any(|(n, _)| *n == name) {
                 log.push(format!("left {name}: a script of that name is there"));
             } else {
