@@ -13,7 +13,7 @@ Known differences from the corpus runner's command (not bugs of migrate; the gui
 | vue3-realworld | vite | `rkp bundle index.html --config vite.config.ts --outdir dist --minify` | ok | unchanged |
 | zustand | esbuild+rollup | `rkp bundle src/index.ts --outdir dist --splitting`, `... --outfile dist/index.js --format=cjs`, `... --outfile dist/esm/index.mjs` (the config is a function; it is run since #121) | ok (all three, run here after #121) | unchanged |
 | dayjs | rollup | none (the config build/rollup.config.js is found since #122; it is a function of other values, so its input is not a plain string) | not run (no command) | unchanged |
-| marked | esbuild | none (esbuild API script (esbuild.config.js): a note to import from @rathkit/pack, no command line to run) | not run (no command) | unchanged |
+| marked | esbuild | none (esbuild API script esbuild.config.js: since #123 the notes give the line of the import and what it becomes, the `build()` calls at lines 42 and 47 that stay the same, and the plugin that stays in `plugins`; there is no command line to print) | not run (no command) | unchanged |
 | conduit-react | vite | `rkp bundle index.html --config vite.config.ts --outdir dist --minify` | ok | unchanged |
 | vue-naive-admin | vite | `rkp bundle index.html --config vite.config.js --outdir dist --minify` | ok | unchanged |
 | vite-template-react-ts | vite | `rkp bundle index.html --config vite.config.ts --outdir dist --minify` | ok | unchanged |
