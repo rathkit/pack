@@ -57,7 +57,7 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   `@preserve`; minifying drops comments, so these are put after the code of the file that has them, each once (`eof`, the default), left
   out, or put in `NAME.LEGAL.txt`, named at the end of the file or not); `--entry-names=[name]-[hash]` and `--chunk-names=[name]-[hash]` (templates for the names of the files of entries and of the rest; `[hash]`
   is a hash of what is in the file and in the files it loads, so a name changes when anything the file runs does, which is what
-  caching by name needs; no directories in a name) and `--out-extension:.js=.mjs` (or `.css=`);
+  caching by name needs; no directories in a name; one entry is named the same with and without `--splitting`: `[name]` is the entry's file name, and without a template the one file is `bundle.js` when there is no `--splitting`; several entries without `--splitting` share one file, so `[name]` is `bundle` there; `--outfile` names its file itself and ignores the entry template) and `--out-extension:.js=.mjs` (or `.css=`);
   `--pure:NAME` (calls of a name, or of a chain such as `styled.div`, and tagged templates of it, are free of effects, so an unused one
   is removed when what it is given has no effects either); `--preserve-symlinks`; `--metafile=FILE` (JSON in the shape of esbuild's metafile: every
   module with what it imports, every file written with the modules in it, what it imports and exports and its entry point;

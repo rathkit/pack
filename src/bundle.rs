@@ -522,6 +522,8 @@ struct Bundler<'a> {
     plan: ChunkPlan,
     /// Whether output text is tagged with where it came from (see `mark_copy`).
     single_name: String,
+    /// The name of the one file was given (`--outfile`, a webpack config): name templates do not apply to it.
+    single_given: bool,
     mapping: bool,
     /// The sources the tags in the text refer to.
     marks: std::sync::Mutex<Vec<Mark>>,
@@ -684,6 +686,7 @@ impl<'a> Bundler<'a> {
             module_groups: ModuleGroups::default(),
             plan: ChunkPlan::default(),
             single_name: "bundle.js".to_string(),
+            single_given: false,
             mapping: false,
             marks: std::sync::Mutex::new(Vec::new()),
             markable: Vec::new(),
@@ -726,6 +729,7 @@ impl<'a> Bundler<'a> {
         self.mapping = options.sourcemap != SourceMapMode::None;
         if let Some(name) = &options.file_name {
             self.single_name = name.clone();
+            self.single_given = true;
         }
         // Minifying takes the comments out itself; this is for text that is written as it was read.
         self.cuts = if options.minify.any() { Vec::new() } else { graph.modules.iter().map(|m| m.parsed.as_ref().map_or_else(Vec::new, |p| comment_cuts(&m.source, &p.droppable))).collect() };
@@ -1982,7 +1986,13 @@ impl<'a> Bundler<'a> {
             of_module[m.index()] = Some(0);
         }
         let root_chunk = graph.entries.iter().map(|&e| (e, 0)).collect();
-        ChunkPlan { chunks: vec![Chunk { file: self.single_name.clone(), modules, roots: graph.entries.clone(), base: String::new(), given: true, is_entry: true, group: None }], of_module, root_chunk }
+        // Without a name of its own the file is `bundle.js`, and `--entry-names` names it as it names the entry's file with splitting: `[name]` is
+        // the name of the one entry (several entries share the file, so there it stays `bundle`).
+        let base = match graph.entries.as_slice() {
+            [only] if !self.single_given => graph.module(*only).path.file_stem().map(|s| s.to_string_lossy().into_owned()).filter(|s| !s.is_empty() && !s.contains(['/', '\\'])).unwrap_or_else(|| "bundle".to_string()),
+            _ => "bundle".to_string(),
+        };
+        ChunkPlan { chunks: vec![Chunk { file: self.single_name.clone(), modules, roots: graph.entries.clone(), base, given: self.single_given, is_entry: true, group: None }], of_module, root_chunk }
     }
 
     /// `--preserve-modules`: every module is a file of its own, named by where its source is (from the folder the sources share). The
@@ -2713,6 +2723,7 @@ impl<'a> Bundler<'a> {
         fork.globals = self.globals.clone();
         fork.splitting = self.splitting;
         fork.single_name = self.single_name.clone();
+        fork.single_given = self.single_given;
         fork.mapping = self.mapping;
         fork.nesting = self.nesting;
         fork
