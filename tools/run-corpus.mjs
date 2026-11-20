@@ -1,6 +1,6 @@
 // Builds pinned open-source projects (corpus/projects.json) with rkp and checks the result.
 //
-//   node tools/run-corpus.mjs [name ...] [--dir DIR] [--keep] [--json FILE] [--no-browser]
+//   node tools/run-corpus.mjs [name ...] [--dir DIR] [--keep] [--json FILE] [--no-browser] [--migrate]
 //
 // Each project is cloned at its pinned commit into DIR (default: a new folder under ~/.cache/rkp-corpus, not the system temp folder, which is often a small
 // memory-backed volume that a hundred thousand files of node_modules fill), its dependencies are
@@ -8,7 +8,8 @@
 // the expected files exist, and, for a library, importing the output in Node gives the expected exports; an app is also loaded in headless
 // Chromium (unless --no-browser, or no browser is found) and must run without uncaught errors, console errors or missing files. This runs code from
 // other projects (their configuration files and plugins), so it is not part of the test battery: run it by hand or from the
-// corpus workflow. The work folder is deleted when the run ends (also after a failure or Ctrl-C) unless --keep or --dir is given.
+// corpus workflow. With --migrate, `rkp migrate` is also run on each project after its own build, the `build:rkp` commands it prints are run (in the same
+// folder, the output folder emptied first), and an app's page built that way is loaded in the browser as well. The work folder is deleted when the run ends (also after a failure or Ctrl-C) unless --keep or --dir is given.
 // Exit status is 1 if any project failed.
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -33,6 +34,7 @@ for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => process.exit(130)
 const jsonOut = flag('--json');
 const noBrowser = args.includes('--no-browser') && args.splice(args.indexOf('--no-browser'), 1);
 const browser = noBrowser ? null : findBrowser();
+const migrate = args.includes('--migrate') && args.splice(args.indexOf('--migrate'), 1);
 const wanted = args;
 const rkp = process.env.RATHKIT_PACK_BIN || path.join(root, 'target', 'release', process.platform === 'win32' ? 'rkp.exe' : 'rkp');
 if (!fs.existsSync(rkp)) { console.error(`rkp not found at ${rkp}; run cargo build --release or set RATHKIT_PACK_BIN`); process.exit(2); }
@@ -42,6 +44,34 @@ const run = (cmd, argv, cwd, limit = 600) => {
   const r = spawnSync(cmd, argv, { cwd, encoding: 'utf8', timeout: limit * 1000, maxBuffer: 64 << 20, shell: process.platform === 'win32' });
   return { ok: r.status === 0, out: `${r.stdout || ''}${r.stderr || ''}`.trim(), ms: 0 };
 };
+/** Words of a command line, with single quotes as a shell has them. */
+const words = (text) => [...text.matchAll(/(?:[^\s']|'[^']*')+/g)].map((m) => m[0].replace(/'([^']*)'/g, '$1'));
+
+/**
+ * `rkp migrate`: the commands it prints for the project (`build:rkp...: rkp bundle ...`) are run and, for an app, the page they build is
+ * loaded in the browser like the one of the project's own command (with --minify and without --public-path, as the guides print them).
+ * A project it finds nothing to say about, or prints no command for, is skipped. `migrateArgs` of a project are
+ * added to each command: what the printed note tells the person to add (a `--public-path` for a Vite `base` read from the environment).
+ */
+async function migrated(p, where, ms) {
+  const found = spawnSync(rkp, ['migrate', where], { encoding: 'utf8', timeout: 60000 });
+  if (found.status !== 0) return { ok: true, skipped: 'not detected' };
+  const commands = [...found.stdout.matchAll(/^ {2}build:rkp[^:\s]*: (rkp bundle .*)$/gm)].map((m) => m[1]);
+  if (!commands.length) return { ok: true, skipped: 'no command' };
+  for (const command of commands) {
+    const argv = words(command).slice(1);
+    const outdir = argv.includes('--outdir') ? argv[argv.indexOf('--outdir') + 1] : null;
+    // An output folder of an earlier build would hide a page that this command does not write.
+    if (outdir) fs.rmSync(path.join(where, outdir), { recursive: true, force: true });
+    const r = run(rkp, [...argv, ...(p.migrateArgs || [])], where, 300);
+    if (!r.ok) return { ok: false, step: 'migrate-build', detail: `${command}\n${tail(r.out)}`, ms };
+    if (p.kind === 'app' && browser && outdir && fs.existsSync(path.join(where, outdir, 'index.html'))) {
+      const page = await checkPage(path.join(where, outdir), p.expect?.page, browser);
+      if (!page.ok) return { ok: false, step: 'migrate-page', detail: `${command}\n${page.problems.join('\n')}\nbody: ${page.html}${page.log.length ? '\nlog: ' + page.log.join('\n     ') : ''}`, ms };
+    }
+  }
+  return { ok: true, commands: commands.length };
+}
 const tail = (text, n = 12) => text.split('\n').slice(-n).join('\n');
 
 async function one(p) {
@@ -121,6 +151,11 @@ async function one(p) {
     const checked = libraryCheck(p, where, rkp, dir);
     if (!checked.ok) return { ...checked, ms };
   }
+  if (migrate) {
+    const m = await migrated(p, where, ms);
+    if (!m.ok) return m;
+    return { ok: true, ms, migrate: m.skipped ? `skipped (${m.skipped})` : `${m.commands} command(s) built` };
+  }
   return { ok: true, ms };
 }
 
@@ -133,7 +168,7 @@ for (const p of list) {
   results.push(r);
   const lines = (text) => (text || '').split('\n').map((l) => '    ' + l).join('\n');
   if (p.expectFail) console.log(r.expected ? `xfail ${r.step}: ${p.expectFail}\n${lines(r.detail)}` : `XPASS ${r.ms} ms: this passes now, so remove its expectFail (${p.expectFail})`);
-  else console.log(r.ok ? `ok   ${r.ms} ms` : `FAIL ${r.step}\n${lines(r.detail)}`);
+  else console.log(r.ok ? `ok   ${r.ms} ms${r.migrate ? `; migrate: ${r.migrate}` : ''}` : `FAIL ${r.step}\n${lines(r.detail)}`);
 }
 const passed = results.filter((r) => r.ok && !r.flagged).length;
 console.log(`\n${browser ? '' : '(no browser: apps were built but not loaded)\n'}${passed} of ${results.length} built and checked out (${temporary ? 'work folder deleted' : `work folder ${dir}, left in place`})`);
