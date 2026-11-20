@@ -25,6 +25,8 @@ const ESBUILD_GAPS: &[&str] = &[
     "--sourcefile", "--drop-labels", "--ignore-annotations", "--jsx=preserve", "--jsx-side-effects", "--analyze", "--abs-paths", "--log-override", "--servedir", "--serve=",
     "--serve-fallback", "--certfile", "--keyfile", "--stdin", "--watch=forever",
 ];
+/// Folders the search for a config file does not enter.
+const SEARCH_SKIP: &[&str] = &["node_modules", "dist", "out", "target", "coverage", "test", "tests", "__tests__", "fixtures", "examples", "example", "docs", "e2e", "vendor"];
 /// Rollup plugins whose work `rkp` does itself, and the option that stands for it.
 const ROLLUP_BUILT_IN: &[(&str, &str)] = &[
     ("@rollup/plugin-node-resolve", "resolving is built in"),
@@ -48,12 +50,51 @@ pub fn detect(dir: &Path) -> Vec<Finding> {
     found
 }
 
+/// A note for a config file that is not in the root: its relative paths are the ones the command runs with, from the root.
+fn subfolder_note(finding: &mut Finding, config: Option<&String>) {
+    if let Some(c) = config.filter(|c| c.contains('/')) {
+        finding.notes.push(format!("the config is {c}, in a subfolder: the commands run from the project folder, so check that the paths in them (entry, output folder) are the ones you build with"));
+    }
+}
+
 fn has_dependency(package: Option<&Json>, name: &str) -> bool {
     package.is_some_and(|p| ["dependencies", "devDependencies"].iter().any(|k| p.get(k).and_then(|d| d.get(name)).is_some()))
 }
 
-fn config_file(dir: &Path, stem: &str) -> Option<String> {
-    CONFIG_EXTENSIONS.iter().map(|e| format!("{stem}.{e}")).find(|f| dir.join(f).is_file())
+/// The config file of a tool as a path of the project (`vite.config.ts`, or `build/rollup.config.js`), looked for in this order: the root;
+/// a path that a package.json script names (`rollup -c build/rollup.config.js`); a search of the subfolders, two levels deep, that skips
+/// dependencies, build output, tests and examples (a config there is not the project's own build), the shallowest and then the first by name.
+fn config_file(dir: &Path, stem: &str, package: Option<&Json>) -> Option<String> {
+    let names: Vec<String> = CONFIG_EXTENSIONS.iter().map(|e| format!("{stem}.{e}")).collect();
+    if let Some(found) = names.iter().find(|f| dir.join(f).is_file()) {
+        return Some(found.clone());
+    }
+    for (_, script) in package.and_then(|p| p.get("scripts")).and_then(Json::as_object).unwrap_or(&[]) {
+        for word in script.as_str().unwrap_or("").split(|c: char| c.is_whitespace() || matches!(c, '\'' | '"' | '=')) {
+            let word = word.trim_start_matches("./");
+            let inside = !word.is_empty() && !word.starts_with('/') && !word.split('/').any(|part| part == "..");
+            if inside && names.iter().any(|n| word == n || word.ends_with(&format!("/{n}"))) && dir.join(word).is_file() {
+                return Some(word.to_string());
+            }
+        }
+    }
+    let mut level = vec![String::new()];
+    for _ in 0..2 {
+        let mut next = Vec::new();
+        for prefix in &level {
+            let mut folders: Vec<String> = std::fs::read_dir(dir.join(prefix)).into_iter().flatten().flatten().filter(|e| e.path().is_dir()).filter_map(|e| e.file_name().into_string().ok()).filter(|n| !n.starts_with('.') && !SEARCH_SKIP.contains(&n.as_str())).collect();
+            folders.sort();
+            for folder in folders {
+                let path = if prefix.is_empty() { folder } else { format!("{prefix}/{folder}") };
+                if let Some(found) = names.iter().map(|n| format!("{path}/{n}")).find(|f| dir.join(f).is_file()) {
+                    return Some(found);
+                }
+                next.push(path);
+            }
+        }
+        level = next;
+    }
+    None
 }
 
 /// The first string written after `key:` in the text (`'dist'`, `"dist"` or a template without `${`), where `key` is a whole word.
@@ -193,7 +234,7 @@ fn rewrite_esbuild_commands(script: &str) -> (String, bool) {
 }
 
 fn vite(dir: &Path, package: Option<&Json>) -> Option<Finding> {
-    let mut config = config_file(dir, "vite.config");
+    let mut config = config_file(dir, "vite.config", package);
     // A vite.config that only configures Vitest (`from 'vitest/config'`) is a test setup, not a build.
     if config.as_ref().and_then(|c| std::fs::read_to_string(dir.join(c)).ok()).is_some_and(|t| imports_of(&t).iter().any(|m| m == "vitest/config") && !t.contains("build:") && !t.contains("plugins:")) {
         config = None;
@@ -208,6 +249,7 @@ fn vite(dir: &Path, package: Option<&Json>) -> Option<Finding> {
     }
     let text = config.as_ref().and_then(|c| std::fs::read_to_string(dir.join(c)).ok()).unwrap_or_default();
     let mut finding = Finding { tool: "vite", evidence, commands: Vec::new(), notes: Vec::new() };
+    subfolder_note(&mut finding, config.as_ref());
     let page = std::fs::read_to_string(dir.join("index.html")).ok();
     let mut build = "rkp bundle index.html".to_string();
     if let Some(c) = &config {
@@ -269,7 +311,7 @@ fn first_module_script(html: &str) -> Option<String> {
 }
 
 fn webpack(dir: &Path, package: Option<&Json>) -> Option<Finding> {
-    let config = config_file(dir, "webpack.config");
+    let config = config_file(dir, "webpack.config", package);
     let mut evidence: Vec<String> = config.iter().cloned().collect();
     if has_dependency(package, "webpack") {
         evidence.push("dependency webpack".to_string());
@@ -279,6 +321,7 @@ fn webpack(dir: &Path, package: Option<&Json>) -> Option<Finding> {
     }
     let text = config.as_ref().and_then(|c| std::fs::read_to_string(dir.join(c)).ok()).unwrap_or_default();
     let mut finding = Finding { tool: "webpack", evidence, commands: Vec::new(), notes: Vec::new() };
+    subfolder_note(&mut finding, config.as_ref());
     // The entry: a plain string, webpack's default when the config names none, or the config's own (then it is read from the file).
     let entry = match literal_after(&text, "entry") {
         Some(entry) => Some(entry.trim_start_matches("./").to_string()),
@@ -335,7 +378,7 @@ fn webpack(dir: &Path, package: Option<&Json>) -> Option<Finding> {
 }
 
 fn rollup(dir: &Path, package: Option<&Json>) -> Option<Finding> {
-    let config = config_file(dir, "rollup.config");
+    let config = config_file(dir, "rollup.config", package);
     let mut evidence: Vec<String> = config.iter().cloned().collect();
     if has_dependency(package, "rollup") {
         evidence.push("dependency rollup".to_string());
@@ -345,6 +388,7 @@ fn rollup(dir: &Path, package: Option<&Json>) -> Option<Finding> {
     }
     let text = config.as_ref().and_then(|c| std::fs::read_to_string(dir.join(c)).ok()).unwrap_or_default();
     let mut finding = Finding { tool: "rollup", evidence, commands: Vec::new(), notes: Vec::new() };
+    subfolder_note(&mut finding, config.as_ref());
     let mut build = "rkp bundle".to_string();
     let mut no_input = false;
     let mut input_name = None;
@@ -413,7 +457,7 @@ fn rollup(dir: &Path, package: Option<&Json>) -> Option<Finding> {
 
 /// rspack: its config is webpack's, so the command is webpack's with the output folder.
 fn rspack(dir: &Path, package: Option<&Json>) -> Option<Finding> {
-    let config = config_file(dir, "rspack.config");
+    let config = config_file(dir, "rspack.config", package);
     let mut evidence: Vec<String> = config.iter().cloned().collect();
     if has_dependency(package, "@rspack/core") || has_dependency(package, "@rspack/cli") {
         evidence.push("dependency @rspack/core".to_string());
@@ -423,6 +467,7 @@ fn rspack(dir: &Path, package: Option<&Json>) -> Option<Finding> {
     }
     let text = config.as_ref().and_then(|c| std::fs::read_to_string(dir.join(c)).ok()).unwrap_or_default();
     let mut finding = Finding { tool: "rspack", evidence, commands: Vec::new(), notes: Vec::new() };
+    subfolder_note(&mut finding, config.as_ref());
     let entry = literal_after(&text, "main").or_else(|| literal_after(&text, "entry")).map(|e| e.trim_start_matches("./").to_string());
     let mut build = "rkp bundle".to_string();
     match entry.or_else(|| dir.join("src/index.js").is_file().then(|| "src/index.js".to_string())) {

@@ -198,7 +198,7 @@ rkp bundle src/main.ts --outfile dist/app.mjs
 - `--watch` builds again when a file the build read changes (and plugins' `addWatchFile` files): plugins hear it. On Linux it hears of changes through file events (inotify); elsewhere it polls the files every 80 ms.
   through `watchChange`, a changed config starts everything again, and Ctrl-C ends it cleanly. Modules whose files
   did not change are kept between builds (no reading, parsing or scanning again; without plugins).
-- `rkp migrate [DIR] [--write]` says which of esbuild, Vite, webpack and Rollup a project uses (a config file, a dependency, a
+- `rkp migrate [DIR] [--write]` says which of esbuild, Vite, webpack and Rollup a project uses (a config file in the root, in a subfolder that a script names (`rollup -c build/rollup.config.js`) or two levels down, a dependency, a
   package.json script that runs `esbuild`, or a file that imports it) and prints the `rkp` commands that do the same build, with notes
   on what does not carry over, as in [docs/migrate/](docs/migrate/README.md). The config files are read as text for the plain strings the
   commands need (`outDir`, `entry`, `output.file`, `format`): what is not a plain string is left to `--config`, which reads the file
