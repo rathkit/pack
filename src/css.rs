@@ -1005,7 +1005,7 @@ fn url_end(text: &str, open: usize) -> usize {
 }
 
 /// The end of the text that starts at `from` and is closed by `stop` (a byte that is not in a string, a comment or `url()`), or the end of `text`.
-fn skip_to(text: &str, from: usize, stops: &[u8]) -> usize {
+pub(crate) fn skip_to(text: &str, from: usize, stops: &[u8]) -> usize {
     let b = text.as_bytes();
     let mut i = from;
     while i < b.len() {
@@ -1100,7 +1100,7 @@ fn merge_rules(css: &str) -> String {
         } else if inner.contains('{') || header.is_empty() {
             items.push((css[start..end].to_string(), None));
         } else {
-            items.push((header.to_string(), Some(inner.to_string())));
+            items.push((header.to_string(), Some(crate::css_fold::fold(inner))));
         }
         i = end;
     }
@@ -1124,6 +1124,15 @@ fn merge_rules(css: &str) -> String {
         }
         out.push((header, body));
     }
+    // A rule written again, header and body alike, later in the same list: the later copy decides everything the earlier one did.
+    let mut last: HashMap<(&str, &str), usize> = HashMap::new();
+    for (k, (header, body)) in out.iter().enumerate() {
+        if let Some(body) = body {
+            last.insert((header.as_str(), body.as_str()), k);
+        }
+    }
+    let keep: Vec<bool> = out.iter().enumerate().map(|(k, (header, body))| body.as_ref().is_none_or(|b| last[&(header.as_str(), b.as_str())] == k)).collect();
+    let out: Vec<(String, Option<String>)> = out.into_iter().zip(keep).filter_map(|(item, keep)| keep.then_some(item)).collect();
     let mut text = String::with_capacity(css.len());
     for (header, body) in out {
         match body {
@@ -1285,8 +1294,53 @@ fn refine_value(property: &str, value: &str) -> String {
         text = text.replace(" rotateZ(", " rotate(");
         body = text;
     }
-    if body.contains("rgb") {
+    if body.contains("rgb") || body.contains("RGB") {
         body = rgb_to_hex(&body);
+    }
+    if body.contains("transparent") && (property.ends_with("color") || matches!(property, "background" | "background-image" | "border" | "border-top" | "border-right" | "border-bottom" | "border-left" | "outline" | "column-rule" | "box-shadow" | "text-shadow")) {
+        body = transparent_as_hex(&body);
+    }
+    let base = property.trim_start_matches("-webkit-").trim_start_matches("-moz-").trim_start_matches("-o-");
+    if base == "flex" {
+        body = shorter_flex(&body);
+    }
+    if base == "transition" {
+        body = drop_default_ease(&body);
+    }
+    if base.starts_with("transition") || base.starts_with("animation") {
+        body = seconds_for_milliseconds(&body);
+    }
+    if matches!(base, "border" | "border-top" | "border-right" | "border-bottom" | "border-left") {
+        body = drop_current_color(&body);
+    }
+    if property == "background" && matches!(body.as_str(), "none" | "transparent" | "#0000") {
+        body = "0 0".into();
+    }
+    if let ("background-position" | "-webkit-background-position", Some((x, "50%"))) = (property, body.split_once(' ')) {
+        let plain = !x.is_empty() && (x.starts_with(|c: char| c.is_ascii_digit() || c == '.' || c == '-') || x.ends_with('%')) && !x.contains(['(', ' ']);
+        if plain {
+            body = x.to_string();
+        }
+    }
+    if property == "transform-origin" && body == "center center" {
+        body = "50%".into();
+    }
+    if matches!(base, "transform") && (body.contains("translateX(") || body.contains(",0)") || body.contains(",0px)")) {
+        body = shorter_translate(&body);
+    }
+    if matches!(property, "box-shadow" | "text-shadow") {
+        body = zero_lengths_at_top(&body);
+    }
+    if matches!(property, "transform" | "-webkit-transform" | "-ms-transform" | "filter" | "backdrop-filter" | "-webkit-backdrop-filter") && body.contains(") ") {
+        let b = body.as_bytes();
+        let mut text = String::with_capacity(body.len());
+        for (i, ch) in body.char_indices() {
+            if ch == ' ' && i > 0 && b[i - 1] == b')' && b.get(i + 1).is_some_and(u8::is_ascii_alphabetic) {
+                continue;
+            }
+            text.push(ch);
+        }
+        body = text;
     }
     if property == "font-family" || property == "font" {
         body = unquote_fonts(&body);
@@ -1312,7 +1366,7 @@ fn refine_value(property: &str, value: &str) -> String {
     format!("{body}{important}")
 }
 
-fn is_zero_length(t: &str) -> bool {
+pub(crate) fn is_zero_length(t: &str) -> bool {
     t.strip_prefix('0').is_some_and(|unit| matches!(unit, "px" | "em" | "rem" | "pt" | "cm" | "mm" | "in" | "ex" | "ch" | "vh" | "vw" | "vmin" | "vmax"))
 }
 
@@ -1369,36 +1423,316 @@ fn trim_numbers(value: &str) -> String {
     out
 }
 
-/// `rgb(255, 0, 0)` and `rgb(255 0 0)` (whole numbers, no alpha) are `#f00`.
+/// `rgb(255, 0, 0)`, `rgb(255 0 0)`, `rgba(255,0,0,.5)` and `rgb(255 0 0 / 50%)` (whole numbers for the channels) are `#f00`, `#ff000080`.
+/// An alpha of at most two decimals (or a whole percent) has one 8-bit spelling that a browser writes back as the same decimal (CSS Color 4
+/// asks for the shortest decimal of two digits that gives the same byte), so the color keeps its value; other alphas stay as written.
 fn rgb_to_hex(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     let mut rest = value;
-    while let Some(at) = rest.to_ascii_lowercase().find("rgb(") {
+    loop {
+        let lower = rest.to_ascii_lowercase();
+        let Some(at) = lower.find("rgb") else { break };
+        let name_end = at + if lower[at + 3..].starts_with('a') { 4 } else { 3 };
         let before_ok = at == 0 || !rest.as_bytes()[at - 1].is_ascii_alphanumeric() && !matches!(rest.as_bytes()[at - 1], b'-' | b'_');
-        let Some(close) = rest[at..].find(')').map(|p| at + p) else { break };
-        let args = &rest[at + 4..close];
-        let nums: Vec<&str> = args.split(|c| c == ',' || c == ' ').filter(|s| !s.is_empty()).collect();
-        let parsed: Option<Vec<u8>> = if nums.len() == 3 { nums.iter().map(|n| n.parse::<u8>().ok().filter(|_| n.bytes().all(|d| d.is_ascii_digit()))).collect() } else { None };
-        match parsed {
-            Some(v) if before_ok => {
+        let after_ok = rest.as_bytes().get(name_end) == Some(&b'(');
+        let close = if after_ok { rest[name_end..].find(')').map(|p| name_end + p) } else { None };
+        let Some(close) = close.filter(|_| before_ok) else {
+            out.push_str(&rest[..at + 3]);
+            rest = &rest[at + 3..];
+            continue;
+        };
+        match parse_rgb(&rest[name_end + 1..close]) {
+            Some(rgba) => {
                 out.push_str(&rest[..at]);
-                let hex = format!("{:02x}{:02x}{:02x}", v[0], v[1], v[2]);
+                out.push('#');
+                let hex = match rgba[3] {
+                    255 => format!("{:02x}{:02x}{:02x}", rgba[0], rgba[1], rgba[2]),
+                    a => format!("{:02x}{:02x}{:02x}{:02x}", rgba[0], rgba[1], rgba[2], a),
+                };
                 let b = hex.as_bytes();
-                if b[0] == b[1] && b[2] == b[3] && b[4] == b[5] {
-                    out.push_str(&format!("#{}{}{}", b[0] as char, b[2] as char, b[4] as char));
+                if b.chunks(2).all(|p| p[0] == p[1]) {
+                    out.extend(b.chunks(2).map(|p| p[0] as char));
                 } else {
-                    out.push('#');
                     out.push_str(&hex);
                 }
                 rest = &rest[close + 1..];
             }
-            _ => {
-                out.push_str(&rest[..at + 4]);
-                rest = &rest[at + 4..];
+            None => {
+                out.push_str(&rest[..close + 1]);
+                rest = &rest[close + 1..];
             }
         }
     }
     out.push_str(rest);
+    out
+}
+
+/// The channels and alpha byte of the arguments of `rgb(...)`, when they are all plain numbers and one of the two syntaxes.
+fn parse_rgb(args: &str) -> Option<[u8; 4]> {
+    let channel = |n: &str| -> Option<u8> { if !n.is_empty() && n.bytes().all(|d| d.is_ascii_digit()) { n.parse::<u8>().ok() } else { None } };
+    let (chan, alpha): (Vec<&str>, Option<&str>) = if args.contains(',') {
+        let p: Vec<&str> = args.split(',').map(str::trim).collect();
+        if p.len() == 3 {
+            (p, None)
+        } else if p.len() == 4 {
+            (p[..3].to_vec(), Some(p[3]))
+        } else {
+            return None;
+        }
+    } else {
+        let (left, right) = match args.split_once('/') {
+            Some((l, r)) => (l, Some(r.trim())),
+            None => (args, None),
+        };
+        (left.split(' ').filter(|s| !s.is_empty()).collect(), right)
+    };
+    if chan.len() != 3 {
+        return None;
+    }
+    let a = match alpha {
+        None => 255,
+        Some(text) => {
+            let hundredths: u32 = if let Some(p) = text.strip_suffix('%') {
+                if p.is_empty() || p.len() > 3 || !p.bytes().all(|d| d.is_ascii_digit()) {
+                    return None;
+                }
+                p.parse().ok()?
+            } else {
+                let (whole, frac) = text.split_once('.').unwrap_or((text, ""));
+                let whole_ok = whole.is_empty() && !frac.is_empty() || matches!(whole, "0" | "1");
+                if !whole_ok || frac.len() > 2 || !frac.bytes().all(|d| d.is_ascii_digit()) || (whole.is_empty() && frac.is_empty()) {
+                    return None;
+                }
+                let f: u32 = if frac.is_empty() { 0 } else { format!("{frac:0<2}").parse().ok()? };
+                (if whole == "1" { 100 } else { 0 }) + f
+            };
+            if hundredths > 100 {
+                return None;
+            }
+            ((hundredths * 255 + 50) / 100) as u8
+        }
+    };
+    Some([channel(chan[0])?, channel(chan[1])?, channel(chan[2])?, a])
+}
+
+/// `flex: 1 1 auto` is `auto`, `0 0 auto` is `none`, and a shrink factor of 1 is the default and goes (`0 1 auto` is `0 auto`).
+fn shorter_flex(value: &str) -> String {
+    let p: Vec<&str> = value.split(' ').collect();
+    let number = |t: &str| !t.is_empty() && t.bytes().all(|c| c.is_ascii_digit() || c == b'.') && t.bytes().any(|c| c.is_ascii_digit());
+    if p.len() != 3 || !number(p[0]) || !number(p[1]) {
+        return value.to_string();
+    }
+    let basis = p[2];
+    // A basis that is not a number: a keyword, a length with a unit or a percentage (a bare number would be read as a factor).
+    let is_basis = !basis.is_empty() && (basis.ends_with('%') || basis.bytes().any(|c| c.is_ascii_alphabetic())) && !basis.contains(['!', '\\', '"', '\'']) && !basis.to_ascii_lowercase().contains("var(");
+    if !is_basis {
+        return value.to_string();
+    }
+    match (p[0], p[1], basis) {
+        ("1", "1", "auto") => "auto".into(),
+        ("0", "0", "auto") => "none".into(),
+        ("1", "1", b) => b.to_string(),
+        (g, "1", b) => format!("{g} {b}"),
+        _ => value.to_string(),
+    }
+}
+
+/// `ease` is the default timing function of a transition: left out of a part that also holds a time.
+fn drop_default_ease(value: &str) -> String {
+    if !value.contains("ease") || value.contains(['(', '"', '\'']) && value.to_ascii_lowercase().contains("var(") {
+        return value.to_string();
+    }
+    let is_time = |t: &str| (t.ends_with("ms") || t.ends_with('s')) && t.bytes().next().is_some_and(|c| c.is_ascii_digit() || c == b'.' || c == b'-') && !t.contains('(');
+    let mut parts_out: Vec<String> = Vec::new();
+    for part in value.split(',') {
+        // Commas inside a call (`cubic-bezier(.4,0,.2,1)`) are not part boundaries: give up on a value that has any.
+        if part.contains('(') || part.contains(')') {
+            return value.to_string();
+        }
+        let toks: Vec<&str> = part.split(' ').filter(|t| !t.is_empty()).collect();
+        let at = toks.iter().position(|t| *t == "ease");
+        match at {
+            Some(k) if toks.iter().any(|t| is_time(t)) && toks.len() > 2 && toks.iter().filter(|t| **t == "ease").count() == 1 => {
+                let mut t = toks.clone();
+                t.remove(k);
+                parts_out.push(t.join(" "));
+            }
+            _ => parts_out.push(part.to_string()),
+        }
+    }
+    parts_out.join(",")
+}
+
+/// A time in whole milliseconds as seconds, where that is shorter: `100ms` is `.1s`, `1500ms` is `1.5s`.
+fn seconds_for_milliseconds(value: &str) -> String {
+    if !value.contains("ms") {
+        return value.to_string();
+    }
+    let b = value.as_bytes();
+    let mut out = String::with_capacity(value.len());
+    let mut i = 0;
+    while i < b.len() {
+        let at_start = i == 0 || matches!(b[i - 1], b' ' | b',');
+        if at_start && (b[i].is_ascii_digit() || b[i] == b'-') {
+            let neg = b[i] == b'-';
+            let ds = i + neg as usize;
+            let mut j = ds;
+            while j < b.len() && b[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > ds && value[j..].starts_with("ms") && b.get(j + 2).is_none_or(|c| matches!(c, b' ' | b',')) && !(b[ds] == b'0' && j - ds > 1) {
+                let digits = &value[ds..j];
+                let secs = if digits == "0" {
+                    "0".to_string()
+                } else if digits.len() > 3 {
+                    let (w, f) = digits.split_at(digits.len() - 3);
+                    let f = f.trim_end_matches('0');
+                    if f.is_empty() { w.to_string() } else { format!("{w}.{f}") }
+                } else {
+                    let f = format!("{digits:0>3}");
+                    format!(".{}", f.trim_end_matches('0'))
+                };
+                let new = format!("{}{secs}s", if neg { "-" } else { "" });
+                if new.len() < j + 2 - i {
+                    out.push_str(&new);
+                    i = j + 2;
+                    continue;
+                }
+            }
+            // Not a time in milliseconds: copy the number.
+            out.push_str(&value[i..j.max(i + 1)]);
+            i = j.max(i + 1);
+            continue;
+        }
+        let ch = value[i..].chars().next().expect("a character");
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// `currentColor` is the initial border color, so a border that names other parts needs no `currentColor`.
+fn drop_current_color(value: &str) -> String {
+    let toks: Vec<&str> = value.split(' ').collect();
+    if toks.len() < 2 || value.contains(['(', '"', '\'']) {
+        return value.to_string();
+    }
+    let kept: Vec<&str> = toks.iter().copied().filter(|t| !t.eq_ignore_ascii_case("currentcolor")).collect();
+    if kept.is_empty() || kept.len() == toks.len() {
+        return value.to_string();
+    }
+    kept.join(" ")
+}
+
+/// `translateX(v)` is `translate(v)`, and `translate(v,0)` is `translate(v)`.
+fn shorter_translate(value: &str) -> String {
+    let mut text = value.replace("translateX(", "translate(");
+    for tail in [",0)", ",0px)"] {
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text.as_str();
+        while let Some(at) = rest.find("translate(") {
+            let open = at + "translate(".len();
+            // The call ends at its own closing parenthesis; it must hold exactly one comma, the one before the zero.
+            let close = {
+                let mut depth = 1;
+                let mut end = None;
+                for (k, c) in rest[open..].bytes().enumerate() {
+                    match c {
+                        b'(' => depth += 1,
+                        b')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                end = Some(open + k);
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                end
+            };
+            let before_ok = at == 0 || matches!(rest.as_bytes()[at - 1], b' ' | b')');
+            match close {
+                Some(c) if before_ok && rest[open..=c].ends_with(tail) && rest[open..c].matches(',').count() == 1 => {
+                    out.push_str(&rest[..c - (tail.len() - 1)]);
+                    out.push(')');
+                    rest = &rest[c + 1..];
+                }
+                Some(c) => {
+                    out.push_str(&rest[..c + 1]);
+                    rest = &rest[c + 1..];
+                }
+                None => break,
+            }
+        }
+        out.push_str(rest);
+        text = out;
+    }
+    text
+}
+
+/// `transparent` standing alone as a color is `#0000`. Strings and `url()` are copied.
+fn transparent_as_hex(value: &str) -> String {
+    let b = value.as_bytes();
+    let mut out = String::with_capacity(value.len());
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c == b'"' || c == b'\'' {
+            let end = (skip_to(value, i + 1, &[c]) + 1).min(b.len());
+            out.push_str(&value[i..end]);
+            i = end;
+        } else if c == b'(' && value[..i].to_ascii_lowercase().ends_with("url") {
+            let end = url_end(value, i);
+            out.push_str(&value[i..end]);
+            i = end;
+        } else if value[i..].len() >= 11 && value[i..i + 11].eq_ignore_ascii_case("transparent") && i.checked_sub(1).is_none_or(|p| matches!(b[p], b' ' | b',' | b'(')) && b.get(i + 11).is_none_or(|n| matches!(n, b' ' | b',' | b')')) {
+            out.push_str("#0000");
+            i += 11;
+        } else {
+            let ch = value[i..].chars().next().expect("a character");
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
+/// A zero length written with a unit, `0px`, is `0` where it stands outside any call (a shadow's offsets and blur).
+fn zero_lengths_at_top(value: &str) -> String {
+    let mut depth = 0i32;
+    let mut out = String::with_capacity(value.len());
+    let mut token = String::new();
+    let flush = |token: &mut String, out: &mut String| {
+        out.push_str(if is_zero_length(token) { "0" } else { token.as_str() });
+        token.clear();
+    };
+    for ch in value.chars() {
+        match ch {
+            '(' | ')' | '"' | '\'' if depth > 0 || ch == '(' || ch == '"' || ch == '\'' => {
+                if depth == 0 {
+                    flush(&mut token, &mut out);
+                }
+                if ch == '(' {
+                    depth += 1;
+                } else if ch == ')' {
+                    depth -= 1;
+                }
+                if ch == '"' || ch == '\'' {
+                    // A string in a shadow: not touched at all.
+                    return value.to_string();
+                }
+                out.push(ch);
+            }
+            ' ' | ',' if depth == 0 => {
+                flush(&mut token, &mut out);
+                out.push(ch);
+            }
+            _ if depth == 0 => token.push(ch),
+            _ => out.push(ch),
+        }
+    }
+    flush(&mut token, &mut out);
     out
 }
 
@@ -1634,6 +1968,36 @@ mod tests {
         assert_eq!(minify_text("a { margin: 0.5em -0.25em 10.5px 0; w: calc(1 + 0.5) ; x: a0.5 }"), "a{margin:.5em -.25em 10.5px 0;w:calc(1 + .5);x:a0.5}");
         // Selectors, strings, urls, filters and ids are not values.
         assert_eq!(minify_text("#ffffff, a:not(#aabbcc) { content: \"#ffffff 0.5\"; b: url(#ffffff0.5); filter: progid:X(c=#FFFFFF) }"), "#ffffff,a:not(#aabbcc){content:\"#ffffff 0.5\";b:url(#ffffff0.5);filter:progid:X(c=#FFFFFF)}");
+    }
+
+    #[test]
+    fn colors_with_alpha_get_their_hex_spelling() {
+        assert_eq!(minify_text("a { b: rgba(255, 255, 255, 0.65); c: rgb(0 0 0 / 50%); d: rgba(0,0,0,0); e: rgba(1,2,3,1); f: rgba(17,34,51,.2) }"), "a{b:#ffffffa6;c:#00000080;d:#0000;e:#010203;f:#1233}");
+        // A third decimal, a variable, a percentage channel and an unknown syntax keep their text.
+        assert_eq!(minify_text("a { b: rgba(0,0,0,.333); c: rgba(var(--c),.5); d: rgb(100% 0% 0% / .5); e: rgba(1 2 3,.5); f: rgb(1 2 3 .5) }"), "a{b:rgba(0,0,0,.333);c:rgba(var(--c),.5);d:rgb(100% 0% 0% / .5);e:rgba(1 2 3,.5);f:rgb(1 2 3 .5)}");
+        assert_eq!(minify_text("a { color: transparent; border: 1px solid transparent; background: url(transparent.png) transparent; font-family: transparent; box-shadow: 0px 1px 2px 0px rgba(0,0,0,.5), 0px 0px #fff }"), "a{color:#0000;border:1px solid #0000;background:url(transparent.png)#0000;font-family:transparent;box-shadow:0 1px 2px 0 #00000080,0 0 #fff}".replace(")#0000", ") #0000"));
+    }
+
+    #[test]
+    fn values_with_a_shorter_equal_form() {
+        assert_eq!(minify_text("a { flex: 1 1 auto; b: x } b { flex: 0 0 auto } c { flex: 0 1 100% } d { flex: 1 1 0% } e { flex: 2 1 10px } f { flex: 1 1 1 }"), "a{flex:auto;b:x}b{flex:none}c{flex:0 100%}d{flex:0%}e{flex:2 10px}f{flex:1 1 1}");
+        assert_eq!(minify_text("a { transition: opacity 100ms ease, transform 1500ms ease-in; animation-duration: 250ms; transition-delay: -500ms; x: 100ms }"), "a{transition:opacity .1s,transform 1.5s ease-in;animation-duration:.25s;transition-delay:-.5s;x:100ms}");
+        assert_eq!(minify_text("a { transition: opacity .3s ease } b { transition: ease .3s } c { transition: opacity .3s cubic-bezier(.4,0,.2,1), color 1s ease }"), "a{transition:opacity .3s}b{transition:ease .3s}c{transition:opacity .3s cubic-bezier(.4,0,.2,1),color 1s ease}");
+        assert_eq!(minify_text("a { border: 1px solid currentColor; border-top: currentcolor; background: none; position: relative } b { background: transparent } c { background-position: 0 50%; transform-origin: center center }"), "a{border:1px solid;border-top:currentcolor;background:0 0;position:relative}b{background:0 0}c{background-position:0;transform-origin:50%}");
+        assert_eq!(minify_text("a { transform: translateX(-50%) translate(10px, 0) translate(0, 10px) translate(calc(1px + 2px),0px) rotate(1deg) }"), "a{transform:translate(-50%)translate(10px)translate(0,10px)translate(calc(1px + 2px))rotate(1deg)}");
+    }
+
+    #[test]
+    fn a_rule_that_comes_again_later_is_dropped() {
+        assert_eq!(minify_text("a{x:1}b{y:2}a{x:1}"), "b{y:2}a{x:1}");
+        assert_eq!(minify_text("a{x:1}b{y:2}a{x:2}"), "a{x:1}b{y:2}a{x:2}");
+        assert_eq!(minify_text("@media print{a{x:1}b{y:2}a{x:1}}a{x:1}"), "@media print{b{y:2}a{x:1}}a{x:1}");
+    }
+
+    #[test]
+    fn longhands_of_a_rule_are_written_as_the_shorthand() {
+        assert_eq!(minify_text("a { margin-top: 1px; margin-right: 0px; margin-bottom: 1px; margin-left: 0px }"), "a{margin:1px 0}");
+        assert_eq!(minify_text("a { padding: 0; padding-left: 4px }"), "a{padding:0 0 0 4px}");
     }
 
     #[test]

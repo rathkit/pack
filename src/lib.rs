@@ -1,6 +1,7 @@
 pub mod ast;
 pub mod cache;
 pub mod css;
+mod css_fold;
 pub mod define;
 pub mod dts;
 pub mod dump;
