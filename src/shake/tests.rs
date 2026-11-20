@@ -257,3 +257,30 @@ fn shaking_on_several_threads_matches_one() {
     assert!(r.included("m3.js"));
     assert_eq!(r.live("m3.js"), vec!["f3_1", "f3_5"]);
 }
+
+/// With enough modules the enums are found on several threads; each module still has its own.
+#[test]
+fn enums_found_on_several_threads_belong_to_their_modules() {
+    let n = 1100;
+    let mut files: Vec<(String, String)> = Vec::new();
+    let mut main = String::new();
+    for m in 0..n {
+        files.push((format!("m{m}.ts"), format!("export enum E{m} {{ A = {m}, B }}\n")));
+        main.push_str(&format!("import {{ E{m} }} from './m{m}';\nconsole.log(E{m}.B);\n"));
+    }
+    files.push(("main.js".to_string(), main));
+    let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    let r = run(&refs);
+    assert!(crate::par::workers() < 2 || r.graph.modules.len() >= 1000);
+    let linked = link(&r.graph);
+    let enums = EnumTable::build(&r.graph);
+    for m in [0, 1, 499, 1099] {
+        let file = format!("m{m}.ts");
+        let id = r.graph.modules[r.index(&file)].id;
+        let parsed = r.graph.module(id).parsed.as_ref().unwrap();
+        let atom = parsed.ast.find_atom(&format!("E{m}")).unwrap();
+        let symbol = parsed.semantic.lookup_local(parsed.semantic.root_scope(), atom).unwrap();
+        assert!(enums.member(&linked, id, symbol, "B").is_some(), "{file}");
+        assert!(enums.member(&linked, id, symbol, "C").is_none(), "{file}");
+    }
+}

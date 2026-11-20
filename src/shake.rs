@@ -118,20 +118,16 @@ pub fn shake(graph: &Graph, linked: &Linked) -> Shaken {
 /// `entry_exports` false: nobody reads what the entries export (an iife with no global name), so only their effects are kept.
 pub fn shake_entries(graph: &Graph, linked: &Linked, entry_exports: bool) -> Shaken {
     let enums = EnumTable::build(graph);
-    // Each module's parts depend on nothing the others make, so a big program is split up side by side.
-    let build = |i: usize| build_parts(graph, graph.modules[i].id, Some((&enums, linked)));
+    // Each module's parts depend on nothing the others make, so a big program is split up side by side. The map from a symbol to the
+    // parts that declare it is made there too: it reads only that module's parts.
+    let build = |i: usize| {
+        let module = build_parts(graph, graph.modules[i].id, Some((&enums, linked)));
+        let by_symbol = parts_by_symbol(&module);
+        (module, by_symbol)
+    };
     let n = graph.modules.len();
-    let mut modules: Vec<ModuleShake> = if crate::par::worth_it(n, graph.modules.iter().map(|m| m.source.len()).sum()) { crate::par::map(n, build) } else { (0..n).map(build).collect() };
-    let mut by_symbol: Vec<HashMap<SymbolId, Vec<usize>>> = Vec::with_capacity(modules.len());
-    for module in &modules {
-        let mut map: HashMap<SymbolId, Vec<usize>> = HashMap::new();
-        for (index, part) in module.parts.iter().enumerate() {
-            for &symbol in &part.declares {
-                map.entry(symbol).or_default().push(index);
-            }
-        }
-        by_symbol.push(map);
-    }
+    let built: Vec<(ModuleShake, BySymbol)> = if crate::par::worth_it(n, graph.modules.iter().map(|m| m.source.len()).sum()) { crate::par::map(n, build) } else { (0..n).map(build).collect() };
+    let (mut modules, by_symbol): (Vec<ModuleShake>, Vec<BySymbol>) = built.into_iter().unzip();
     let mut shaker = Shaker { graph, linked, modules: &mut modules, by_symbol, work: Vec::new(), exports_done: vec![false; graph.modules.len()], full: vec![false; graph.modules.len()] };
     for &entry in &graph.entries {
         shaker.work.push(Work::Module(entry));
@@ -145,6 +141,19 @@ pub fn shake_entries(graph: &Graph, linked: &Linked, entry_exports: bool) -> Sha
         module.demand_known = true;
     }
     Shaken { modules, enums }
+}
+
+/// For each module-level symbol of a module, the parts that declare it.
+type BySymbol = crate::fxhash::FastMap<SymbolId, Vec<usize>>;
+
+fn parts_by_symbol(module: &ModuleShake) -> BySymbol {
+    let mut map = BySymbol::default();
+    for (index, part) in module.parts.iter().enumerate() {
+        for &symbol in &part.declares {
+            map.entry(symbol).or_default().push(index);
+        }
+    }
+    map
 }
 
 enum Work {
@@ -163,7 +172,7 @@ struct Shaker<'a> {
     graph: &'a Graph,
     linked: &'a Linked,
     modules: &'a mut Vec<ModuleShake>,
-    by_symbol: Vec<HashMap<SymbolId, Vec<usize>>>,
+    by_symbol: Vec<BySymbol>,
     work: Vec<Work>,
     exports_done: Vec<bool>,
     full: Vec<bool>,

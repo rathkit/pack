@@ -124,7 +124,11 @@ impl EnumTable {
     }
 
     pub fn build(graph: &Graph) -> EnumTable {
-        let modules = graph.modules.iter().map(|m| module_enums(graph, m.id)).collect();
+        // Each module's enums depend on that module alone. Finding them is a walk over the top level only, so the threads pay for
+        // themselves only when there are many modules.
+        let n = graph.modules.len();
+        let find = |i: usize| module_enums(graph, graph.modules[i].id);
+        let modules = if n >= 1000 && crate::par::worth_it(n, graph.modules.iter().map(|m| m.source.len()).sum()) { crate::par::map(n, find) } else { (0..n).map(find).collect() };
         EnumTable { modules }
     }
 
