@@ -12,7 +12,7 @@ Known differences from the corpus runner's command (not bugs of migrate; the gui
 |---|---|---|---|---|
 | vue3-realworld | vite | `rkp bundle index.html --config vite.config.ts --outdir dist --minify` | ok | unchanged |
 | zustand | esbuild+rollup | none (rollup config input is a variable (createConfig); esbuild only as a dependency (via rollup-plugin-esbuild)) | not run (no command) | unchanged |
-| dayjs | rollup | none (rollup is a dependency, the config is build/rollup.config.js (only the root is looked at)) | not run (no command) | unchanged |
+| dayjs | rollup | none (the config build/rollup.config.js is found since #122; it is a function of other values, so its input is not a plain string) | not run (no command) | unchanged |
 | marked | esbuild | none (esbuild API script (esbuild.config.js): a note to import from @rathkit/pack, no command line to run) | not run (no command) | unchanged |
 | conduit-react | vite | `rkp bundle index.html --config vite.config.ts --outdir dist --minify` | ok | unchanged |
 | vue-naive-admin | vite | `rkp bundle index.html --config vite.config.js --outdir dist --minify` | ok | unchanged |

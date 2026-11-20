@@ -1,0 +1,10 @@
+{
+  "name": "rollup-subfolder",
+  "private": true,
+  "scripts": {
+    "build": "rollup -c build/rollup.config.js"
+  },
+  "devDependencies": {
+    "rollup": "^4.0.0"
+  }
+}

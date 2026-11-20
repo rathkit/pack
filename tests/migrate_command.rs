@@ -209,3 +209,27 @@ fn vite_base_from_a_variable_is_a_note() {
     let out = stdout(&rkp(&dir, &["migrate"]));
     assert!(out.contains("note: base is not a plain string"), "{out}");
 }
+
+#[test]
+fn a_config_in_a_subfolder_is_found_by_the_script_or_by_a_search() {
+    // Named by a package.json script (`rollup -c build/rollup.config.js`).
+    let dir = copy("rollup-subfolder");
+    let out = stdout(&rkp(&dir, &["migrate"]));
+    assert!(out.starts_with("rollup (build/rollup.config.js"), "{out}");
+    assert!(out.contains("build:rkp: rkp bundle src/index.js --outfile dist/index.js --format=cjs"), "{out}");
+    assert!(out.contains("note: the config is build/rollup.config.js, in a subfolder"), "{out}");
+    // Not named by a script: found by the search, two levels deep; a config of a test folder is not the project's.
+    let dir = std::env::temp_dir().join(format!("rkp-migrate-search-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("tests/x")).unwrap();
+    std::fs::create_dir_all(dir.join("config")).unwrap();
+    std::fs::write(dir.join("package.json"), "{\"scripts\":{\"build\":\"make\"}}").unwrap();
+    std::fs::write(dir.join("tests/x/rollup.config.js"), "export default { input: 'no.js', output: { file: 'no.js' } };\n").unwrap();
+    assert_eq!(rkp(&dir, &["migrate"]).status.code(), Some(1));
+    std::fs::write(dir.join("config/rollup.config.mjs"), "export default { input: 'a.js', output: { file: 'out/a.js' } };\n").unwrap();
+    let out = stdout(&rkp(&dir, &["migrate"]));
+    assert!(out.starts_with("rollup (config/rollup.config.mjs)") && out.contains("rkp bundle a.js --outfile out/a.js"), "{out}");
+    // A path that leaves the project in a script is not followed.
+    std::fs::remove_file(dir.join("config/rollup.config.mjs")).unwrap();
+    std::fs::write(dir.join("package.json"), "{\"scripts\":{\"build\":\"rollup -c ../rollup.config.js\"}}").unwrap();
+    assert_eq!(rkp(&dir, &["migrate"]).status.code(), Some(1));
+}
