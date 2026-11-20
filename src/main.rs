@@ -1690,8 +1690,8 @@ fn run_formats(job: &Job, formats: &[rathkit_pack::bundle::Format]) -> Outcome {
         bundle_options.format = format;
         bundle_options.splitting = format == Format::Esm && entries.len() > 1;
         bundle_options.out_extensions.push((".js".to_string(), extension.to_string()));
-        // One entry is one file, named after the entry's file.
-        if let ([entry], None) = (entries.as_slice(), &job.outfile) {
+        // One entry is one file, named after the entry's file (or by --entry-names, which names it the same way).
+        if let ([entry], None, None) = (entries.as_slice(), &job.outfile, &job.bundle_options.entry_template) {
             if let Some(stem) = std::path::Path::new(entry).file_stem() {
                 bundle_options.file_name = Some(format!("{}.js", stem.to_string_lossy()));
             }
