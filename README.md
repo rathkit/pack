@@ -201,7 +201,7 @@ rkp bundle src/main.ts --outfile dist/app.mjs
 - `rkp migrate [DIR] [--write]` says which of esbuild, Vite, webpack and Rollup a project uses (a config file in the root, in a subfolder that a script names (`rollup -c build/rollup.config.js`) or two levels down, a dependency, a
   package.json script that runs `esbuild`, or a file that imports it) and prints the `rkp` commands that do the same build, with notes
   on what does not carry over, as in [docs/migrate/](docs/migrate/README.md). The config files are read as text for the plain strings the
-  commands need (`outDir`, `entry`, `output.file`, `format`): what is not a plain string is left to `--config`, which reads the file
+  commands need (`outDir`, `entry`, `output.file`, `format`): what is not a plain string is left to `--config` (a Vite `base` that is a constant, or a variable a `.env` file sets, is followed; `build.lib` and several pages in `rollupOptions.input` get library and multi-page commands), which reads the file
   for real. `--write` adds the commands to the `scripts` of package.json as `build:rkp` and `dev:rkp` (`build:rkp-vite`, ... when there
   are several tools; an esbuild script `x` becomes `x:rkp`), and never changes a script that is there.
 - `rkp serve ENTRY... [--port N] [--host H]` is a development server with the same options as `bundle`.
