@@ -1190,7 +1190,7 @@ pub struct Inject {
 impl Inject {
     /// The names `path` exports (not `default`), read from the file.
     pub fn read(path: &Path) -> Result<Inject, String> {
-        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let text = crate::reads::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let parsed = parse(&text, syntax_for(path)).map_err(|e| format!("{}: {}", path.display(), e.message))?;
         let record = ModuleRecord::build(&parsed);
         let names: Vec<String> = record.exports.iter().map(|e| e.exported.clone()).filter(|n| n != "default").collect();

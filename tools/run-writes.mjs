@@ -70,6 +70,7 @@ const cases = [
   { name: '--sourcemap', args: ['bundle', 'src/main.ts', '--outfile', 'out/app.mjs', '--sourcemap'], created: ['proj/out/app.mjs', 'proj/out/app.mjs.map'] },
   { name: '--sourcemap=inline', args: ['bundle', 'src/main.ts', '--outfile', 'out/app.mjs', '--sourcemap=inline'], created: ['proj/out/app.mjs'] },
   { name: '--metafile', args: ['bundle', 'src/main.ts', '--outdir', 'dist', '--metafile=meta.json'], created: ['proj/dist/bundle.js', 'proj/meta.json'] },
+  { name: '--depfile', args: ['bundle', 'src/main.ts', '--outdir', 'dist', '--depfile=deps.json'], created: ['proj/dist/bundle.js', 'proj/deps.json'] },
   { name: '--legal-comments=linked', args: ['bundle', 'src/main.ts', '--outfile', 'out/app.mjs', '--legal-comments=linked'], created: ['proj/out/app.mjs', 'proj/out/app.mjs.LEGAL.txt'] },
   { name: '--legal-comments=external', args: ['bundle', 'src/main.ts', '--outfile', 'out/app.mjs', '--legal-comments=external'], created: ['proj/out/app.mjs', 'proj/out/app.mjs.LEGAL.txt'] },
   ...(ts

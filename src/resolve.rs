@@ -54,17 +54,17 @@ pub struct RealFs;
 
 impl FileSystem for RealFs {
     fn is_file(&self, path: &Path) -> bool {
-        path.is_file()
+        crate::reads::is_file(path)
     }
 
     fn is_dir(&self, path: &Path) -> bool {
-        path.is_dir()
+        crate::reads::is_dir(path)
     }
 
     fn read_to_string(&self, path: &Path) -> io::Result<String> {
         // Source text that is not valid UTF-8 is decoded leniently, as Node does, rather than
         // refusing the file.
-        let bytes = std::fs::read(path)?;
+        let bytes = crate::reads::read(path)?;
         Ok(match String::from_utf8(bytes) {
             Ok(text) => text,
             Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
@@ -72,10 +72,11 @@ impl FileSystem for RealFs {
     }
 
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
-        std::fs::read(path)
+        crate::reads::read(path)
     }
 
     fn read_dir(&self, path: &Path) -> io::Result<Vec<(String, bool)>> {
+        crate::reads::is_dir(path);
         let mut out = Vec::new();
         for entry in std::fs::read_dir(path)? {
             let entry = entry?;

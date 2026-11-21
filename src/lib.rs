@@ -33,6 +33,7 @@ pub mod par;
 pub mod parser;
 pub mod plugins;
 pub mod purity;
+pub mod reads;
 pub mod resolve;
 pub mod semantic;
 pub mod serve;
