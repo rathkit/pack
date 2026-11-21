@@ -731,6 +731,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     let mut exports_given = false;
     let mut preserve_root: Option<String> = None;
     let mut write_exports: Option<String> = None;
+    let mut depfile: Option<String> = None;
     let mut dts_dir: Option<String> = None;
     let mut dts_bundle = false;
     let mut inject_files: Vec<String> = Vec::new();
@@ -983,6 +984,11 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
                 dts = true;
                 dts_dir = if arg == "--dts-dir" { it.next().cloned() } else { Some(arg["--dts-dir=".len()..].to_string()) };
             }
+            // --depfile=FILE: every file the build looked at, those that were not there included (see `rathkit_pack::reads`).
+            arg if arg == "--depfile" || arg.starts_with("--depfile=") => {
+                depfile = if arg == "--depfile" { it.next().cloned() } else { Some(arg["--depfile=".len()..].to_string()) };
+                rathkit_pack::reads::enable();
+            }
             arg if arg == "--metafile" || arg.starts_with("--metafile=") => {
                 metafile = if arg == "--metafile" { it.next().cloned() } else { Some(arg["--metafile=".len()..].to_string()) };
             }
@@ -1145,7 +1151,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     } else if use_tsconfig {
         let found = match &tsconfig_path {
             Some(path) => Some(std::path::absolute(path).unwrap_or_else(|_| path.into())),
-            None => cwd.ancestors().map(|d| d.join("tsconfig.json")).find(|p| p.is_file()),
+            None => cwd.ancestors().map(|d| d.join("tsconfig.json")).find(|p| rathkit_pack::reads::is_file(p)),
         };
         restart_files.extend(found);
         let fs = rathkit_pack::resolve::RealFs;
@@ -1160,7 +1166,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     // Plugins: a config file that lists them, named or found next to the project.
     let config_file = match (&config_path, use_config) {
         (Some(path), _) => Some(path.clone()),
-        (None, true) => ["rathkit.config.mjs", "rathkit.config.js", "rathkit.config.cjs", ".parcelrc"].iter().find(|f| cwd.join(f).is_file()).map(|f| f.to_string()),
+        (None, true) => ["rathkit.config.mjs", "rathkit.config.js", "rathkit.config.cjs", ".parcelrc"].iter().find(|f| rathkit_pack::reads::is_file(&cwd.join(f))).map(|f| f.to_string()),
         (None, false) => None,
     };
     // No config, but a PostCSS configuration or a Sass, Less or Stylus compiler in the project: the host runs for the style sheets.
@@ -1281,7 +1287,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
                 continue;
             }
             let file = rathkit_pack::graph::absolute(&cwd, entry);
-            let html = match std::fs::read_to_string(&file) {
+            let html = match rathkit_pack::reads::read_to_string(&file) {
                 Ok(html) => html,
                 Err(e) => {
                     eprintln!("error: {entry}: {e}");
@@ -1302,7 +1308,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
                     let path = if let Some(rooted) = s.src.strip_prefix('/') { rathkit_pack::graph::absolute(&cwd, rooted) } else { rathkit_pack::graph::absolute(&dir, &s.src) };
                     (s, path)
                 })
-                .filter(|(_, path)| path.is_file())
+                .filter(|(_, path)| rathkit_pack::reads::is_file(path))
                 .collect();
             if scripts.is_empty() {
                 eprintln!("error: {entry} has no <script type=\"module\" src=\"...\"> to build");
@@ -1330,7 +1336,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     }
     // Module federation: options from a file, or from a plugin in the config.
     let federation_json = match &federation_file {
-        Some(file) => match std::fs::read_to_string(file).map_err(|e| e.to_string()).and_then(|t| rathkit_pack::json::Json::parse(&t).map_err(|e| e.to_string())) {
+        Some(file) => match rathkit_pack::reads::read_to_string(std::path::Path::new(file)).map_err(|e| e.to_string()).and_then(|t| rathkit_pack::json::Json::parse(&t).map_err(|e| e.to_string())) {
             Ok(json) => Some(json),
             Err(message) => {
                 eprintln!("error: {file}: {message}");
@@ -1460,7 +1466,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
         return Done::Exit(ExitCode::from(2));
     }
     let exports_target = write_exports.clone();
-    let job = std::sync::Arc::new(Job { allow_overwrite, cwd, entries, options, bundle_options, treeshake, outfile, outdir, host: plugin_host, config_file, watch, serve: serve_state, bind: (host_name, port), restart_files, workers, pages, metafile, dts: dts.then(|| (dts_dir, tsconfig_path.clone(), dts_bundle)), https: https.then(|| (https_cert, https_key)), more_builds: exports_target.is_some() });
+    let job = std::sync::Arc::new(Job { allow_overwrite, cwd, entries, options, bundle_options, treeshake, outfile, outdir, host: plugin_host, config_file, watch, serve: serve_state, bind: (host_name, port), restart_files, workers, pages, metafile, depfile, dts: dts.then(|| (dts_dir, tsconfig_path.clone(), dts_bundle)), https: https.then(|| (https_cert, https_key)), more_builds: exports_target.is_some() });
     if let Some(host) = &job.host {
         // Child compilers of webpack plugins build one entry as a script that sets a global.
         let for_children = job.clone();
@@ -1478,6 +1484,10 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
                 outcome.ok = false;
             }
         }
+    }
+    if let Err(message) = write_depfile(&job) {
+        eprintln!("error: {message}");
+        outcome.ok = false;
     }
     if let Some(host) = &job.host {
         if let Err(message) = host.close_bundle() {
@@ -1509,6 +1519,8 @@ struct Job {
     pages: Vec<Page>,
     /// Where to write what went into the build and what came out, as JSON.
     metafile: Option<String>,
+    /// Where to write the list of the files the build looked at.
+    depfile: Option<String>,
     /// `--dts`: with the folder to write the declarations to, or none for the output folder.
     dts: Option<(Option<String>, Option<String>, bool)>,
     /// `--https`: the certificate and key files, or none for a self-signed certificate.
@@ -1667,6 +1679,48 @@ fn pretty_json(value: &rathkit_pack::json::Json, depth: usize, out: &mut String)
     }
 }
 
+/// `--depfile`: what the build looked at, as JSON with the paths from the working folder (`..` where needed, `/` between the parts), so the
+/// same build in two checkouts of one layout writes the same file: `{"read":[...],"missing":[...]}`. A path ending in `/` is a folder.
+fn write_depfile(job: &Job) -> Result<(), String> {
+    let Some(file) = &job.depfile else { return Ok(()) };
+    let (read, missing) = rathkit_pack::reads::all();
+    let from_process = std::env::current_dir().ok();
+    let shown = |path: &std::path::Path| -> String {
+        let folder = path.to_string_lossy().ends_with('/');
+        let mut parts: Vec<std::path::Component> = Vec::new();
+        for part in path.components() {
+            match part {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir if matches!(parts.last(), Some(std::path::Component::Normal(_))) => {
+                    parts.pop();
+                }
+                other => parts.push(other),
+            }
+        }
+        let path: std::path::PathBuf = parts.iter().collect();
+        let inside = [Some(&job.cwd), from_process.as_ref()].into_iter().flatten().find_map(|base| path.strip_prefix(base).ok().map(|p| p.to_string_lossy().replace('\\', "/")));
+        let mut text = match inside {
+            Some(text) => text,
+            None if path.components().next() == job.cwd.components().next() => rathkit_pack::sourcemap::relative(&job.cwd, &path),
+            None => path.to_string_lossy().replace('\\', "/"),
+        };
+        if folder && !text.ends_with('/') {
+            text.push('/');
+        }
+        text
+    };
+    let list = |paths: Vec<std::path::PathBuf>| {
+        let mut names: Vec<String> = paths.iter().map(|p| shown(p)).collect();
+        names.sort();
+        names.dedup();
+        rathkit_pack::json::Json::Array(names.into_iter().map(rathkit_pack::json::Json::String).collect())
+    };
+    let mut text = rathkit_pack::json::Json::Object(vec![("read".to_string(), list(read)), ("missing".to_string(), list(missing))]).to_string();
+    text.push('\n');
+    let target = std::path::absolute(file).unwrap_or_else(|_| job.cwd.join(file));
+    target.parent().filter(|p| !p.as_os_str().is_empty()).map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&target, text)).map_err(|e| format!("{file}: {e}"))
+}
+
 /// A library written in several formats: one build for each, the ES module files ending in `.mjs` and the CommonJS ones in `.cjs`.
 /// The declarations and the metafile are written once.
 fn run_formats(job: &Job, formats: &[rathkit_pack::bundle::Format]) -> Outcome {
@@ -1714,6 +1768,7 @@ fn run_formats(job: &Job, formats: &[rathkit_pack::bundle::Format]) -> Outcome {
             workers: job.workers.clone(),
             pages: Vec::new(),
             metafile: if position == 0 { job.metafile.clone() } else { None },
+            depfile: None,
             dts: if position == 0 { job.dts.clone() } else { None },
             https: None,
             more_builds: job.more_builds || position + 1 < total,
@@ -1814,14 +1869,14 @@ fn write_pages(job: &Job, dir: &std::path::Path, output: &rathkit_pack::bundle::
                 None => (reference.src.as_str(), ""),
             };
             let file = match wanted.strip_prefix('/') {
-                Some(rooted) if public.join(rooted).is_file() => continue,
+                Some(rooted) if rathkit_pack::reads::is_file(&public.join(rooted)) => continue,
                 Some(rooted) => job.cwd.join(rooted),
                 None => page_dir.join(wanted),
             };
-            if !file.is_file() {
+            if !rathkit_pack::reads::is_file(&file) {
                 continue;
             }
-            let bytes = std::fs::read(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+            let bytes = rathkit_pack::reads::read(&file).map_err(|e| format!("{}: {e}", file.display()))?;
             let name = rathkit_pack::loader::asset_name(&job.options.asset_names, &file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), &bytes);
             std::fs::write(dir.join(&name), &bytes).map_err(|e| format!("{name}: {e}"))?;
             edits.push((reference.start, reference.end, format!("{}{name}{suffix}", job.options.public_path)));
@@ -1850,7 +1905,7 @@ fn write_pages(job: &Job, dir: &std::path::Path, output: &rathkit_pack::bundle::
 
 /// What is in `public/` goes to the output as it is.
 fn copy_public(from: &std::path::Path, to: &std::path::Path) -> Result<(), String> {
-    if !from.is_dir() {
+    if !rathkit_pack::reads::is_dir(from) {
         return Ok(());
     }
     for entry in std::fs::read_dir(from).map_err(|e| e.to_string())? {
@@ -1860,6 +1915,7 @@ fn copy_public(from: &std::path::Path, to: &std::path::Path) -> Result<(), Strin
             std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
             copy_public(&entry.path(), &target)?;
         } else {
+            rathkit_pack::reads::note(&entry.path(), true);
             std::fs::copy(entry.path(), &target).map_err(|e| format!("{}: {e}", target.display()))?;
         }
     }
@@ -2394,6 +2450,10 @@ fn run_build(job: &Job) -> Outcome {
     // text to the system rather than freeing them one allocation at a time, which takes a few percent of a small build. What was written
     // is written; the standard output is flushed on the way out.
     if job.options.cache.is_none() && job.host.is_none() && !job.more_builds {
+        if let Err(message) = write_depfile(job) {
+            eprintln!("error: {message}");
+            outcome.ok = false;
+        }
         std::process::exit(if outcome.ok { 0 } else { 1 });
     }
     if let Some(cache) = &job.options.cache {
@@ -2493,6 +2553,7 @@ fn watch_loop(job: std::sync::Arc<Job>) -> Done {
     }
     let mut began = std::time::SystemTime::now();
     let mut outcome = run_build(&job);
+    let _ = write_depfile(&job);
     if let (Some(state), Some(message)) = (&job.serve, &outcome.error) {
         state.set_error(message);
     }
@@ -2662,6 +2723,7 @@ fn watch_loop(job: std::sync::Arc<Job>) -> Done {
             cache.changes_are_known(Some(changed.iter().map(|(p, _)| p.clone()).collect()));
         }
         outcome = run_build(&job);
+        let _ = write_depfile(&job);
         if let Some(cache) = &job.options.cache {
             cache.changes_are_known(None);
         }

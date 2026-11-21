@@ -59,7 +59,7 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   is a hash of what is in the file and in the files it loads, so a name changes when anything the file runs does, which is what
   caching by name needs; no directories in a name; one entry is named the same with and without `--splitting`: `[name]` is the entry's file name, and without a template the one file is `bundle.js` when there is no `--splitting`; several entries without `--splitting` share one file, so `[name]` is `bundle` there; `--outfile` names its file itself and ignores the entry template) and `--out-extension:.js=.mjs` (or `.css=`);
   `--pure:NAME` (calls of a name, or of a chain such as `styled.div`, and tagged templates of it, are free of effects, so an unused one
-  is removed when what it is given has no effects either); `--preserve-symlinks`; `--metafile=FILE` (JSON in the shape of esbuild's metafile: every
+  is removed when what it is given has no effects either); `--preserve-symlinks`; `--depfile=FILE` (JSON, `{"read":[...],"missing":[...]}`: every file the build looked at, and every file it looked for and did not find, so a tool that hashes the inputs of a build can check its list and see what would change the build by appearing; paths are from the working folder with `/` and `..` where needed (a folder ends in `/`), sorted, so the same build in two checkouts of one layout writes the same file. It has the modules, the page, the `tsconfig` chain, `package.json` files used to resolve, `.env*` files, browserslist files, `public/`, the config file and the places searched for each of them, and every file and folder the resolver tried. It does not have what Node does for plugins (the files a config or plugin imports, PostCSS and Sass runs), and when watching it holds what every build so far looked at); `--metafile=FILE` (JSON in the shape of esbuild's metafile: every
   module with what it imports, every file written with the modules in it, what it imports and exports and its entry point;
   `bytesInOutput` is an estimate, the modules' original sizes scaled to the file's size). `rkp analyze meta.json --outfile report.html`
   turns a metafile into one HTML page (a treemap by package, the packages and modules of each output with their sizes, what imports a
@@ -477,7 +477,7 @@ after, and fails if anything appears, changes or goes that is not listed here.
 
 - **`rkp bundle`** writes the file of `--outfile`, or the files in `--outdir`, and what the options ask for next to them: `.map` files
   (`--sourcemap`), `.LEGAL.txt` (`--legal-comments=linked` or `external`), `.d.ts` files (`--dts`; `--dts-dir` names their folder), the file of
-  `--metafile`, the files of a module federation build (`remoteEntry.js`, `mf-manifest.json`, an `@mf-types` folder and its zip), and, for a page,
+  `--metafile` and of `--depfile`, the files of a module federation build (`remoteEntry.js`, `mf-manifest.json`, an `@mf-types` folder and its zip), and, for a page,
   the page, its scripts and style sheets, the images it names and the files of `public/`.
 - **It never empties an output folder.** A file that is already there stays unless the build writes a file of the same name. A page build writes a
   stand-in script for each style sheet and removes it again, inside the output folder.
