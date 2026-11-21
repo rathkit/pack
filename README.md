@@ -198,6 +198,17 @@ rkp bundle src/main.ts --outfile dist/app.mjs
 - `--watch` builds again when a file the build read changes (and plugins' `addWatchFile` files): plugins hear it. On Linux it hears of changes through file events (inotify); elsewhere it polls the files every 80 ms.
   through `watchChange`, a changed config starts everything again, and Ctrl-C ends it cleanly. Modules whose files
   did not change are kept between builds (no reading, parsing or scanning again; without plugins).
+- **Telling a tool that the server or the watcher is up.** These are stable and are tested:
+  - `rkp serve` prints `rkp serving at URL` as one line on the standard output when it is listening (`http://HOST:PORT/`, or `https://` with
+    `--https`). `--port 0` (or `--port=0`) asks the system for a free port, and `PORT` in that line is the one it got.
+  - `bundle --watch` and `rkp serve` print `watching N files (Ctrl-C to stop)` on the standard error after every build, so it says when the next
+    change will be seen; `N` changes, so match on `watching `, not on the whole line.
+  - `--ready-file=FILE` (for `--watch` and `serve`) is written once, when the first build is over and the server is listening (or the files are
+    watched), as one line of JSON: `{"event":"ready","url":"http://localhost:5173/","port":5173,"ok":true,"watching":12}`. It is written whole
+    (a file beside it is renamed into place), so a reader never sees half of it. `url` and `port` are there for `serve` only; `ok` is whether the
+    first build worked (the watcher is up either way, waiting for the fix). An old file of that name is removed when the command starts, and a
+    config change that starts the command again writes it again. It is not removed when the command ends. Without it, a tool can wait for the
+    line above or probe the port.
 - `rkp migrate [DIR] [--write]` says which of esbuild, Vite, webpack and Rollup a project uses (a config file in the root, in a subfolder that a script names (`rollup -c build/rollup.config.js`) or two levels down, a dependency, a
   package.json script that runs `esbuild`, or a file that imports it) and prints the `rkp` commands that do the same build, with notes
   on what does not carry over, as in [docs/migrate/](docs/migrate/README.md). The config files are read as text for the plain strings the
@@ -376,7 +387,7 @@ rkp bundle ENTRY... [--outfile FILE | --outdir DIR --splitting] [--no-treeshake]
     [--minify | --minify-whitespace --minify-identifiers --minify-syntax] [--keep-names | --no-keep-names]
     [--sourcemap[=inline|external]] [--no-sources-content]
     [--config FILE | --no-config] [--mode NAME] [--watch]
-rkp serve ENTRY... [--port N] [--host H] [the options above] [--define KEY=VALUE]... [--loader .ext=NAME]... [--asset-names T] [--public-path P] [--external NAME]... [--condition NAME]... [--main-field NAME]...
+rkp serve ENTRY... [--port N] [--host H] [--ready-file FILE] [the options above] [--define KEY=VALUE]... [--loader .ext=NAME]... [--asset-names T] [--public-path P] [--external NAME]... [--condition NAME]... [--main-field NAME]...
     [--alias NAME=PATH]... [--tsconfig FILE | --no-tsconfig]
     [--jsx automatic|classic] [--jsx-import-source S] [--jsx-factory F] [--jsx-fragment F]
     [--experimental-decorators] [--decorator-metadata] [--strict-null-checks] [--original-paths] [--platform-browser] [--mode M] [--env-dir D] [--env-prefix P]... [--no-env-files]
@@ -485,7 +496,7 @@ after, and fails if anything appears, changes or goes that is not listed here.
 - **`--write-exports[=FILE]`** edits `main`, `module`, `types` and `exports` in the `package.json` (or the file named) and keeps its other fields.
 - **`rkp migrate`** prints; with `--write` it adds scripts (`build:rkp`, `dev:rkp`) to `package.json` and never changes a script that is there.
   **`rkp analyze`** prints, or writes the page named by `--outfile`.
-- **`rkp serve`** writes nothing, and keeps pages in memory. With `--https` it makes a certificate and private key for `localhost` once and keeps
+- **`rkp serve`** writes nothing (but the file of `--ready-file`, and with `bundle --watch` too), and keeps pages in memory. With `--https` it makes a certificate and private key for `localhost` once and keeps
   them (mode 0600) in your cache folder (`$XDG_CACHE_HOME/rathkit/` or `~/.cache/rathkit/` on Linux): the one thing Pack writes outside the project
   without being told a name.
 - **The minifier cache** is off unless `RATHKIT_CACHE=on`; then it writes under `$XDG_CACHE_HOME/rathkit/minify` (or `RATHKIT_CACHE_DIR`), keeps that
