@@ -179,8 +179,17 @@ fn esbuild(dir: &Path, package: Option<&Json>) -> Option<Finding> {
             finding.notes.push(format!("script {name}: esbuild without --bundle only transforms files; rkp always bundles"));
         }
     }
-    // Files that call the JavaScript API.
-    let mut files: Vec<_> = std::fs::read_dir(dir).into_iter().flatten().flatten().filter_map(|e| e.file_name().into_string().ok()).filter(|n| CONFIG_EXTENSIONS.iter().any(|x| n.ends_with(&format!(".{x}")))).collect();
+    // Files that call the JavaScript API: the scripts of the root and the files that a package.json script runs (`node scripts/build.mjs`).
+    let mut files: Vec<String> = std::fs::read_dir(dir).into_iter().flatten().flatten().filter(|e| e.path().is_file()).filter_map(|e| e.file_name().into_string().ok()).filter(|n| CONFIG_EXTENSIONS.iter().any(|x| n.ends_with(&format!(".{x}")))).collect();
+    for (_, script) in package.and_then(|p| p.get("scripts")).and_then(Json::as_object).unwrap_or(&[]) {
+        for word in script.as_str().unwrap_or("").split_whitespace() {
+            let word = word.trim_matches(['\'', '"']).trim_start_matches("./");
+            let inside = !word.starts_with('/') && !word.split('/').any(|part| part == "..");
+            if inside && CONFIG_EXTENSIONS.iter().any(|x| word.ends_with(&format!(".{x}"))) && dir.join(word).is_file() && !files.iter().any(|f| f == word) {
+                files.push(word.to_string());
+            }
+        }
+    }
     files.sort();
     for file in files {
         let Ok(text) = std::fs::read_to_string(dir.join(&file)) else { continue };
@@ -188,14 +197,72 @@ fn esbuild(dir: &Path, package: Option<&Json>) -> Option<Finding> {
             continue;
         }
         finding.evidence.push(format!("API in {file}"));
-        finding.notes.push(format!("{file}: import from '@rathkit/pack' in place of 'esbuild'; the options keep their names"));
-        for (call, what) in [("context(", "context"), ("transform(", "transform"), ("transformSync(", "transformSync"), ("buildSync(", "buildSync"), ("write: false", "write: false"), ("stdin:", "stdin"), ("mangleProps", "mangleProps")] {
-            if text.contains(call) {
-                finding.notes.push(format!("{file}: {what} is not in @rathkit/pack (see docs/esbuild-conformance.md)"));
-            }
-        }
+        finding.notes.extend(esbuild_api_notes(&file, &text));
     }
     (!finding.evidence.is_empty()).then_some(finding)
+}
+
+/// Whether the line has `what` (a call such as `context(` or an option such as `write: false`) as a word of its own: not the end of a longer name.
+fn mentions(line: &str, what: &str) -> bool {
+    line.match_indices(what).any(|(i, _)| !line[..i].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '$'))
+}
+
+/// What changes in a script that uses esbuild's JavaScript API, line by line: the import of `esbuild` (the one change `--write` cannot make
+/// for you: the script is yours), and each call or option that `@rathkit/pack` does not have (docs/esbuild-conformance.md).
+fn esbuild_api_notes(file: &str, text: &str) -> Vec<String> {
+    // (what is written, why it does not carry over)
+    const GAPS: &[(&str, &str)] = &[
+        ("context(", "`context()` has no equivalent: there is no context object (`rebuild`, `watch`, `dispose`); use `serve(options)` for a server or `rkp bundle --watch`"),
+        ("transform(", "`transform()` has no equivalent: there is no transform API; the build is `build(options)` on files"),
+        ("transformSync(", "`transformSync()` has no equivalent: there is no transform API; the build is `build(options)` on files"),
+        ("buildSync(", "`buildSync()` has no equivalent: there is no synchronous build; `await build(options)`, or run `rkp bundle`"),
+        ("formatMessages(", "`formatMessages()` is not in the package (`rkp analyze` makes the HTML report of a metafile)"),
+        ("analyzeMetafile(", "`analyzeMetafile()` is not in the package (`rkp analyze` makes the HTML report of a metafile)"),
+        ("analyzeMetafileSync(", "`analyzeMetafileSync()` is not in the package (`rkp analyze` makes the HTML report of a metafile)"),
+        ("write: false", "`write: false` and `outputFiles` are not done: the build always writes"),
+        ("stdin:", "`stdin` is not done: the entry is a file"),
+        ("mangleProps", "`mangleProps`: mangling properties is not done"),
+        ("mangleCache", "`mangleCache`: mangling properties is not done"),
+        ("bundle: false", "`bundle: false` is a TypeError: rkp always bundles"),
+        ("outbase", "`outbase` is not done"),
+        ("supported:", "`supported` is not done"),
+        ("dropLabels", "`dropLabels` is not done"),
+        ("metafile: true", "`metafile` is a file name, not `true`"),
+    ];
+    let mut notes = Vec::new();
+    let mut imports = Vec::new();
+    let mut calls: Vec<usize> = Vec::new();
+    let mut plugins = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let n = i + 1;
+        let trimmed = line.trim();
+        if trimmed.starts_with("//") || trimmed.starts_with('*') {
+            continue;
+        }
+        if ["'esbuild'", "\"esbuild\""].iter().any(|q| trimmed.contains(&format!("from {q}")) || trimmed.contains(&format!("require({q})"))) {
+            let changed = trimmed.replace("'esbuild'", "'@rathkit/pack'").replace("\"esbuild\"", "\"@rathkit/pack\"");
+            imports.push(format!("{file}:{n}: `{trimmed}` becomes `{changed}`"));
+        }
+        // `esbuild.build(` and `build(`: the one call that is the same.
+        if mentions(line, "build(") && !trimmed.starts_with("import") {
+            calls.push(n);
+        }
+        for (what, why) in GAPS {
+            if mentions(line, what) {
+                notes.push(format!("{file}:{n}: {why} (docs/esbuild-conformance.md)"));
+            }
+        }
+        if let Some(module) = imports_of(line).into_iter().find(|m| m.starts_with("esbuild-plugin") || m.starts_with("@esbuild-plugins/")) {
+            plugins.push(format!("{file}:{n}: the plugin {module} stays in `plugins`: it runs through rkp's plugin API (the table in docs/esbuild-conformance.md says which hooks)"));
+        }
+    }
+    let mut out: Vec<String> = imports;
+    if !calls.is_empty() {
+        out.push(format!("{file}: build() at line{} {} is the same call in @rathkit/pack (options: entryPoints as file names, bundle: true, outfile, outdir, format, platform, define, loader, alias, minify, sourcemap, ...)", if calls.len() > 1 { "s" } else { "" }, calls.iter().map(usize::to_string).collect::<Vec<_>>().join(", ")));
+    }
+    out.extend(notes);
+    out.extend(plugins);
+    out
 }
 
 /// A script with each command that starts with `esbuild` made `rkp bundle`, and whether one was.

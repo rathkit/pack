@@ -106,7 +106,8 @@ fn esbuild_api_files_and_unsupported_flags_are_named() {
     let out = stdout(&rkp(&dir, &["migrate"]));
     assert!(out.contains("b:rkp: rkp bundle a.js --outdir=out"), "{out}");
     assert!(out.contains("--mangle-props is not supported") && out.contains("--serve is not supported"), "{out}");
-    assert!(out.contains("watch.mjs: context is not in @rathkit/pack"), "{out}");
+    assert!(out.contains("watch.mjs:1: `import * as esbuild from 'esbuild';` becomes `import * as esbuild from '@rathkit/pack';`"), "{out}");
+    assert!(out.contains("watch.mjs:2: `context()` has no equivalent: there is no context object"), "{out}");
     assert!(out.contains("without --bundle"), "{out}");
 }
 
@@ -232,4 +233,26 @@ fn a_config_in_a_subfolder_is_found_by_the_script_or_by_a_search() {
     std::fs::remove_file(dir.join("config/rollup.config.mjs")).unwrap();
     std::fs::write(dir.join("package.json"), "{\"scripts\":{\"build\":\"rollup -c ../rollup.config.js\"}}").unwrap();
     assert_eq!(rkp(&dir, &["migrate"]).status.code(), Some(1));
+}
+
+#[test]
+fn esbuild_api_scripts_get_the_lines_that_change() {
+    let dir = std::env::temp_dir().join(format!("rkp-migrate-esbuild-api-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("scripts")).unwrap();
+    // A script of a subfolder that a package.json script runs, in the style of a library's release build.
+    std::fs::write(dir.join("package.json"), "{\"scripts\":{\"build\":\"node scripts/build.mjs\"},\"devDependencies\":{\"esbuild\":\"1\"}}").unwrap();
+    std::fs::write(
+        dir.join("scripts/build.mjs"),
+        "import * as esbuild from 'esbuild';\nimport { umdWrapper } from 'esbuild-plugin-umd-wrapper';\n// build( in a comment\nawait esbuild.build({ entryPoints: ['a.js'], bundle: true, outfile: 'x.js', plugins: [umdWrapper()] });\nconst r = await esbuild.build({ entryPoints: ['b.js'], write: false });\nconst code = esbuild.transformSync('x');\n",
+    )
+    .unwrap();
+    let out = stdout(&rkp(&dir, &["migrate"]));
+    assert!(out.starts_with("esbuild (dependency esbuild, API in scripts/build.mjs)"), "{out}");
+    assert!(out.contains("note: scripts/build.mjs:1: `import * as esbuild from 'esbuild';` becomes `import * as esbuild from '@rathkit/pack';`"), "{out}");
+    assert!(out.contains("note: scripts/build.mjs: build() at lines 4, 5 is the same call in @rathkit/pack"), "{out}");
+    assert!(out.contains("note: scripts/build.mjs:5: `write: false` and `outputFiles` are not done"), "{out}");
+    assert!(out.contains("note: scripts/build.mjs:6: `transformSync()` has no equivalent: there is no transform API"), "{out}");
+    assert!(out.contains("note: scripts/build.mjs:2: the plugin esbuild-plugin-umd-wrapper stays in `plugins`"), "{out}");
+    assert!(!out.contains("build.mjs:3"), "{out}");
 }
