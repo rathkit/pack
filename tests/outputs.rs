@@ -10,7 +10,8 @@ fn scratch(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("rkp-outputs-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("src")).unwrap();
-    dir
+    // By its real name: the paths a build lists are real paths (a temporary folder is a link on macOS, has a short name on Windows).
+    rathkit_pack::resolve::without_verbatim_prefix(&std::fs::canonicalize(&dir).unwrap())
 }
 
 fn rkp(dir: &std::path::Path, args: &[&str]) -> std::process::Output {

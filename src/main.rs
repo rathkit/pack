@@ -1686,7 +1686,7 @@ static DESCRIBED: std::sync::Mutex<Option<(rathkit_pack::json::Json, bool)>> = s
 /// When a command is over: writes the metafile, which lists the files that were written, and `--list-files`. Neither of the two lists itself.
 fn finish_outputs(job: &Job) -> Result<(), String> {
     let write = |file: &str, text: String| -> Result<(), String> {
-        let target = job.cwd.join(file);
+        let target = std::path::absolute(file).unwrap_or_else(|_| job.cwd.join(file));
         target.parent().filter(|p| !p.as_os_str().is_empty()).map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&target, &text)).map_err(|e| format!("{file}: {e}"))?;
         rathkit_pack::written::record(&target, rathkit_pack::written::Kind::Metafile, text.len() as u64);
         Ok(())
@@ -1702,7 +1702,7 @@ fn finish_outputs(job: &Job) -> Result<(), String> {
             text.push_str(&w.path.to_string_lossy());
             text.push('\n');
         }
-        std::fs::write(job.cwd.join(file), text).map_err(|e| format!("{file}: {e}"))?;
+        std::fs::write(std::path::absolute(file).unwrap_or_else(|_| job.cwd.join(file)), text).map_err(|e| format!("{file}: {e}"))?;
     }
     Ok(())
 }
