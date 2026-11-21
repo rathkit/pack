@@ -232,7 +232,7 @@ export interface Metafile {
 export interface BuildResult {
   ok: true;
   status: 0;
-  /** The files written: the `outfile`, the files of `outdir`, pages. */
+  /** Every file the build wrote, as absolute paths: the output files, source maps, declaration files, license files, copied files, pages, files copied from `public/`, and the metafile. A file the build writes outside the output folder (`dtsDir`, `writeExports`, the `metafile`) is in the list too. */
   files: string[];
   /** The metafile, when `metafile` was asked for. */
   metafile?: Metafile;

@@ -726,6 +726,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     let mut env_files = true;
     let mut public_path_given = false;
     let mut metafile: Option<String> = None;
+    let mut list_files: Option<String> = None;
     let mut dts = false;
     let mut formats = vec![rathkit_pack::bundle::Format::Esm];
     let mut exports_given = false;
@@ -982,6 +983,10 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
             arg if arg == "--dts-dir" || arg.starts_with("--dts-dir=") => {
                 dts = true;
                 dts_dir = if arg == "--dts-dir" { it.next().cloned() } else { Some(arg["--dts-dir=".len()..].to_string()) };
+            }
+            // --list-files=FILE: every file the build wrote, one absolute path to a line (the Node API's `files`).
+            arg if arg == "--list-files" || arg.starts_with("--list-files=") => {
+                list_files = if arg == "--list-files" { it.next().cloned() } else { Some(arg["--list-files=".len()..].to_string()) };
             }
             arg if arg == "--metafile" || arg.starts_with("--metafile=") => {
                 metafile = if arg == "--metafile" { it.next().cloned() } else { Some(arg["--metafile=".len()..].to_string()) };
@@ -1460,7 +1465,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
         return Done::Exit(ExitCode::from(2));
     }
     let exports_target = write_exports.clone();
-    let job = std::sync::Arc::new(Job { allow_overwrite, cwd, entries, options, bundle_options, treeshake, outfile, outdir, host: plugin_host, config_file, watch, serve: serve_state, bind: (host_name, port), restart_files, workers, pages, metafile, dts: dts.then(|| (dts_dir, tsconfig_path.clone(), dts_bundle)), https: https.then(|| (https_cert, https_key)), more_builds: exports_target.is_some() });
+    let job = std::sync::Arc::new(Job { allow_overwrite, cwd, entries, options, bundle_options, treeshake, outfile, outdir, host: plugin_host, config_file, watch, serve: serve_state, bind: (host_name, port), restart_files, workers, pages, metafile, list_files, dts: dts.then(|| (dts_dir, tsconfig_path.clone(), dts_bundle)), https: https.then(|| (https_cert, https_key)), more_builds: exports_target.is_some() });
     if let Some(host) = &job.host {
         // Child compilers of webpack plugins build one entry as a script that sets a global.
         let for_children = job.clone();
@@ -1469,6 +1474,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     if job.watch {
         return watch_loop(job);
     }
+    rathkit_pack::written::reset();
     let mut outcome = if formats.len() > 1 { run_formats(&job, &formats) } else { run_build(&job) };
     if let (true, Some(file)) = (outcome.ok, &exports_target) {
         match write_package_exports(&job, &formats, file) {
@@ -1478,6 +1484,10 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
                 outcome.ok = false;
             }
         }
+    }
+    if let Err(message) = finish_outputs(&job) {
+        eprintln!("error: {message}");
+        outcome.ok = false;
     }
     if let Some(host) = &job.host {
         if let Err(message) = host.close_bundle() {
@@ -1509,6 +1519,8 @@ struct Job {
     pages: Vec<Page>,
     /// Where to write what went into the build and what came out, as JSON.
     metafile: Option<String>,
+    /// Where to write the list of the files the build wrote, one path to a line.
+    list_files: Option<String>,
     /// `--dts`: with the folder to write the declarations to, or none for the output folder.
     dts: Option<(Option<String>, Option<String>, bool)>,
     /// `--https`: the certificate and key files, or none for a self-signed certificate.
@@ -1632,7 +1644,8 @@ fn write_package_exports(job: &Job, formats: &[rathkit_pack::bundle::Format], fi
     let mut out = String::new();
     pretty_json(&Json::Object(fields), 0, &mut out);
     out.push('\n');
-    std::fs::write(&target, out).map_err(|e| format!("{}: {e}", target.display()))?;
+    std::fs::write(&target, &out).map_err(|e| format!("{}: {e}", target.display()))?;
+    rathkit_pack::written::record(&target, rathkit_pack::written::Kind::Exports, out.len() as u64);
     Ok(format!("{}  exports for {} entr{}", target.display(), names.len(), if names.len() == 1 { "y" } else { "ies" }))
 }
 
@@ -1665,6 +1678,44 @@ fn pretty_json(value: &rathkit_pack::json::Json, depth: usize, out: &mut String)
         }
         other => out.push_str(&other.to_string()),
     }
+}
+
+/// The metafile a build described, and whether it wrote files (see `rathkit_pack::metafile`), until the whole command is over.
+static DESCRIBED: std::sync::Mutex<Option<(rathkit_pack::json::Json, bool)>> = std::sync::Mutex::new(None);
+
+/// When a command is over: writes the metafile, which lists the files that were written, and `--list-files`. Neither of the two lists itself.
+fn finish_outputs(job: &Job) -> Result<(), String> {
+    let write = |file: &str, text: String| -> Result<(), String> {
+        let target = std::path::absolute(file).unwrap_or_else(|_| job.cwd.join(file));
+        target.parent().filter(|p| !p.as_os_str().is_empty()).map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&target, &text)).map_err(|e| format!("{file}: {e}"))?;
+        rathkit_pack::written::record(&target, rathkit_pack::written::Kind::Metafile, text.len() as u64);
+        Ok(())
+    };
+    let described = DESCRIBED.lock().unwrap().take();
+    if let (Some(file), Some((json, listed))) = (&job.metafile, described) {
+        let text = rathkit_pack::metafile::finish(json, &rathkit_pack::written::all(), &job.cwd, listed);
+        write(file, text)?;
+    }
+    if let Some(file) = &job.list_files {
+        let mut text = String::new();
+        for w in rathkit_pack::written::all() {
+            text.push_str(&w.path.to_string_lossy());
+            text.push('\n');
+        }
+        std::fs::write(std::path::absolute(file).unwrap_or_else(|_| job.cwd.join(file)), text).map_err(|e| format!("{file}: {e}"))?;
+    }
+    Ok(())
+}
+
+/// One build whose files are listed from the start: for the builds of a watching run, one after the other.
+fn run_tracked(job: &Job) -> Outcome {
+    rathkit_pack::written::reset();
+    let mut outcome = run_build(job);
+    if let Err(message) = finish_outputs(job) {
+        eprintln!("error: {message}");
+        outcome.ok = false;
+    }
+    outcome
 }
 
 /// A library written in several formats: one build for each, the ES module files ending in `.mjs` and the CommonJS ones in `.cjs`.
@@ -1714,6 +1765,7 @@ fn run_formats(job: &Job, formats: &[rathkit_pack::bundle::Format]) -> Outcome {
             workers: job.workers.clone(),
             pages: Vec::new(),
             metafile: if position == 0 { job.metafile.clone() } else { None },
+            list_files: None,
             dts: if position == 0 { job.dts.clone() } else { None },
             https: None,
             more_builds: job.more_builds || position + 1 < total,
@@ -1791,10 +1843,6 @@ fn write_pages(job: &Job, dir: &std::path::Path, output: &rathkit_pack::bundle::
                     }
                     sheet = found.ok_or_else(|| format!("{}: no built style sheet for {}", page.file.display(), reference.src))?;
                 }
-                if !single {
-                    let _ = std::fs::remove_file(dir.join(&chunk.file));
-                    let _ = std::fs::remove_file(dir.join(format!("{}.map", chunk.file)));
-                }
                 sheet
             } else {
                 chunk.file.clone()
@@ -1824,6 +1872,7 @@ fn write_pages(job: &Job, dir: &std::path::Path, output: &rathkit_pack::bundle::
             let bytes = std::fs::read(&file).map_err(|e| format!("{}: {e}", file.display()))?;
             let name = rathkit_pack::loader::asset_name(&job.options.asset_names, &file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), &bytes);
             std::fs::write(dir.join(&name), &bytes).map_err(|e| format!("{name}: {e}"))?;
+            rathkit_pack::written::record(&dir.join(&name), rathkit_pack::written::Kind::Asset, bytes.len() as u64);
             edits.push((reference.start, reference.end, format!("{}{name}{suffix}", job.options.public_path)));
         }
         edits.sort_by_key(|(start, _, _)| std::cmp::Reverse(*start));
@@ -1842,7 +1891,8 @@ fn write_pages(job: &Job, dir: &std::path::Path, output: &rathkit_pack::bundle::
             html = host.transform_built_page(&html, &format!("/{}", relative.to_string_lossy().replace('\\', "/")))?;
         }
         let target = dir.join(relative.file_name().map(std::path::PathBuf::from).unwrap_or_default());
-        std::fs::write(&target, html).map_err(|e| format!("{}: {e}", target.display()))?;
+        std::fs::write(&target, &html).map_err(|e| format!("{}: {e}", target.display()))?;
+        rathkit_pack::written::record(&target, rathkit_pack::written::Kind::Html, html.len() as u64);
         println!("{}  page", target.display());
     }
     copy_public(&public, dir)
@@ -1860,7 +1910,8 @@ fn copy_public(from: &std::path::Path, to: &std::path::Path) -> Result<(), Strin
             std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
             copy_public(&entry.path(), &target)?;
         } else {
-            std::fs::copy(entry.path(), &target).map_err(|e| format!("{}: {e}", target.display()))?;
+            let bytes = std::fs::copy(entry.path(), &target).map_err(|e| format!("{}: {e}", target.display()))?;
+            rathkit_pack::written::record(&target, rathkit_pack::written::Kind::Public, bytes);
         }
     }
     Ok(())
@@ -2234,13 +2285,15 @@ fn run_build(job: &Job) -> Outcome {
         }
         (other, _) => other,
     };
-    if let (Ok(output), Some(file)) = (&result, &job.metafile) {
-        let target = std::path::Path::new(file);
-        let text = rathkit_pack::metafile::build(&graph, output, cwd);
-        if let Err(e) = target.parent().filter(|p| !p.as_os_str().is_empty()).map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(target, text)) {
-            eprintln!("error: {file}: {e}");
-            return outcome;
-        }
+    if let (Ok(output), Some(_)) = (&result, &job.metafile) {
+        // The files go to the output folder; what was written is known when the build is over (see `finish_outputs`).
+        let folder = match (outdir, outfile, &job.serve) {
+            (_, _, Some(_)) => None,
+            (Some(dir), _, None) => Some(std::path::PathBuf::from(dir)),
+            (None, Some(file), None) => Some(std::path::Path::new(file).parent().map(|p| p.to_path_buf()).unwrap_or_default()),
+            _ => None,
+        };
+        *DESCRIBED.lock().unwrap() = Some((rathkit_pack::metafile::build(&graph, output, cwd, folder.as_deref()), folder.is_some()));
     }
     // The dev server keeps the build in memory instead of writing it.
     if let Some(state) = &job.serve {
@@ -2299,16 +2352,25 @@ fn run_build(job: &Job) -> Outcome {
                 eprintln!("{}: {e}", dir.display());
                 return outcome;
             }
+            // The empty scripts that style sheets of a page get as entries are not files of the build.
+            let stand_ins = stand_in_scripts(job, &output);
+            written_names.retain(|n| !stand_ins.contains(n));
             for file in &output.files {
+                if stand_ins.contains(&file.name) {
+                    continue;
+                }
                 if let Err(e) = write_output(&dir, file) {
                     eprintln!("{}: {e}", file.name);
                     return outcome;
                 }
+                let kind = rathkit_pack::written::kind_of(&output, file);
+                rathkit_pack::written::record(&dir.join(&file.name), kind, file.data.as_ref().map_or(file.code.len(), |d| d.len()) as u64);
                 if let Some(map) = &file.map {
                     if let Err(e) = std::fs::write(dir.join(format!("{}.map", file.name)), map) {
                         eprintln!("{}.map: {e}", file.name);
                         return outcome;
                     }
+                    rathkit_pack::written::record(&dir.join(format!("{}.map", file.name)), rathkit_pack::written::Kind::Map, map.len() as u64);
                 }
                 println!("{}  {:.1} KB", dir.join(&file.name).display(), file.data.as_ref().map_or(file.code.len(), |d| d.len()) as f64 / 1024.0);
             }
@@ -2319,22 +2381,7 @@ fn run_build(job: &Job) -> Outcome {
             ExitCode::SUCCESS
         }
         Ok(output) => match outfile {
-            Some(path) => match std::path::Path::new(path).parent().filter(|p| !p.as_os_str().is_empty()).map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(path, &output.code))
-                .and_then(|()| match output.files.first().and_then(|f| f.map.as_ref()) {
-                    Some(map) => std::fs::write(format!("{path}.map"), map),
-                    None => Ok(()),
-                })
-                .and_then(|()| {
-                    // Style sheets and copied files go next to the output file.
-                    let dir = std::path::Path::new(path).parent().map(|p| p.to_path_buf()).unwrap_or_default();
-                    output.files.iter().skip(1).try_for_each(|f| {
-                        write_output(&dir, f)?;
-                        match &f.map {
-                            Some(map) => std::fs::write(dir.join(format!("{}.map", f.name)), map),
-                            None => Ok(()),
-                        }
-                    })
-                }) {
+            Some(path) => match write_outfile(&output, path) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("{path}: {e}");
@@ -2366,6 +2413,10 @@ fn run_build(job: &Job) -> Outcome {
                     for message in &done.messages {
                         eprintln!("types: {message}");
                     }
+                    for name in &done.files {
+                        let file = target.join(name);
+                        rathkit_pack::written::record(&file, rathkit_pack::written::Kind::Dts, std::fs::metadata(&file).map_or(0, |m| m.len()));
+                    }
                     println!("{}  {} declaration file{}", target.display(), done.files.len(), if done.files.len() == 1 { "" } else { "s" });
                 }
                 Err(message) => {
@@ -2394,6 +2445,10 @@ fn run_build(job: &Job) -> Outcome {
     // text to the system rather than freeing them one allocation at a time, which takes a few percent of a small build. What was written
     // is written; the standard output is flushed on the way out.
     if job.options.cache.is_none() && job.host.is_none() && !job.more_builds {
+        if let Err(message) = finish_outputs(job) {
+            eprintln!("error: {message}");
+            outcome.ok = false;
+        }
         std::process::exit(if outcome.ok { 0 } else { 1 });
     }
     if let Some(cache) = &job.options.cache {
@@ -2492,7 +2547,7 @@ fn watch_loop(job: std::sync::Arc<Job>) -> Done {
         }
     }
     let mut began = std::time::SystemTime::now();
-    let mut outcome = run_build(&job);
+    let mut outcome = run_tracked(&job);
     if let (Some(state), Some(message)) = (&job.serve, &outcome.error) {
         state.set_error(message);
     }
@@ -2661,7 +2716,7 @@ fn watch_loop(job: std::sync::Arc<Job>) -> Done {
         if let (Some(cache), Some(_)) = (&job.options.cache, &notifier) {
             cache.changes_are_known(Some(changed.iter().map(|(p, _)| p.clone()).collect()));
         }
-        outcome = run_build(&job);
+        outcome = run_tracked(&job);
         if let Some(cache) = &job.options.cache {
             cache.changes_are_known(None);
         }
@@ -2781,6 +2836,54 @@ fn ts_verdicts(files: &[String]) -> ExitCode {
 }
 
 /// Writes one output file (text or bytes) under `dir`, making the folders its name asks for.
+/// `--outfile`: the first file of the output is the one named; style sheets and copied files go next to it.
+fn write_outfile(output: &rathkit_pack::bundle::Output, path: &str) -> std::io::Result<()> {
+    use rathkit_pack::written::{Kind, kind_of, record};
+    let target = std::path::Path::new(path);
+    if let Some(parent) = target.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(target, &output.code)?;
+    let first = output.files.first();
+    record(target, first.map_or(Kind::Entry, |f| kind_of(output, f)), output.code.len() as u64);
+    if let Some(map) = first.and_then(|f| f.map.as_ref()) {
+        std::fs::write(format!("{path}.map"), map)?;
+        record(std::path::Path::new(&format!("{path}.map")), Kind::Map, map.len() as u64);
+    }
+    let dir = target.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    for f in output.files.iter().skip(1) {
+        write_output(&dir, f)?;
+        record(&dir.join(&f.name), kind_of(output, f), f.data.as_ref().map_or(f.code.len(), |d| d.len()) as u64);
+        if let Some(map) = &f.map {
+            std::fs::write(dir.join(format!("{}.map", f.name)), map)?;
+            record(&dir.join(format!("{}.map", f.name)), Kind::Map, map.len() as u64);
+        }
+    }
+    Ok(())
+}
+
+/// The scripts that the style sheets of a page get when they are built as entries (ES modules): empty, so they are not written.
+fn stand_in_scripts(job: &Job, output: &rathkit_pack::bundle::Output) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    if !job.bundle_options.splitting {
+        return names;
+    }
+    for page in &job.pages {
+        for (_, path) in &page.styles {
+            if let Some(chunk) = output.chunks.iter().find(|c| c.is_entry && c.facade_module.as_ref().is_some_and(|m| same_file(std::path::Path::new(m), path))) {
+                names.insert(chunk.file.clone());
+                names.insert(format!("{}.map", chunk.file));
+            }
+        }
+    }
+    names
+}
+
+fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    let canon = |p: &std::path::Path| std::fs::canonicalize(p).map(|c| rathkit_pack::resolve::without_verbatim_prefix(&c)).unwrap_or_else(|_| p.to_path_buf());
+    canon(a) == canon(b)
+}
+
 fn write_output(dir: &std::path::Path, file: &rathkit_pack::bundle::OutputFile) -> std::io::Result<()> {
     let target = dir.join(&file.name);
     if let Some(parent) = target.parent() {

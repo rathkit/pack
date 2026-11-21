@@ -80,6 +80,7 @@ const cases = [
     : []),
   { name: '--write-exports edits package.json', args: ['bundle', 'src/main.ts', '--outdir', 'dist', '--splitting', '--write-exports'], created: ['proj/dist/main.js'], modified: ['proj/package.json'] },
   { name: 'a page and public/', args: ['bundle', 'index.html', '--outdir', 'dist'], created: ['proj/dist/index.html', 'proj/dist/page.js', 'proj/dist/robots.txt', 'proj/dist/style.css'] },
+  { name: '--metafile lists a page, its files and the maps', args: ['bundle', 'index.html', '--outdir', 'dist', '--sourcemap', '--metafile=meta.json'], created: ['proj/dist/index.html', 'proj/dist/page.js', 'proj/dist/page.js.map', 'proj/dist/robots.txt', 'proj/dist/style.css', 'proj/dist/style.css.map', 'proj/meta.json'] },
   { name: 'a build over its own input stops', args: ['bundle', 'src/main.ts', '--outfile', 'src/main.ts'], created: [], expectFail: true },
   { name: 'rkp migrate prints', args: ['migrate'], created: [] },
   { name: 'rkp migrate --write edits package.json', args: ['migrate', '--write'], modified: ['proj/package.json'] },
@@ -106,6 +107,7 @@ const request = (url, ca) =>
   });
 
 let failures = 0;
+let listed = 0;
 for (const c of cases) {
   const sb = mkdtempSync(join(sandboxes, 'case-'));
   const p = project(sb);
@@ -133,7 +135,11 @@ for (const c of cases) {
     await new Promise((r) => setTimeout(r, 300));
     if (status !== 200) problem = `the server answered ${status}`;
   } else {
-    const r = spawnSync(bin, c.args, { cwd: p, env, encoding: 'utf8', timeout: 120000 });
+    // A build also says what it wrote: `--list-files` (the Node API's `files`) and the metafile are compared with the folder below.
+    const lists = c.args[0] === 'bundle' && !c.expectFail;
+    const listFile = join(sandboxes, `list-${listed++}.txt`);
+    const r = spawnSync(bin, lists ? [...c.args, `--list-files=${listFile}`] : c.args, { cwd: p, env, encoding: 'utf8', timeout: 120000 });
+    c.listFile = lists ? listFile : null;
     if (c.expectFail ? r.status === 0 : r.status !== 0) problem = c.expectFail ? 'it should have stopped with an error' : `exit ${r.status}: ${(r.stderr || '').split('\n')[0]}`;
   }
   const after = snapshot(sb);
@@ -146,6 +152,21 @@ for (const c of cases) {
     if (left.length) problem ??= `${label} something that is not stated: ${left.join(', ')}`;
     if (missing.length) problem ??= `${label} less than stated: ${missing.join(', ')}`;
   };
+  if (!problem && c.listFile) {
+    // What the program lists is what is on disk: the files that appeared and the files it changed (`--write-exports`), none missing, none extra.
+    const written = readFileSync(c.listFile, 'utf8').split('\n').filter(Boolean).map((f) => relative(sb, f));
+    const onDisk = [...createdNow, ...modifiedNow].filter((f) => f.startsWith('proj/'));
+    if (JSON.stringify(sorted(written)) !== JSON.stringify(sorted(onDisk))) problem = `--list-files says ${sorted(written).join(', ')}; the folder has ${sorted(onDisk).join(', ')}`;
+    // The metafile lists the same files with a kind, but not itself.
+    const meta = c.args.find((a) => a.startsWith('--metafile='))?.slice('--metafile='.length);
+    if (!problem && meta) {
+      const outputs = JSON.parse(readFileSync(join(p, meta), 'utf8')).outputs;
+      const names = sorted(Object.keys(outputs).map((k) => relative(sb, join(p, k))));
+      const want = sorted(onDisk.filter((f) => f !== join('proj', meta)));
+      if (JSON.stringify(names) !== JSON.stringify(want)) problem = `the metafile's outputs are ${names.join(', ')}; the folder has ${want.join(', ')}`;
+      else if (Object.values(outputs).some((o) => typeof o.kind !== 'string')) problem = 'an output of the metafile has no kind';
+    }
+  }
   if (!problem) {
     check('created', createdNow, c.created);
     check('modified', modifiedNow, c.modified);

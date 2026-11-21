@@ -222,7 +222,11 @@ async function build(options = {}) {
     options = await withPluginObjects(esbuildNames(options), cleanups, 'build');
     const { entries, args } = toArgs(options, cleanups);
     if (!entries.length) throw new TypeError('rkp: build needs entries');
-    const r = await run(['bundle', ...entries, ...args], options);
+    // The program lists every file it wrote in a file of its own: the output files, maps, declarations, copied files, pages and the metafile.
+    const listDir = mkdtempSync(join(tmpdir(), 'rkp-files-'));
+    cleanups.push(() => rmSync(listDir, { recursive: true, force: true }));
+    const listFile = join(listDir, 'files.txt');
+    const r = await run(['bundle', ...entries, ...args, `--list-files=${listFile}`], options);
     const result = {
       ok: r.status === 0,
       status: r.status,
@@ -230,12 +234,10 @@ async function build(options = {}) {
       stderr: r.stderr,
       errors: lines(r.stderr, 'error: '),
       warnings: lines(r.stderr, 'warning: '),
-      // What the program lists: `path  1.5 KB` for each file and `path  page` for each page.
-      files: r.stdout.split('\n').map((l) => /^(.*?)  (?:[\d.]+ KB|page)$/.exec(l)?.[1]).filter(Boolean),
+      // Every file the build wrote, as absolute paths (see `--list-files` in the README).
+      files: existsSync(listFile) ? readFileSync(listFile, 'utf8').split('\n').filter(Boolean) : [],
     };
     if (!result.ok) throw new BuildError(result);
-    // A single output file is not listed by the program; the page and style sheets beside it are.
-    if (options.outfile) result.files.unshift(resolve(options.cwd ?? process.cwd(), options.outfile));
     // The metafile is read back, so a program can use it without opening the file.
     if (options.metafile) result.metafile = JSON.parse(readFileSync(resolve(options.cwd ?? process.cwd(), options.metafile), 'utf8'));
     return result;

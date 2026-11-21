@@ -80,7 +80,7 @@ How `rkp` is shaped differently, once, so the rows can be short:
 | `--conditions=` | supported | | `conditions` |
 | `--resolve-extensions=` | supported | | `resolve-extensions` |
 | `--preserve-symlinks` | supported | | `preserve-symlinks` |
-| `--metafile=` | supported | the shape of esbuild's metafile; `bytesInOutput` is an estimate; `rkp analyze` makes a report of it | `metafile`, and `tests/analyze.rs` |
+| `--metafile=` | supported | the shape of esbuild's metafile (`outputs` are named from the working folder and list every file written, each with a `kind`, which esbuild's does not have); `bytesInOutput` is an estimate; `rkp analyze` makes a report of it | `metafile`, and `tests/analyze.rs` |
 | `--analyze` | gap | gap 10 (`rkp analyze meta.json` is the way to read a metafile) | `gap-analyze` |
 | `--abs-paths=` | gap | gap 10 | `gap-abs-paths` |
 | `--log-level=`, `--color=`, `--log-limit=` | partly | accepted and ignored: messages go to the standard error | `log-level`, `color`, `log-limit` |
@@ -113,7 +113,7 @@ differ are listed. An option the API does not have is a `TypeError` (a typo is n
 | `outbase`, `sourceRoot`, `lineLimit`, `logOverride`, `nodePaths` | gap | gaps 3, 8, 10 | none (an unknown option is a `TypeError`) |
 | `plugins` | partly | plugin objects (esbuild's `{ name, setup(build) }` among them, and Rollup and Vite hooks), `{ module }` descriptors, or a config file; see the plugin table | `tools/run-plugins.mjs` |
 
-Results: `build` resolves with `{ ok, status, files, metafile, warnings, errors, stdout, stderr }` (esbuild's is `{ errors, warnings,
+Results: `build` resolves with `{ ok, status, files, metafile, warnings, errors, stdout, stderr }` (`files` is every file written, as absolute paths; esbuild's is `{ errors, warnings,
 outputFiles, metafile, mangleCache }`; the messages here are strings, not objects with a `location`) and rejects with a `BuildError` when
 the build fails (esbuild rejects the same way).
 

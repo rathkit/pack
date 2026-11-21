@@ -35,7 +35,7 @@ const result = await build({
   define: { 'process.env.NODE_ENV': '"production"' },
   loader: { '.svg': 'dataurl' },
 });
-console.log(result.files); // the files written
+console.log(result.files); // every file written (absolute paths): outputs, maps, declarations, pages, copied files, the metafile
 
 const server = await serve({ entries: 'src/main.ts', port: 5173 });
 console.log(server.url); // http://localhost:5173/

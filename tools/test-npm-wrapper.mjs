@@ -80,7 +80,8 @@ writeFileSync(join(project, 'remote.js'), 'export const hello = () => "remote";\
 writeFileSync(
   join(project, 'api.mjs'),
   `import { build, serve, run, version, binaryPath, BuildError } from '@rathkit/pack';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 const problems = [];
 const check = (ok, what) => ok || problems.push(what);
@@ -99,12 +100,27 @@ const wrapped = await build({ metafile: 'dist/meta.json', entries: 'api-main.js'
 const wrappedText = readFileSync('dist/wrapped.mjs', 'utf8');
 check(wrapped.ok && wrappedText.startsWith('// top\\n') && wrappedText.includes('// bottom') && !wrappedText.includes('console.log'), 'banner, footer and drop ' + wrappedText);
 check(readFileSync('dist/wrapped.css', 'utf8').startsWith('/* top */'), 'the css banner');
-check(wrapped.metafile && wrapped.metafile.inputs['api-main.js'] && Object.keys(wrapped.metafile.outputs).includes('wrapped.mjs'), 'the metafile in the result ' + JSON.stringify(wrapped.metafile && { inputs: Object.keys(wrapped.metafile.inputs), outputs: Object.keys(wrapped.metafile.outputs) }) + ' cwd ' + process.cwd());
+check(wrapped.metafile && wrapped.metafile.inputs['api-main.js'] && Object.keys(wrapped.metafile.outputs).includes('dist/wrapped.mjs'), 'the metafile in the result ' + JSON.stringify(wrapped.metafile && { inputs: Object.keys(wrapped.metafile.inputs), outputs: Object.keys(wrapped.metafile.outputs) }) + ' cwd ' + process.cwd());
 
 // A page, with a folder of output.
 const page = await build({ entries: 'index.html', outdir: 'dist/page' });
 check(page.files.some((f) => f.endsWith('index.html')), 'page files ' + JSON.stringify(page.files));
 check(/<script type="module" src="\\.\\/api-main\\.js">/.test(readFileSync('dist/page/index.html', 'utf8')), 'the page points at the built script: ' + readFileSync('dist/page/index.html', 'utf8'));
+
+// The result lists every file the build wrote, and each of them is on disk: a page with a style sheet (the style sheet's stand-in script is not
+// written), source maps and the metafile.
+mkdirSync('sheetpage', { recursive: true });
+writeFileSync('sheetpage/index.html', '<!doctype html><html><head><link rel="stylesheet" href="./style.css"></head><body><script type="module" src="./main.js"></script></body></html>\\n');
+writeFileSync('sheetpage/style.css', 'h1 { color: red; }\\n');
+writeFileSync('sheetpage/main.js', "console.log('page');\\n");
+const listed = await build({ entries: 'sheetpage/index.html', outdir: 'sheetpage/out', sourcemap: true, metafile: 'sheetpage/meta.json' });
+const onDisk = (dir) => readdirSync(dir, { recursive: true, withFileTypes: true }).filter((e) => e.isFile()).map((e) => join(e.parentPath ?? e.path, e.name));
+check(listed.files.every((f) => existsSync(f)), 'every file listed exists ' + JSON.stringify(listed.files));
+check(!listed.stdout.split('\\n').some((l) => /style\\.js\\b/.test(l)), 'the stand-in script of the style sheet is not printed: ' + listed.stdout);
+const expected = [...onDisk('sheetpage/out'), join(process.cwd(), 'sheetpage/meta.json')].map((f) => join(process.cwd(), f.replace(process.cwd(), ''))).sort();
+check(JSON.stringify([...listed.files].sort()) === JSON.stringify(expected), 'files are what the build wrote: ' + JSON.stringify(listed.files) + ' against ' + JSON.stringify(expected));
+for (const kind of ['entry', 'map', 'html']) check(Object.values(listed.metafile.outputs).some((o) => o.kind === kind), 'the metafile has a ' + kind + ' output');
+check(Object.keys(listed.metafile.outputs).every((k) => existsSync(k)), 'the keys of outputs are paths from the working folder: ' + Object.keys(listed.metafile.outputs));
 
 // Federation options given as an object.
 const fed = await build({ entries: 'remote.js', outdir: 'dist/fed', federation: { name: 'remote', filename: 'remoteEntry.js', exposes: { './hello': './remote.js' } } });

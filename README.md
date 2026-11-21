@@ -60,8 +60,11 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   caching by name needs; no directories in a name; one entry is named the same with and without `--splitting`: `[name]` is the entry's file name, and without a template the one file is `bundle.js` when there is no `--splitting`; several entries without `--splitting` share one file, so `[name]` is `bundle` there; `--outfile` names its file itself and ignores the entry template) and `--out-extension:.js=.mjs` (or `.css=`);
   `--pure:NAME` (calls of a name, or of a chain such as `styled.div`, and tagged templates of it, are free of effects, so an unused one
   is removed when what it is given has no effects either); `--preserve-symlinks`; `--metafile=FILE` (JSON in the shape of esbuild's metafile: every
-  module with what it imports, every file written with the modules in it, what it imports and exports and its entry point;
-  `bytesInOutput` is an estimate, the modules' original sizes scaled to the file's size). `rkp analyze meta.json --outfile report.html`
+  module with what it imports, every file written, named by its path from the working folder (`dist/main.js`), with its size, its `kind`
+  (`entry`, `chunk`, `map`, `asset`, `html`, `public`, `dts`, `legal`, or `exports` for the `package.json` that `--write-exports` changed), and, for scripts
+  and style sheets, the modules in it, what it imports and exports and its entry point; the metafile does not list itself;
+  `bytesInOutput` is an estimate, the modules' original sizes scaled to the file's size). `--list-files=FILE` writes the path of every file the
+  build wrote (the metafile among them, the list itself not), one absolute path to a line; it is what the Node API's `files` is made from. `rkp analyze meta.json --outfile report.html`
   turns a metafile into one HTML page (a treemap by package, the packages and modules of each output with their sizes, what imports a
   module, a filter box; style and script are inline, the page fetches nothing and the metafile is inside it). Without `--outfile` the page
   is on the standard output.
@@ -479,8 +482,9 @@ after, and fails if anything appears, changes or goes that is not listed here.
   (`--sourcemap`), `.LEGAL.txt` (`--legal-comments=linked` or `external`), `.d.ts` files (`--dts`; `--dts-dir` names their folder), the file of
   `--metafile`, the files of a module federation build (`remoteEntry.js`, `mf-manifest.json`, an `@mf-types` folder and its zip), and, for a page,
   the page, its scripts and style sheets, the images it names and the files of `public/`.
-- **It never empties an output folder.** A file that is already there stays unless the build writes a file of the same name. A page build writes a
-  stand-in script for each style sheet and removes it again, inside the output folder.
+- **It never empties an output folder.** A file that is already there stays unless the build writes a file of the same name. A page build does not
+  write the empty stand-in script that a style sheet gets as an entry, so what the build prints, what `--list-files` lists and what the metafile's
+  `outputs` holds are the files that are on disk.
 - **A build that would write over one of its own input files stops** with an error; `--allow-overwrite` lets it.
 - **`--write-exports[=FILE]`** edits `main`, `module`, `types` and `exports` in the `package.json` (or the file named) and keeps its other fields.
 - **`rkp migrate`** prints; with `--write` it adds scripts (`build:rkp`, `dev:rkp`) to `package.json` and never changes a script that is there.
