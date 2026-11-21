@@ -25,7 +25,7 @@ pub fn read_project(dir: &Path, env: &str, variable: Option<&str>) -> Result<Opt
     while let Some(d) = current {
         for name in [".browserslistrc", "browserslist"] {
             let path = d.join(name);
-            if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Ok(text) = crate::reads::read_to_string(&path) {
                 let queries = parse_config(&text, env);
                 if queries.is_empty() {
                     continue;
@@ -34,7 +34,7 @@ pub fn read_project(dir: &Path, env: &str, variable: Option<&str>) -> Result<Opt
             }
         }
         let package = d.join("package.json");
-        if let Ok(text) = std::fs::read_to_string(&package) {
+        if let Ok(text) = crate::reads::read_to_string(&package) {
             if let Ok(json) = Json::parse(&text) {
                 if let Some(value) = json.get("browserslist") {
                     let queries = from_json(value, env);

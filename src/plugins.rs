@@ -198,17 +198,17 @@ pub fn needs_style_host(root: &Path) -> bool {
         "postcss.config.js", "postcss.config.cjs", "postcss.config.mjs", "postcss.config.ts", "postcss.config.cts", "postcss.config.mts", ".postcssrc", ".postcssrc.json",
         ".postcssrc.js", ".postcssrc.cjs", ".postcssrc.mjs", ".postcssrc.ts", ".postcssrc.cts", ".postcssrc.mts",
     ];
-    if POSTCSS.iter().any(|f| root.join(f).is_file()) {
+    if POSTCSS.iter().any(|f| crate::reads::is_file(&root.join(f))) {
         return true;
     }
-    if let Ok(text) = std::fs::read_to_string(root.join("package.json")) {
+    if let Ok(text) = crate::reads::read_to_string(&root.join("package.json")) {
         if text.contains("\"postcss\"") && Json::parse(&text).is_ok_and(|j| matches!(j.get("postcss"), Some(Json::Object(_)))) {
             return true;
         }
     }
     let mut dir = Some(root);
     while let Some(d) = dir {
-        if ["sass", "sass-embedded", "less", "stylus"].iter().any(|n| d.join("node_modules").join(n).is_dir()) {
+        if ["sass", "sass-embedded", "less", "stylus"].iter().any(|n| crate::reads::is_dir(&d.join("node_modules").join(n))) {
             return true;
         }
         dir = d.parent();
