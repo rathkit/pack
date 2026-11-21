@@ -1525,7 +1525,7 @@ fn write_package_exports(job: &Job, formats: &[rathkit_pack::bundle::Format], fi
     let outdir = job.outdir.as_ref().ok_or("it needs --outdir")?;
     let target = job.cwd.join(file);
     let package_dir = target.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| job.cwd.clone());
-    let text = std::fs::read_to_string(&target).map_err(|e| format!("{}: {e}", target.display()))?;
+    let text = std::fs::read_to_string(&target).map_err(|e| format!("{}: {e} (the file must exist: --write-exports=FILE edits a file, it does not make one; copy package.json there first)", target.display()))?;
     let Json::Object(mut fields) = Json::parse_jsonc(&text).map_err(|e| format!("{}: {} (at {})", target.display(), e.message, e.pos))? else {
         return Err(format!("{} is not a JSON object", target.display()));
     };
@@ -1585,7 +1585,7 @@ fn write_package_exports(job: &Job, formats: &[rathkit_pack::bundle::Format], fi
             };
             let path = file(extension);
             if !path.is_file() {
-                return Err(format!("{} was not written, so the exports cannot name it", path.display()));
+                return Err(format!("{} was not written, so the exports cannot name it (the exports name the files after their entries: with one entry and one format use --entry-names=[name] or --splitting)", path.display()));
             }
             let value = string(from_package(&path));
             match format {
