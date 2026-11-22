@@ -98,19 +98,20 @@ fn real_main() -> ExitCode {
         Some((cmd, files)) if cmd == "--ts-verdicts" && !files.is_empty() => ts_verdicts(files),
         Some((cmd, files)) if cmd == "--link-dump" && !files.is_empty() => link_dump(files),
         _ => {
-            eprintln!("usage: rkp bundle <entry>... | serve <entry>... | analyze <meta.json> | migrate [dir] [--write] | check <file.ts>... | --version\n       rkp --lex-check|--parse-check|--parse-verdicts|--script-verdicts|--bench <file.js>... (development aids)\n       rkp --scopes <file.js>\n       rkp bundle <entry.js>... [--outfile FILE | --outdir DIR --splitting] [--format esm|cjs|iife] [--no-treeshake] [--define KEY=VALUE]... [--loader .ext=NAME]... [--jsx automatic|classic] [--external NAME]... [--condition NAME]...\n       rkp --graph <entry.js>... [--quiet] [--threads N] [--external NAME]... [--condition NAME]...");
+            eprintln!("usage: rkp bundle <entry>... | serve <entry>... | analyze <meta.json> | migrate [dir] [--write] [--no-run] | check <file.ts>... | --version\n       rkp --lex-check|--parse-check|--parse-verdicts|--script-verdicts|--bench <file.js>... (development aids)\n       rkp --scopes <file.js>\n       rkp bundle <entry.js>... [--outfile FILE | --outdir DIR --splitting] [--format esm|cjs|iife] [--no-treeshake] [--define KEY=VALUE]... [--loader .ext=NAME]... [--jsx automatic|classic] [--external NAME]... [--condition NAME]...\n       rkp --graph <entry.js>... [--quiet] [--threads N] [--external NAME]... [--condition NAME]...");
             ExitCode::from(2)
         }
     }
 }
 
-/// `rkp migrate [DIR] [--write]`: the tools of a project (esbuild, Vite, webpack, Rollup) and the `rkp` commands that replace them; `--write`
+/// `rkp migrate [DIR] [--write] [--no-run]`: the tools of a project (esbuild, Vite, webpack, Rollup) and the `rkp` commands that replace them; `--write`
 /// adds them to the scripts of package.json under new names.
 fn migrate_command(args: &[String]) -> ExitCode {
-    let (mut dir, mut write) = (None, false);
+    let (mut dir, mut write, mut run_config) = (None, false, true);
     for arg in args {
         match arg.as_str() {
             "--write" => write = true,
+            "--no-run" => run_config = false,
             a if a.starts_with("--") => {
                 eprintln!("error: rkp migrate: unknown option {a}");
                 return ExitCode::from(2);
@@ -127,7 +128,7 @@ fn migrate_command(args: &[String]) -> ExitCode {
         eprintln!("error: {}: not a folder", dir.display());
         return ExitCode::from(2);
     }
-    let found = rathkit_pack::migrate::detect(&dir);
+    let found = rathkit_pack::migrate::detect_with(&dir, run_config);
     print!("{}", rathkit_pack::migrate::report(&dir, &found));
     if found.is_empty() {
         return ExitCode::from(1);

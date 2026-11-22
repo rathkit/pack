@@ -80,3 +80,5 @@ on this small program: not a benchmark, and not claimed to be smaller.)
   are redundant (replace with `--define` to avoid one more dependency).
 - **Library mode.** `--format esm,cjs`, `--write-exports` (sets `main`, `module`, `types` and the `exports` map in `package.json`) and
   `--dts` for declaration files replace the usual `rollup-plugin-dts` and a hand-written `exports` map.
+
+`rkp migrate` reads a config for the plain strings in its text. When the input or the output is not one (a list built by a function, a path built with `path.join`), it runs the config in Node's permission model (reads only: no file writes, no child processes; `--no-run` turns that off) and prints one command for each output of the list, as `build:rkp`, `build:rkp-2`, and so on. A `umd` output becomes `--format=iife --global-name=NAME`, and the note says so.
