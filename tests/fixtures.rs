@@ -397,17 +397,17 @@ fn the_metafile_lists_inputs_outputs_and_what_connects_them() {
     let imports: Vec<String> = inputs.get("main.js").unwrap().get("imports").and_then(Json::as_array).unwrap().iter().map(|i| format!("{}:{}", i.get("path").and_then(Json::as_str).unwrap(), i.get("kind").and_then(Json::as_str).unwrap())).collect();
     assert_eq!(imports, ["s.css:import-statement", "lib/a.js:import-statement", "lazy.js:dynamic-import"]);
     let outputs = meta.get("outputs").unwrap();
-    let main = outputs.get("main.js").expect("the entry file");
+    let main = outputs.get("out/main.js").expect("the entry file");
     assert_eq!(main.get("entryPoint").and_then(Json::as_str), Some("main.js"));
     assert_eq!(main.get("bytes").and_then(Json::as_f64), Some(std::fs::metadata(dir.join("out/main.js")).unwrap().len() as f64));
     assert!(main.get("inputs").unwrap().get("lib/a.js").is_some());
     let lazy = match outputs {
-        Json::Object(fields) => fields.iter().find(|(k, _)| k.starts_with("lazy-")).map(|(_, v)| v),
+        Json::Object(fields) => fields.iter().find(|(k, _)| k.starts_with("out/lazy-")).map(|(_, v)| v),
         _ => None,
     };
     assert!(lazy.is_some_and(|l| l.get("inputs").unwrap().get("lazy.js").is_some()), "the lazy file holds lazy.js");
     assert!(main.get("imports").and_then(Json::as_array).unwrap().iter().any(|i| i.get("kind").and_then(Json::as_str) == Some("dynamic-import")));
-    assert!(outputs.get("main.css").unwrap().get("inputs").unwrap().get("s.css").is_some());
+    assert!(outputs.get("out/main.css").unwrap().get("inputs").unwrap().get("s.css").is_some());
     let _ = std::fs::remove_dir_all(&dir);
 }
 

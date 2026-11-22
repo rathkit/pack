@@ -26,7 +26,7 @@ fn a_build_metafile_becomes_a_report() {
     let page = std::fs::read_to_string(dir.join("report.html")).unwrap();
     assert!(page.starts_with("<!doctype html>"));
     // Self-contained: the modules are inside it and nothing is fetched.
-    assert!(page.contains("src/two.js") && page.contains("\"app.js\""));
+    assert!(page.contains("src/two.js") && page.contains("\"dist/app.js\""));
     assert!(!page.contains("http://") && !page.contains("https://") && !page.contains("src=\""));
 
     // Without --outfile the page is on the standard output.

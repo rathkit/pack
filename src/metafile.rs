@@ -1,13 +1,21 @@
 //! `--metafile=FILE`: what went into a build and what came out, as JSON in the shape of esbuild's metafile, so the analyzers that read
 //! that format (bundle-buddy, esbuild's analyze page) can show it.
 //!
-//! `inputs` has every module of the graph (its size, and what it imports); `outputs` has every file written (its size, the modules in it,
-//! what it imports and exports, and the entry it stands for). Rathkit Pack does not measure what each module became in the output: the
-//! `bytesInOutput` of a module is its original size scaled so that the modules of a file add up to the file's size, an estimate.
+//! `inputs` has every module of the graph (its size, and what it imports); `outputs` has every file the build wrote, named by its path from
+//! the working folder (`dist/main.js`, as esbuild's metafile does), with its size, its `kind` (see [`crate::written::Kind`]) and, for the
+//! scripts and style sheets, the modules in it, what it imports and exports, and the entry it stands for. Rathkit Pack does not measure what
+//! each module became in the output: the `bytesInOutput` of a module is its original size scaled so that the modules of a file add up to the
+//! file's size, an estimate.
+//!
+//! The metafile is made in two steps. [`build`] describes the scripts and style sheets the bundler made, which happens before anything is
+//! written; [`finish`] runs when the build is over and sets that against what was written (a file the build made and then did not write is
+//! left out; maps, pages, copied files, declarations and the rest are added), so the list is what is on disk. The metafile itself is not in
+//! its `outputs`: it cannot hold its own size.
 
 use std::path::Path;
 
 use crate::bundle::Output;
+use crate::written::{Kind, Written, kind_of};
 use crate::graph::{Edge, Graph, ModuleKind};
 use crate::json::Json;
 use crate::module::RequestKind;
@@ -51,11 +59,38 @@ fn kind_name(kind: RequestKind) -> &'static str {
     }
 }
 
-pub fn build(graph: &Graph, output: &Output, cwd: &Path) -> String {
-    // Modules are named by their real paths, so the project folder must be too: a folder given by a short or linked name
-    // (Windows 8.3 names, a symlinked parent) would otherwise leave every path absolute.
-    let real_cwd = std::fs::canonicalize(cwd).map(|c| crate::resolve::without_verbatim_prefix(&c)).unwrap_or_else(|_| cwd.to_path_buf());
-    let cwd = real_cwd.as_path();
+/// The project folder by its real path: modules are named by theirs, so a folder given by a short or linked name (Windows 8.3 names, a
+/// symlinked parent) would otherwise leave every path absolute.
+fn real_folder(cwd: &Path) -> std::path::PathBuf {
+    std::fs::canonicalize(cwd).map(|c| crate::resolve::without_verbatim_prefix(&c)).unwrap_or_else(|_| cwd.to_path_buf())
+}
+
+/// `dir` joined to `name`, made absolute from `cwd`, with `.` and `..` folded away (nothing is looked up on disk, so a folder that does not
+/// exist yet is fine).
+fn lexical(cwd: &Path, dir: &Path, name: &str) -> String {
+    let joined = cwd.join(dir).join(name);
+    let mut parts: Vec<std::path::Component> = Vec::new();
+    for part in joined.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir if matches!(parts.last(), Some(std::path::Component::Normal(_))) => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    parts.iter().collect::<std::path::PathBuf>().to_string_lossy().into_owned()
+}
+
+/// What the bundler made, as the metafile's JSON, for `finish` to complete. `dir` is the folder the files go to (none when nothing is
+/// written: the dev server, or the code on standard output), and the keys of `outputs` are the paths the files will have in it.
+pub fn build(graph: &Graph, output: &Output, cwd: &Path, dir: Option<&Path>) -> Json {
+    let cwd = real_folder(cwd);
+    let cwd = cwd.as_path();
+    let key = |name: &str| match dir {
+        Some(dir) => shown(cwd, &lexical(cwd, dir, name)),
+        None => name.to_string(),
+    };
     let mut inputs: Vec<(String, Json)> = Vec::new();
     for module in &graph.modules {
         // A made-up module (a plugin's virtual module, the federation runtime) has no place in the project.
@@ -100,14 +135,15 @@ pub fn build(graph: &Graph, output: &Output, cwd: &Path) -> String {
             if !is_css {
                 for name in &info.imports {
                     let external = !output.files.iter().any(|f| f.name == *name);
-                    let mut fields = vec![("path", Json::String(name.clone())), ("kind", Json::String("import-statement".into()))];
+                    let mut fields = vec![("path", Json::String(if external { name.clone() } else { key(name) })), ("kind", Json::String("import-statement".into()))];
                     if external {
                         fields.push(("external", Json::Bool(true)));
                     }
                     imports.push(object(fields));
                 }
                 for name in &info.dynamic_imports {
-                    imports.push(object(vec![("path", Json::String(name.clone())), ("kind", Json::String("dynamic-import".into()))]));
+                    let path = if output.files.iter().any(|f| f.name == *name) { key(name) } else { name.clone() };
+                    imports.push(object(vec![("path", Json::String(path)), ("kind", Json::String("dynamic-import".into()))]));
                 }
                 exports = info.exports.iter().map(|e| Json::String(e.clone())).collect();
                 if info.is_entry {
@@ -124,9 +160,43 @@ pub fn build(graph: &Graph, output: &Output, cwd: &Path) -> String {
         if let Some(entry) = entry_point {
             fields.push(("entryPoint", Json::String(entry)));
         }
-        outputs.push((file.name.clone(), object(fields)));
+        fields.push(("kind", Json::String(kind_of(output, file).name().to_string())));
+        outputs.push((key(&file.name), object(fields)));
     }
-    let mut text = Json::Object(vec![("inputs".to_string(), Json::Object(inputs)), ("outputs".to_string(), Json::Object(outputs))]).to_string();
+    Json::Object(vec![("inputs".to_string(), Json::Object(inputs)), ("outputs".to_string(), Json::Object(outputs))])
+}
+
+/// The metafile's text: what `build` described, set against `written`. With `listed` false nothing was written (the dev server), and the
+/// scripts and style sheets stand as they are.
+pub fn finish(described: Json, written: &[Written], cwd: &Path, listed: bool) -> String {
+    let cwd = real_folder(cwd);
+    let cwd = cwd.as_path();
+    let Json::Object(parts) = described else { return String::new() };
+    let mut result: Vec<(String, Json)> = Vec::new();
+    for (name, value) in parts {
+        if name != "outputs" || !listed {
+            result.push((name, value));
+            continue;
+        }
+        let Json::Object(made) = value else { continue };
+        let files: Vec<(String, &Written)> = written.iter().filter(|w| w.kind != Kind::Metafile).map(|w| (shown(cwd, &w.path.to_string_lossy()), w)).collect();
+        let mut outputs: Vec<(String, Json)> = Vec::new();
+        for (key, info) in made {
+            // A file the build made and did not write (the empty script of a style sheet a page links) is not an output.
+            if files.iter().any(|(k, _)| *k == key) {
+                outputs.push((key, info));
+            }
+        }
+        for (key, file) in files {
+            if !outputs.iter().any(|(k, _)| *k == key) {
+                let none = Json::Object(Vec::new());
+                let fields = vec![("bytes", number(file.bytes as usize)), ("inputs", none), ("imports", Json::Array(Vec::new())), ("exports", Json::Array(Vec::new())), ("kind", Json::String(file.kind.name().to_string()))];
+                outputs.push((key, object(fields)));
+            }
+        }
+        result.push((name, Json::Object(outputs)));
+    }
+    let mut text = Json::Object(result).to_string();
     text.push('\n');
     text
 }
