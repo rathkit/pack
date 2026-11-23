@@ -1890,7 +1890,7 @@ fn write_pages(job: &Job, dir: &std::path::Path, output: &rathkit_pack::bundle::
         for (start, end, text) in edits {
             html.replace_range(start..end, &text);
         }
-        let links: String = sheets.iter().filter(|n| !html.contains(*n)).map(|n| format!("<link rel=\"stylesheet\" href=\"{}{n}\">\n", job.options.public_path)).collect();
+        let links: String = sheets.iter().filter(|n| !mentions_file(&html, n)).map(|n| format!("<link rel=\"stylesheet\" href=\"{}{n}\">\n", job.options.public_path)).collect();
         if !links.is_empty() {
             match html.to_ascii_lowercase().find("</head>") {
                 Some(at) => html.insert_str(at, &links),
@@ -1907,6 +1907,12 @@ fn write_pages(job: &Job, dir: &std::path::Path, output: &rathkit_pack::bundle::
         println!("{}  page", target.display());
     }
     copy_public(&public, dir)
+}
+
+/// Whether `html` names the file `name` as a whole: the name is not the end of a longer file name (`m.css` is not in `chunk-qm.css`).
+fn mentions_file(html: &str, name: &str) -> bool {
+    let name_char = |c: char| c.is_alphanumeric() || matches!(c, '-' | '_' | '.');
+    html.match_indices(name).any(|(at, _)| !html[..at].chars().next_back().is_some_and(name_char) && !html[at + name.len()..].chars().next().is_some_and(name_char))
 }
 
 /// What is in `public/` goes to the output as it is.
@@ -2830,6 +2836,15 @@ fn carry_stamps<'a>(paths: impl Iterator<Item = &'a std::path::PathBuf>, known: 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_file_name_is_found_as_a_whole_in_a_page() {
+        let page = "<link rel=\"stylesheet\" href=\"./chunk-sl2dizqm.css\"><script src=\"./m.js\">";
+        assert!(!super::mentions_file(page, "m.css"));
+        assert!(super::mentions_file(page, "chunk-sl2dizqm.css"));
+        assert!(super::mentions_file("<link href=\"/assets/m.css\">", "m.css"));
+        assert!(super::mentions_file("<link href='m.css'>", "m.css"));
+    }
+
     use super::*;
     use std::time::{Duration, SystemTime};
 
