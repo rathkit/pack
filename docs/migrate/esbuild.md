@@ -53,6 +53,8 @@ The options are the same names (`entryPoints` as file names, `absWorkingDir`, `b
 accepted next to the package's own `entries` and `cwd`). `build` resolves with `{ ok, status, files, metafile, warnings, errors, ... }`
 and rejects with a `BuildError` when the build fails, as esbuild's does.
 
+`rkp migrate` finds the scripts that use the API (a file of the root, or one that a package.json script runs, such as `node scripts/build.mjs`) and says, line by line, what changes: the line that imports `esbuild` and what it becomes, the lines of the `build()` calls (the same call), and the lines of everything the package does not have (`context`, `transform`, `buildSync`, `write: false`, `stdin`, `mangleProps`, ...), each with the reason; a plugin imported from `esbuild-plugin-*` stays in `plugins`. It does not rewrite the script: the script is yours, and the change is one line.
+
 ## What is different
 
 - **Several entries.** Without `--splitting` they become one file, and with `--outdir` and one entry the file is named `bundle.js`, not
