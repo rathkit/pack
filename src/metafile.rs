@@ -214,13 +214,15 @@ mod shown_tests {
 
     #[test]
     fn a_folder_written_in_two_ways_still_holds_its_files() {
+        // A path without a drive letter is not a place on disk on Windows.
+        let d = if cfg!(windows) { "C:" } else { "" };
         assert_eq!(shown(Path::new(r"\\?\C:\work\project"), "C:/work/project/src/a.js"), "src/a.js");
         assert_eq!(shown(Path::new(r"C:\work\project"), r"C:\work\project\src\a.js"), "src/a.js");
-        assert_eq!(shown(Path::new("/work/project"), "/work/project/a.js"), "a.js");
+        assert_eq!(shown(Path::new(&format!("{d}/work/project")), &format!("{d}/work/project/a.js")), "a.js");
         // A sibling folder with the same beginning is not inside: it is reached through `..`.
-        assert_eq!(shown(Path::new("/work/project"), "/work/project-two/a.js"), "../project-two/a.js");
-        assert_eq!(shown(Path::new("/work/project"), "/work/shared/lib/b.js"), "../shared/lib/b.js");
-        assert_eq!(shown(Path::new("/work/project"), "/elsewhere/c.js"), "../../elsewhere/c.js");
+        assert_eq!(shown(Path::new(&format!("{d}/work/project")), &format!("{d}/work/project-two/a.js")), "../project-two/a.js");
+        assert_eq!(shown(Path::new(&format!("{d}/work/project")), &format!("{d}/work/shared/lib/b.js")), "../shared/lib/b.js");
+        assert_eq!(shown(Path::new(&format!("{d}/work/project")), &format!("{d}/elsewhere/c.js")), "../../elsewhere/c.js");
         // A made-up module has no place to be relative to.
         assert_eq!(shown(Path::new("/work/project"), "\0virtual:x"), "\0virtual:x");
     }
