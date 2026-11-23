@@ -60,7 +60,7 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   caching by name needs; no directories in a name; one entry is named the same with and without `--splitting`: `[name]` is the entry's file name, and without a template the one file is `bundle.js` when there is no `--splitting`; several entries without `--splitting` share one file, so `[name]` is `bundle` there; `--outfile` names its file itself and ignores the entry template) and `--out-extension:.js=.mjs` (or `.css=`);
   `--pure:NAME` (calls of a name, or of a chain such as `styled.div`, and tagged templates of it, are free of effects, so an unused one
   is removed when what it is given has no effects either); `--preserve-symlinks`; `--metafile=FILE` (JSON in the shape of esbuild's metafile: every
-  module with what it imports, every file written, named by its path from the working folder (`dist/main.js`), with its size, its `kind`
+  module with what it imports, every file written, named by its path from the working folder (`dist/main.js`; `../shared/lib.js` for a file outside it, so the same build in two checkouts of one layout writes the same metafile; the inputs are named the same way), with its size, its `kind`
   (`entry`, `chunk`, `map`, `asset`, `html`, `public`, `dts`, `legal`, or `exports` for the `package.json` that `--write-exports` changed), and, for scripts
   and style sheets, the modules in it, what it imports and exports and its entry point; the metafile does not list itself;
   `bytesInOutput` is an estimate, the modules' original sizes scaled to the file's size). `--list-files=FILE` writes the path of every file the

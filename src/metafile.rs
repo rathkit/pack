@@ -46,6 +46,12 @@ fn shown(cwd: &Path, path: &str) -> String {
             return real_path[real_root.len() + 1..].to_string();
         }
     }
+    // Outside the project: from the project folder with `..`, so the same build in two checkouts of the same layout writes the same metafile.
+    // What is not a place on disk (a made-up module's id) or is on another drive stays as it is.
+    let (from, to) = (Path::new(root), Path::new(&path));
+    if !root.is_empty() && from.is_absolute() && to.is_absolute() && from.components().next() == to.components().next() {
+        return crate::sourcemap::relative(from, to);
+    }
     path
 }
 
@@ -208,10 +214,16 @@ mod shown_tests {
 
     #[test]
     fn a_folder_written_in_two_ways_still_holds_its_files() {
+        // A path without a drive letter is not a place on disk on Windows.
+        let d = if cfg!(windows) { "C:" } else { "" };
         assert_eq!(shown(Path::new(r"\\?\C:\work\project"), "C:/work/project/src/a.js"), "src/a.js");
         assert_eq!(shown(Path::new(r"C:\work\project"), r"C:\work\project\src\a.js"), "src/a.js");
-        assert_eq!(shown(Path::new("/work/project"), "/work/project/a.js"), "a.js");
-        // A sibling folder with the same beginning is not inside.
-        assert_eq!(shown(Path::new("/work/project"), "/work/project-two/a.js"), "/work/project-two/a.js");
+        assert_eq!(shown(Path::new(&format!("{d}/work/project")), &format!("{d}/work/project/a.js")), "a.js");
+        // A sibling folder with the same beginning is not inside: it is reached through `..`.
+        assert_eq!(shown(Path::new(&format!("{d}/work/project")), &format!("{d}/work/project-two/a.js")), "../project-two/a.js");
+        assert_eq!(shown(Path::new(&format!("{d}/work/project")), &format!("{d}/work/shared/lib/b.js")), "../shared/lib/b.js");
+        assert_eq!(shown(Path::new(&format!("{d}/work/project")), &format!("{d}/elsewhere/c.js")), "../../elsewhere/c.js");
+        // A made-up module has no place to be relative to.
+        assert_eq!(shown(Path::new("/work/project"), "\0virtual:x"), "\0virtual:x");
     }
 }
