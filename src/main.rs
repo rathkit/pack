@@ -733,6 +733,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
     let mut exports_given = false;
     let mut preserve_root: Option<String> = None;
     let mut write_exports: Option<String> = None;
+    let mut ready_file: Option<String> = None;
     let mut dts_dir: Option<String> = None;
     let mut dts_bundle = false;
     let mut inject_files: Vec<String> = Vec::new();
@@ -769,6 +770,12 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
             "--no-config" => use_config = false,
             "--watch" => watch = true,
             "--port" => port = it.next().and_then(|p| p.parse().ok()).unwrap_or(5173),
+            // --port=N, like the other flags with a value; 0 asks the system for a free port, and the line that says where the server listens names it.
+            arg if arg.starts_with("--port=") => port = arg["--port=".len()..].parse().unwrap_or(5173),
+            // --ready-file=FILE: written once the first build is done and the server is listening or the files are watched (see `write_ready`).
+            arg if arg == "--ready-file" || arg.starts_with("--ready-file=") => {
+                ready_file = if arg == "--ready-file" { it.next().cloned() } else { Some(arg["--ready-file=".len()..].to_string()) };
+            }
             "--host" => host_name = it.next().cloned().unwrap_or_else(|| "localhost".into()),
             "--mode" => mode = it.next().cloned().unwrap_or_default(),
             "--tsconfig" => tsconfig_path = it.next().cloned(),
@@ -1466,7 +1473,7 @@ fn bundle_once(args: &[String], serve: bool) -> Done {
         return Done::Exit(ExitCode::from(2));
     }
     let exports_target = write_exports.clone();
-    let job = std::sync::Arc::new(Job { allow_overwrite, cwd, entries, options, bundle_options, treeshake, outfile, outdir, host: plugin_host, config_file, watch, serve: serve_state, bind: (host_name, port), restart_files, workers, pages, metafile, list_files, dts: dts.then(|| (dts_dir, tsconfig_path.clone(), dts_bundle)), https: https.then(|| (https_cert, https_key)), more_builds: exports_target.is_some() });
+    let job = std::sync::Arc::new(Job { allow_overwrite, cwd, entries, options, bundle_options, treeshake, outfile, outdir, host: plugin_host, config_file, watch, serve: serve_state, bind: (host_name, port), restart_files, workers, pages, metafile, list_files, ready_file, dts: dts.then(|| (dts_dir, tsconfig_path.clone(), dts_bundle)), https: https.then(|| (https_cert, https_key)), more_builds: exports_target.is_some() });
     if let Some(host) = &job.host {
         // Child compilers of webpack plugins build one entry as a script that sets a global.
         let for_children = job.clone();
@@ -1522,6 +1529,8 @@ struct Job {
     metafile: Option<String>,
     /// Where to write the list of the files the build wrote, one path to a line.
     list_files: Option<String>,
+    /// `--ready-file`: where to say that the first build is done and the server (or the watcher) is up.
+    ready_file: Option<String>,
     /// `--dts`: with the folder to write the declarations to, or none for the output folder.
     dts: Option<(Option<String>, Option<String>, bool)>,
     /// `--https`: the certificate and key files, or none for a self-signed certificate.
@@ -1767,6 +1776,7 @@ fn run_formats(job: &Job, formats: &[rathkit_pack::bundle::Format]) -> Outcome {
             pages: Vec::new(),
             metafile: if position == 0 { job.metafile.clone() } else { None },
             list_files: None,
+            ready_file: None,
             dts: if position == 0 { job.dts.clone() } else { None },
             https: None,
             more_builds: job.more_builds || position + 1 < total,
@@ -2505,6 +2515,23 @@ fn stamp(path: &std::path::Path) -> Stamp {
     Some((modified, meta.len()))
 }
 
+/// `--ready-file`: one line of JSON, written in one piece (to a file beside it that is then renamed, so a reader never sees half of it) when the
+/// first build is over: `{"event":"ready","url":"http://localhost:5173/","port":5173,"ok":true,"watching":12}`. `url` and `port` are
+/// there for `rkp serve` only; `ok` says whether that first build worked (a watcher is up either way, waiting for the fix).
+fn write_ready(file: &std::path::Path, listening: Option<&(String, u16)>, watching: usize, ok: bool) -> Result<(), String> {
+    let mut text = String::from("{\"event\":\"ready\"");
+    if let Some((url, port)) = listening {
+        text.push_str(&format!(",\"url\":{},\"port\":{port}", rathkit_pack::json::Json::String(url.clone())));
+    }
+    text.push_str(&format!(",\"ok\":{ok},\"watching\":{watching}}}\n"));
+    let temp = file.with_extension("ready-tmp");
+    let name = file.display();
+    if let Some(parent) = file.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{name}: {e}"))?;
+    }
+    std::fs::write(&temp, text).and_then(|()| std::fs::rename(&temp, file)).map_err(|e| format!("{name}: {e}"))
+}
+
 /// Builds, then builds again whenever a file the build read changes, until interrupted. A change to
 /// the config file starts the whole command again, since the plugins come from there.
 fn watch_loop(job: std::sync::Arc<Job>) -> Done {
@@ -2516,10 +2543,19 @@ fn watch_loop(job: std::sync::Arc<Job>) -> Done {
     let config_path = job.config_file.as_ref().map(|f| job.cwd.join(f));
     // Kept for as long as the server runs: dropping it ends the HTTPS proxy.
     let mut _proxy = None;
+    // Where the server is, once it is listening: the address of the page and its port.
+    let mut listening: Option<(String, u16)> = None;
+    // A file left by an earlier run must not be taken for this one's.
+    if let Some(file) = &job.ready_file {
+        let _ = std::fs::remove_file(job.cwd.join(file));
+    }
     if let Some(state) = &job.serve {
         match &job.https {
             None => match rathkit_pack::serve::start(state.clone(), &job.bind.0, job.bind.1) {
-                Ok(port) => println!("rkp serving at http://{}:{port}/", job.bind.0),
+                Ok(port) => {
+                    println!("rkp serving at http://{}:{port}/", job.bind.0);
+                    listening = Some((format!("http://{}:{port}/", job.bind.0), port));
+                }
                 Err(e) => {
                     eprintln!("error: cannot listen on {}:{}: {e}", job.bind.0, job.bind.1);
                     return Done::Exit(ExitCode::FAILURE);
@@ -2537,6 +2573,7 @@ fn watch_loop(job: std::sync::Arc<Job>) -> Done {
                     Ok((proxy, port)) => {
                         rathkit_pack::serve::configure(state, port, &job.bind.0);
                         println!("rkp serving at https://{}:{port}/", job.bind.0);
+                        listening = Some((format!("https://{}:{port}/", job.bind.0), port));
                         _proxy = Some(proxy);
                     }
                     Err(message) => {
@@ -2560,6 +2597,12 @@ fn watch_loop(job: std::sync::Arc<Job>) -> Done {
         eprintln!("watching {} files (Ctrl-C to stop)", stamps.len());
     };
     remember(&outcome, &mut stamps, began);
+    if let Some(file) = &job.ready_file {
+        if let Err(message) = write_ready(&job.cwd.join(file), listening.as_ref(), stamps.len(), outcome.ok) {
+            eprintln!("error: --ready-file: {message}");
+            return Done::Exit(ExitCode::FAILURE);
+        }
+    }
     let mut restart = false;
     // Files under node_modules rarely change and are many: when polling they are looked at every 25th time.
     let in_node_modules = |path: &std::path::Path| path.components().any(|c| c.as_os_str() == "node_modules");
