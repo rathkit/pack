@@ -7,5 +7,5 @@
 @layer base{@supports (display: grid){@media screen and (min-width: 600px){.deep{padding:0}}}}
 @layer base{@supports (display: grid){@media screen and (min-width: 600px){.cond{display:grid}}}}
 @layer{.anon{color:green}}
-@media print{.print{color:black}}
+@media print{.print{color:#000}}
 .app{color:red}
