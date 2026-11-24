@@ -84,7 +84,7 @@ pub fn minify_chunk(source: &str, layout: &Layout, options: &Options, anchors: O
 }
 
 fn workers() -> usize {
-    std::thread::available_parallelism().map_or(1, |n| n.get())
+    crate::par::workers()
 }
 
 /// The byte ranges of the pieces: the text between `head` and `tail` that is not fixed, cut at the layout's cuts

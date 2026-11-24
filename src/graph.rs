@@ -349,7 +349,7 @@ pub fn build_with_fs(fs: Box<dyn FileSystem>, cwd: &Path, entries: &[String], op
         let path = shared.paths[slot].clone();
         shared.entry_paths.insert(path);
     }
-    let threads = if options.threads == 0 { std::thread::available_parallelism().map_or(4, |n| n.get()) } else { options.threads };
+    let threads = if options.threads == 0 { crate::par::workers() } else { options.threads };
     let state = (Mutex::new(shared), Condvar::new());
     let context = Context { cwd, resolver: &resolver, options, state: &state, limit: threads.max(1) };
     // One worker to begin with: the others are started as files queue up that no one is waiting for. A small project is done before

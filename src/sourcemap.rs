@@ -78,6 +78,9 @@ impl Encoder {
     }
 }
 
+/// Below this many bytes of source text a map is written with the texts escaped in place; above it they are escaped side by side first.
+pub const IN_PLACE_BYTES: usize = 8 << 20;
+
 /// Collects the mappings of one generated file, in generated order.
 #[derive(Default)]
 pub struct Builder<'a> {
@@ -151,14 +154,30 @@ impl<'a> Builder<'a> {
             out.push_str("],\"sourcesContent\":[");
             // Escaping the texts is most of the work for a big bundle: share it out (those escaped ahead of time are done).
             let texts: Vec<Option<&str>> = self.contents.iter().zip(&self.ready).map(|(c, r)| if r.is_some() { None } else { c.as_deref() }).collect();
-            let escaped = escape_all(&texts);
-            for (i, c) in escaped.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
+            let total: usize = texts.iter().flatten().map(|t| t.len()).sum();
+            if total < IN_PLACE_BYTES {
+                // Escaped straight into the map: a copy made first would have to be made in memory the program has not touched yet, and on
+                // a few megabytes that costs more than the escaping (3 GB/s) itself.
+                for (i, text) in texts.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    match (&self.ready[i], text) {
+                        (Some(ready), _) => out.push_str(ready),
+                        (None, Some(text)) => escape_into(&mut out, text),
+                        (None, None) => out.push_str("null"),
+                    }
                 }
-                match (&self.ready[i], c) {
-                    (Some(text), _) | (None, Some(text)) => out.push_str(text),
-                    (None, None) => out.push_str("null"),
+            } else {
+                let escaped = escape_all(&texts);
+                for (i, c) in escaped.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    match (&self.ready[i], c) {
+                        (Some(text), _) | (None, Some(text)) => out.push_str(text),
+                        (None, None) => out.push_str("null"),
+                    }
                 }
             }
         }
@@ -233,8 +252,10 @@ pub fn escape_texts(texts: &[&str]) -> Vec<String> {
 /// `json_string` of every text that is there, on all cores when there is much to do.
 fn escape_all(texts: &[Option<&str>]) -> Vec<Option<String>> {
     let total: usize = texts.iter().flatten().map(|t| t.len()).sum();
-    let workers = std::thread::available_parallelism().map_or(1, |n| n.get());
-    if total < (1 << 20) || workers < 2 || texts.len() < 2 {
+    // Starting a thread costs about as much as escaping a megabyte (3 GB/s for the scan, a few hundred microseconds for a cold thread
+    // that has to be created, more on a busy machine): a thread is started for each 2 MB, not for each core.
+    let workers = crate::par::workers().min(total >> 21);
+    if workers < 2 || texts.len() < 2 {
         return texts.iter().map(|t| t.map(json_string)).collect();
     }
     let next = std::sync::atomic::AtomicUsize::new(0);
@@ -254,12 +275,43 @@ fn escape_all(texts: &[Option<&str>]) -> Vec<Option<String>> {
     done.into_inner().expect("escaped")
 }
 
+/// The first index at or after `from` of a byte that `json_string` may have to change: a quote, a backslash, a control character or
+/// 0xE2 (the first byte of U+2028 and U+2029). Eight bytes are looked at in one step; most source text has none of them for a long way.
+fn next_special(bytes: &[u8], mut from: usize) -> usize {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGHS: u64 = 0x8080_8080_8080_8080;
+    let zero_byte = |x: u64| x.wrapping_sub(ONES) & !x & HIGHS;
+    while from + 8 <= bytes.len() {
+        let word = u64::from_le_bytes(bytes[from..from + 8].try_into().expect("eight bytes"));
+        // A byte below 0x20 is a byte whose top three bits are zero: `(b & 0xE0) == 0`.
+        let control = zero_byte(word & (ONES * 0xE0));
+        let found = zero_byte(word ^ (ONES * 0x22)) | zero_byte(word ^ (ONES * 0x5C)) | zero_byte(word ^ (ONES * 0xE2)) | control;
+        if found != 0 {
+            return from + (found.trailing_zeros() / 8) as usize;
+        }
+        from += 8;
+    }
+    while from < bytes.len() && !matches!(bytes[from], b'"' | b'\\' | 0..=0x1f | 0xE2) {
+        from += 1;
+    }
+    from
+}
+
 fn json_string(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 2);
+    escape_into(&mut out, text);
+    out
+}
+
+/// `text` as a JSON string (with its quotes), appended to `out`.
+fn escape_into(out: &mut String, text: &str) {
     out.push('"');
     let bytes = text.as_bytes();
     let mut run = 0;
-    for (i, &b) in bytes.iter().enumerate() {
+    let mut i = 0;
+    while i < bytes.len() {
+        i = next_special(bytes, i);
+        let Some(&b) = bytes.get(i) else { break };
         // Only quotes, backslashes, control characters and U+2028/9 (E2 80 A8/A9) need escaping.
         let escape: Option<&str> = match b {
             b'"' => Some("\\\""),
@@ -269,27 +321,32 @@ fn json_string(text: &str) -> String {
             b'\t' => Some("\\t"),
             0..=0x1f => None,
             0xE2 if bytes.get(i + 1) == Some(&0x80) && matches!(bytes.get(i + 2), Some(0xA8 | 0xA9)) => None,
-            _ => continue,
+            _ => {
+                i += 1;
+                continue;
+            }
         };
         out.push_str(&text[run..i]);
         match escape {
             Some(e) => {
                 out.push_str(e);
                 run = i + 1;
+                i += 1;
             }
             None if b == 0xE2 => {
                 out.push_str(if bytes[i + 2] == 0xA8 { "\\u2028" } else { "\\u2029" });
                 run = i + 3;
+                i += 3;
             }
             None => {
                 let _ = write!(out, "\\u{:04x}", b);
                 run = i + 1;
+                i += 1;
             }
         }
     }
     out.push_str(&text[run..]);
     out.push('"');
-    out
 }
 
 /// A source map that came with a file, read so that positions in that file can be traced
@@ -501,7 +558,7 @@ impl Lines {
     pub fn new(text: &str) -> Lines {
         let bytes = text.as_bytes();
         let mut line_starts = vec![0u32];
-        let workers = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let workers = crate::par::workers();
         if bytes.len() < (4 << 20) || workers < 2 {
             line_starts.extend(breaks(bytes, 0, bytes.len()));
         } else {
@@ -573,6 +630,41 @@ impl<'a> Positions<'a> {
 
 #[cfg(test)]
 mod tests {
+    /// The one-byte-at-a-time answer the eight-bytes-at-a-time `json_string` must agree with.
+    fn slow_json_string(text: &str) -> String {
+        let mut out = String::from("\"");
+        let mut chars = text.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                '\u{2028}' => out.push_str("\\u2028"),
+                '\u{2029}' => out.push_str("\\u2029"),
+                c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+                c => out.push(c),
+            }
+        }
+        out.push('"');
+        out
+    }
+
+    #[test]
+    fn json_string_agrees_with_the_slow_way_on_every_alignment() {
+        let pieces = ["a", "bc", "\"", "\\", "\n", "\t", "\u{1}", "\u{1f}", "\u{20}", " ", "\u{2028}", "\u{2029}", "\u{2027}", "\u{20ac}", "é", "日本", "😀", "x=1;", "\u{7f}", "\u{e2}", "\u{80}"];
+        let mut state = 0x9e37_79b9_u32;
+        for round in 0..3000 {
+            let mut text = String::new();
+            for _ in 0..(round % 40) {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                text.push_str(pieces[(state >> 16) as usize % pieces.len()]);
+            }
+            assert_eq!(json_string(&text), slow_json_string(&text), "{text:?}");
+        }
+    }
+
     use super::*;
 
     #[test]
