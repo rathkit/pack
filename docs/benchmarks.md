@@ -389,3 +389,18 @@ for the 1,500-module app and the Svelte app, and Parcel 3 none for the Svelte ap
 **Build plus type check:** Rathkit Pack's own checker (`rkp check`, stage 1) is not measured in this table, so its row has no figure and
 nothing is invented for it. The cost of `tsc --noEmit` alone is 0.50 to 0.75 s on these three workloads and 208 to 237 MB. Where a checker runs
 in the build, the check adds time on top of the build for every tool; the rows show how much.
+
+## Where another tool wins
+
+Every case in the run above in which another tool took less time, less memory or wrote less than Pack (more than 3% in time and memory, 1% in
+size), by kind, with the reason and the issue that follows it. The list is for the maintainer to accept or reject, entry by entry.
+
+| Where | Who is better | By how much | Reason | Issue |
+|---|---|---|---|---|
+| Build time, lodash-es in all three modes | Parcel 3 | 7.4 to 7.8 ms against 18.6 to 28.2 | Not the same work: it keeps none of what the entry re-exports (3 KB written against 76 KB) | none: not a loss |
+| Peak memory | none | Pack is lowest in all 45 cases | | |
+| Output size, 28 of the 45 workload and mode cases (outputs folded to a constant not counted; Parcel 3's lodash-es excluded) | Rollup, rolldown, rspack, webpack, Parcel 2 and Vite, by workload (see "Where others are smaller" above) | minified: up to 11.9% (Svelte, Parcel 2) and mostly 1 to 10%; plain: up to 18.6% (React, Vite) | Not confirmed per case; likely functions inlined across modules and unused parameters removed | [#126](https://github.com/rathkit/pack/issues/126), [#127](https://github.com/rathkit/pack/issues/127) |
+| Style sheets, minified alone (not in the tables above) | lightningcss, by up to 2% on 23 of 64 real files | declarations merged across rules; with no browser target, `inset`, `margin-inline` and two-value `overflow` | those shorthands are left out on purpose (support gaps) | [#23](https://github.com/rathkit/pack/issues/23) |
+| Warm rebuild in watch mode, 15 of the 30 cases | Parcel 3 | 2.4 to 36.8 ms against Pack's 3.6 to 44.3 (0.8 to 15.6 ms less) | not established | [#177](https://github.com/rathkit/pack/issues/177) |
+| HMR latency, all 14 workloads | Vite (all 14), Parcel 2 (9 of 12), Parcel 3 (8 of 13), rspack (the 1,500-module app) | Vite 1.6 to 16.0 ms against Pack's 2.9 to 138 | not established | [#178](https://github.com/rathkit/pack/issues/178) |
+| Development server start, 3 of the 14 workloads | Parcel 3 | lodash-es 12.0 against 45.1 ms, rxjs 24.7 against 32.1, the 1,500-module app 227 against 310 | not established; Parcel 3 has a persistent cache ([#26](https://github.com/rathkit/pack/issues/26)) | [#179](https://github.com/rathkit/pack/issues/179) |
