@@ -1709,6 +1709,8 @@ fn finish_outputs(job: &Job) -> Result<(), String> {
         rathkit_pack::written::record(&target, rathkit_pack::written::Kind::Metafile, text.len() as u64);
         Ok(())
     };
+    // The depfile first: it is a file the build wrote, so the list of the written files has it.
+    write_depfile(job)?;
     let described = DESCRIBED.lock().unwrap().take();
     if let (Some(file), Some((json, listed))) = (&job.metafile, described) {
         let text = rathkit_pack::metafile::finish(json, &rathkit_pack::written::all(), &job.cwd, listed);
@@ -1722,7 +1724,7 @@ fn finish_outputs(job: &Job) -> Result<(), String> {
         }
         std::fs::write(std::path::absolute(file).unwrap_or_else(|_| job.cwd.join(file)), text).map_err(|e| format!("{file}: {e}"))?;
     }
-    write_depfile(job)
+    Ok(())
 }
 
 /// One build whose files are listed from the start: for the builds of a watching run, one after the other.
@@ -1775,7 +1777,9 @@ fn write_depfile(job: &Job) -> Result<(), String> {
     let mut text = rathkit_pack::json::Json::Object(vec![("read".to_string(), list(read)), ("missing".to_string(), list(missing))]).to_string();
     text.push('\n');
     let target = std::path::absolute(file).unwrap_or_else(|_| job.cwd.join(file));
-    target.parent().filter(|p| !p.as_os_str().is_empty()).map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&target, text)).map_err(|e| format!("{file}: {e}"))
+    target.parent().filter(|p| !p.as_os_str().is_empty()).map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&target, &text)).map_err(|e| format!("{file}: {e}"))?;
+    rathkit_pack::written::record(&target, rathkit_pack::written::Kind::Metafile, text.len() as u64);
+    Ok(())
 }
 
 /// A library written in several formats: one build for each, the ES module files ending in `.mjs` and the CommonJS ones in `.cjs`.
