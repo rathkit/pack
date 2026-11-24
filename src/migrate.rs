@@ -323,22 +323,48 @@ fn vite(dir: &Path, package: Option<&Json>) -> Option<Finding> {
     let mut finding = Finding { tool: "vite", evidence, commands: Vec::new(), notes: Vec::new() };
     subfolder_note(&mut finding, config.as_ref());
     let page = std::fs::read_to_string(dir.join("index.html")).ok();
-    let mut build = "rkp bundle index.html".to_string();
+    let lib = expression_after(&text, "lib").filter(|l| l.starts_with('{'));
+    let mut pages = vec!["index.html".to_string()];
+    // Several pages: `build.rollupOptions.input` as a list or an object of page paths (Vite's multi-page apps).
+    if let Some(input) = expression_after(&text, "input") {
+        let html: Vec<String> = string_literals(&input).into_iter().filter(|l| l.ends_with(".html")).map(|l| l.trim_start_matches("./").to_string()).collect();
+        if html.len() > 1 {
+            let names: Vec<&str> = html.iter().map(|h| h.rsplit('/').next().unwrap_or(h)).collect();
+            if names.iter().enumerate().all(|(i, n)| !names[..i].contains(n)) {
+                pages = html;
+            } else {
+                finding.notes.push(format!("build.rollupOptions.input has several pages ({}) that share a file name: rkp writes each page to the output folder under its file name, so they would overwrite one another; only index.html is in the command, build the others with their own `rkp bundle PAGE --outdir DIR`", html.join(", ")));
+            }
+        } else if let Some(one) = html.first().filter(|h| h.as_str() != "index.html") {
+            pages = vec![one.clone()];
+        } else if html.is_empty() && input.starts_with(['{', '[']) {
+            finding.notes.push("build.rollupOptions.input is not made of plain .html paths: give every page to `rkp bundle PAGE...`".to_string());
+        }
+    }
+    let mut build = format!("rkp bundle {}", pages.join(" "));
     if let Some(c) = &config {
         build.push_str(&format!(" --config {c}"));
     }
-    build.push_str(&format!(" --outdir {}", literal_after(&text, "outDir").unwrap_or_else(|| "dist".to_string())));
+    let out_dir = literal_after(&text, "outDir").unwrap_or_else(|| "dist".to_string());
+    build.push_str(&format!(" --outdir {out_dir}"));
     build.push_str(" --minify");
     if flag_after(&text, "sourcemap") {
         build.push_str(" --sourcemap");
     }
-    if let Some(base) = literal_after(&text, "base").filter(|b| b != "/") {
+    if let Some(base) = literal_after(&text, "base").map(Some).unwrap_or_else(|| vite_base(dir, &text, &mut finding.notes)) {
         build.push_str(&format!(" --public-path={base}"));
-    } else if text.contains("base:") && literal_after(&text, "base").is_none() {
-        finding.notes.push("base is not a plain string in the config: add --public-path=BASE with its value (Vite's default is /, rkp's links are relative without it)".to_string());
     }
-    if page.is_none() {
+    if page.is_none() && lib.is_none() {
         finding.notes.push("there is no index.html here: give the page (or the script) that Vite was given".to_string());
+    }
+    // A library (`build.lib`) is not a page: its entries and formats are the commands.
+    if let Some(lib) = &lib {
+        vite_library(package, &mut finding, lib, &text, &out_dir, config.as_deref());
+        if text.contains("ssr:") {
+            finding.notes.push("build.ssr is not supported".to_string());
+        }
+        finding.notes.push("build.outDir and build.lib are read from the config as plain strings only; minify is not on these commands (Vite minifies cjs and umd output with esbuild: add --minify for those)".to_string());
+        return Some(finding);
     }
     finding.commands.push(("build:rkp".to_string(), build));
     // `rkp serve` takes the script, and serves index.html with it pointed at the build.
@@ -352,14 +378,199 @@ fn vite(dir: &Path, package: Option<&Json>) -> Option<Finding> {
     } else {
         finding.notes.push("no <script type=\"module\" src> in index.html: `rkp serve SCRIPT --hmr` needs the script".to_string());
     }
-    if text.contains("lib:") {
-        finding.notes.push("build.lib: a library is `rkp bundle ENTRY --format esm,cjs` (README: library mode), not a page".to_string());
-    }
     if text.contains("ssr:") {
         finding.notes.push("build.ssr is not supported".to_string());
     }
     finding.notes.push("build.outDir, base, minify and sourcemap are not read from the config: they are on the command above (docs/migrate/vite.md)".to_string());
     Some(finding)
+}
+
+/// Every string written in the text between quotes (a template with `${` is not one).
+fn string_literals(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut chars = text.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if !matches!(c, '\'' | '"' | '`') {
+            continue;
+        }
+        let rest = &text[i + 1..];
+        let Some(close) = rest.find(c) else { break };
+        let body = &rest[..close];
+        while chars.peek().is_some_and(|(j, _)| *j <= i + 1 + close) {
+            chars.next();
+        }
+        if !body.contains("${") && !body.contains('\n') {
+            out.push(body.to_string());
+        }
+    }
+    out
+}
+
+/// The text of the expression written after `key:` or `key =`, as written: up to a comma, semicolon or line end outside brackets and
+/// strings, or the bracket that closes the object it is in (so a whole `{ ... }` or `[ ... ]` is one expression).
+fn expression_after(text: &str, key: &str) -> Option<String> {
+    let mut from = 0;
+    while let Some(at) = text[from..].find(key) {
+        let start = from + at;
+        let end = start + key.len();
+        from = end;
+        if text[..start].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '$' || c == '.') || text[end..].chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '$') {
+            continue;
+        }
+        let rest = text[end..].trim_start();
+        let Some(rest) = rest.strip_prefix(':').or_else(|| rest.strip_prefix('=').filter(|r| !r.starts_with(['=', '>']))) else { continue };
+        let rest = rest.trim_start();
+        let (mut depth, mut quote, mut escaped) = (0usize, None, false);
+        let mut stop = rest.len();
+        for (i, c) in rest.char_indices() {
+            match (quote, c) {
+                (Some(_), _) if escaped => escaped = false,
+                (Some(_), '\\') => escaped = true,
+                (Some(q), c) if c == q => quote = None,
+                (Some(_), _) => {}
+                (None, '\'' | '"' | '`') => quote = Some(c),
+                (None, '{' | '[' | '(') => depth += 1,
+                (None, '}' | ']' | ')') if depth == 0 => {
+                    stop = i;
+                    break;
+                }
+                (None, '}' | ']' | ')') => depth -= 1,
+                (None, ',' | ';' | '\n') if depth == 0 => {
+                    stop = i;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        return Some(rest[..stop].trim().to_string());
+    }
+    None
+}
+
+/// The value of `base` when it is not a string written in the config: a constant of the config or of a file it imports, or a variable
+/// of the environment that a `.env` file of the project sets (Vite loads `.env`, `.env.local`, `.env.production` and `.env.production.local`,
+/// the later ones winning). When it cannot be known the note says where it comes from.
+fn vite_base(dir: &Path, text: &str, notes: &mut Vec<String>) -> Option<String> {
+    let mut expression = expression_after(text, "base")?;
+    let mut source = String::from("the config");
+    for _ in 0..4 {
+        if let Some(value) = string_literals(&expression).first().filter(|_| expression.starts_with(['\'', '"', '`'])) {
+            return Some(value.clone());
+        }
+        // `process.env.NAME`, `import.meta.env.NAME`, `env.NAME` (what `loadEnv` returns), with an optional `|| 'fallback'`.
+        let name_at = ["process.env.", "import.meta.env.", "env."].iter().find_map(|p| expression.strip_prefix(p));
+        if let Some(rest) = name_at {
+            let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+            let fallback = expression.split_once("||").or_else(|| expression.split_once("??")).and_then(|(_, f)| string_literals(f).first().cloned());
+            let set = [".env", ".env.local", ".env.production", ".env.production.local"].iter().filter_map(|f| std::fs::read_to_string(dir.join(f)).ok()).filter_map(|t| literal_env(&t, &name)).next_back();
+            return match set.or(fallback) {
+                Some(value) => Some(value),
+                None => {
+                    notes.push(format!("base is not a plain string in the config: it is read from the environment variable {name}, which no .env file of the project sets: add --public-path=BASE with its value (Vite's default is /, rkp's links are relative without it)"));
+                    None
+                }
+            };
+        }
+        // A name: the constant is defined in this config, or in a file it imports.
+        let identifier = expression.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$') && !expression.is_empty();
+        if !identifier {
+            break;
+        }
+        let local = expression_after(text, &expression);
+        let next = local.or_else(|| {
+            imports_of(text).iter().filter(|m| m.starts_with('.')).find_map(|m| {
+                let base = dir.join(m);
+                let candidates = ["", ".ts", ".js", ".mjs", ".mts", "/index.ts", "/index.js"].map(|e| format!("{}{e}", base.display()));
+                let file = candidates.iter().map(std::path::PathBuf::from).find(|f| f.is_file())?;
+                let found = expression_after(&std::fs::read_to_string(&file).ok()?, &expression)?;
+                source = m.clone();
+                Some(found)
+            })
+        });
+        match next {
+            Some(next) => expression = next,
+            None => break,
+        }
+    }
+    notes.push(format!("base is not a plain string in the config ({expression}, from {source}): add --public-path=BASE with its value (Vite's default is /, rkp's links are relative without it)"));
+    None
+}
+
+/// The value of `NAME=value` in the text of a `.env` file (quotes taken off).
+fn literal_env(text: &str, name: &str) -> Option<String> {
+    text.lines().filter_map(|l| l.trim().strip_prefix(name)?.trim_start().strip_prefix('=')).map(|v| v.trim().trim_matches(['\'', '"']).to_string()).next_back()
+}
+
+/// The commands of a Vite library (`build.lib`): one for each format of Vite's output, with the file name Vite gives it.
+fn vite_library(package: Option<&Json>, finding: &mut Finding, lib: &str, text: &str, out_dir: &str, config: Option<&str>) {
+    let entries: Vec<String> = string_literals(&expression_after(lib, "entry").unwrap_or_default()).into_iter().map(|e| e.trim_start_matches("./").to_string()).collect();
+    if entries.is_empty() {
+        finding.notes.push("build.lib.entry is not made of plain strings: run `rkp bundle ENTRY --format esm,cjs --outdir DIR` with its entries (README: library mode)".to_string());
+        return;
+    }
+    let name = literal_after(lib, "name");
+    let module_type = package.and_then(|p| p.get("type")).and_then(Json::as_str) == Some("module");
+    let file_name = literal_after(lib, "fileName").or_else(|| package.and_then(|p| p.get("name")).and_then(Json::as_str).map(|n| n.rsplit('/').next().unwrap_or(n).to_string()));
+    // Vite's default formats: es and umd for a library with a name, es and cjs without (and with several entries, which have no umd).
+    let formats: Vec<String> = match expression_after(lib, "formats") {
+        Some(f) if f.starts_with('[') => string_literals(&f),
+        _ if name.is_some() && entries.len() == 1 => vec!["es".into(), "umd".into()],
+        _ => vec!["es".into(), "cjs".into()],
+    };
+    let mut externals = String::new();
+    let external = expression_after(text, "external");
+    for e in external.as_deref().filter(|e| e.starts_with('[')).map(string_literals).unwrap_or_default() {
+        externals.push_str(&format!(" --external {e}"));
+    }
+    if external.as_deref().is_some_and(|e| !e.starts_with('[')) {
+        finding.notes.push("rollupOptions.external is not a list of plain strings: give each package as --external NAME".to_string());
+    }
+    let config_flag = config.map(|c| format!(" --config {c}")).unwrap_or_default();
+    let mut commands = Vec::new();
+    if entries.len() > 1 {
+        let kept: Vec<&str> = formats.iter().map(String::as_str).filter(|f| matches!(*f, "es" | "esm" | "cjs")).collect();
+        let list = kept.iter().map(|f| if *f == "es" { "esm" } else { *f }).collect::<Vec<_>>().join(",");
+        commands.push(format!("rkp bundle {} --format {} --outdir {out_dir}{externals}{config_flag}", entries.join(" "), if list.is_empty() { "esm" } else { &list }));
+        finding.notes.push("build.lib with several entries: the files are named after their entries (.mjs and .cjs), not after fileName; umd and iife are not made for several entries".to_string());
+    } else {
+        let stem = file_name.unwrap_or_else(|| "index".to_string());
+        for format in &formats {
+            let (flags, file) = match format.as_str() {
+                "es" | "esm" => (String::new(), format!("{stem}.{}", if module_type { "js" } else { "mjs" })),
+                "cjs" => (" --format=cjs".to_string(), format!("{stem}.{}", if module_type { "cjs" } else { "js" })),
+                "umd" | "iife" => {
+                    let Some(name) = &name else {
+                        finding.notes.push(format!("build.lib format {format} needs build.lib.name (the global): no command for it"));
+                        continue;
+                    };
+                    let ext = if format == "umd" { if module_type { "umd.cjs" } else { "umd.js" } } else { "iife.js" };
+                    if format == "umd" {
+                        finding.notes.push("build.lib format umd: rkp has no UMD wrapper; the command writes an iife with --global-name under the umd file name (a page loads it, `require` does not work: use the cjs command for that)".to_string());
+                    }
+                    // An iife names the global of each external package (`output.globals`).
+                    let globals_text = expression_after(text, "globals").unwrap_or_default();
+                    let literals = string_literals(&globals_text);
+                    let mut globals = String::new();
+                    for e in external.as_deref().filter(|e| e.starts_with('[')).map(string_literals).unwrap_or_default() {
+                        let global = literals.iter().position(|l| *l == e).and_then(|i| literals.get(i + 1).cloned()).or_else(|| literal_after(&globals_text, &e));
+                        if global.is_none() {
+                            finding.notes.push(format!("the iife needs the global of the external {e} (rollupOptions.output.globals has none): --global {e}=Name, with the name the page has it under"));
+                        }
+                        globals.push_str(&format!(" --global {e}={}", global.unwrap_or_else(|| e.clone())));
+                    }
+                    (format!(" --format=iife --global-name={name}{globals}"), format!("{stem}.{ext}"))
+                }
+                other => {
+                    finding.notes.push(format!("build.lib format {other} is not supported (esm, cjs and iife are)"));
+                    continue;
+                }
+            };
+            commands.push(format!("rkp bundle {}{flags} --outfile {}/{file}{externals}{config_flag}", entries[0], out_dir.trim_end_matches('/')));
+        }
+    }
+    for (i, command) in commands.into_iter().enumerate() {
+        finding.commands.push((if i == 0 { "build:rkp".to_string() } else { format!("build:rkp-{}", i + 1) }, command));
+    }
 }
 
 /// The `src` of the first `<script type="module" src="...">` of a page, as a path of the project.
