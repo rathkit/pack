@@ -194,7 +194,7 @@ pub fn definitions(options: &EnvOptions, real: &dyn Fn(&str) -> Option<String>, 
     if options.files {
         let mut entries: Vec<Entry> = Vec::new();
         for file in env_files(options.dir, options.mode) {
-            if let Ok(text) = std::fs::read_to_string(&file) {
+            if let Ok(text) = crate::reads::read_to_string(&file) {
                 parse_dotenv(&text, &mut entries);
                 read.push(file);
             }
