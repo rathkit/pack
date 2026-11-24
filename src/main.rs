@@ -1547,7 +1547,18 @@ fn write_package_exports(job: &Job, formats: &[rathkit_pack::bundle::Format], fi
     let outdir = job.outdir.as_ref().ok_or("it needs --outdir")?;
     let target = job.cwd.join(file);
     let package_dir = target.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| job.cwd.clone());
-    let text = std::fs::read_to_string(&target).map_err(|e| format!("{}: {e} (the file must exist: --write-exports=FILE edits a file, it does not make one; copy package.json there first)", target.display()))?;
+    // A file that does not exist yet starts as a copy of the project's own `package.json`, which is left as it is.
+    let text = match std::fs::read_to_string(&target) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let source = job.cwd.join("package.json");
+            std::fs::read_to_string(&source).map_err(|_| format!("{}: {e} (and there is no package.json in {} to start it from)", target.display(), job.cwd.display()))?
+        }
+        Err(e) => return Err(format!("{}: {e}", target.display())),
+    };
+    if let Some(parent) = target.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     let Json::Object(mut fields) = Json::parse_jsonc(&text).map_err(|e| format!("{}: {} (at {})", target.display(), e.message, e.pos))? else {
         return Err(format!("{} is not a JSON object", target.display()));
     };

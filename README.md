@@ -133,9 +133,7 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   sources share) writes a file for each module in the folders the sources are in, with every module keeping all its exports; what is bundled
   from `node_modules` goes under `_deps/`. In CommonJS files the other files of the build are read when a name is used, so files that import one
   another in a circle work. `--write-exports[=FILE]` sets `main`, `module`, `types` and the `exports` map (a subpath for each entry, `.` for
-  `index`, with `types`, `import` and `require` conditions) in the `package.json`, keeping its other fields. The file must exist (`--write-exports=FILE` edits it and does not make it), and
-  it need not be the project's own `package.json`: a build that must not change its own inputs (a task runner hashes `package.json`) copies it to
-  the output folder first and names the copy, for example `cp package.json dist/ && rkp bundle src/index.ts --outdir dist --format esm,cjs
+  `index`, with `types`, `import` and `require` conditions) in the `package.json`, keeping its other fields. A file that does not exist is made from the project's `package.json`, which is left as it is. The file need not be the project's own `package.json`: a build that must not change its own inputs (a task runner hashes `package.json`) names a copy in the output folder, for example `rkp bundle src/index.ts --outdir dist --format esm,cjs
   --write-exports=dist/package.json`; the paths in the exports are then relative to that file. The exports name the files after their
   entries, so one entry in one format needs `--entry-names=[name]` (or `--splitting`), else the file is `bundle.js` and the build says so. Checked on a fixture library
   (`tools/run-library.mjs`) and on 38 corpus libraries built in both ways and compared, subpath by subpath and format by format, with the
