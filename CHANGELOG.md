@@ -16,6 +16,40 @@ What an alpha or beta does promise, and checks on every change (`tools/check-pro
 scripts in any package, a build that needs no network, provenance and checksums on every release. It promises nothing
 about stability.
 
+## 0.5.0-beta.0 - 2026-11-24
+
+### Changed
+
+- The metafile names files outside the working folder with `..` (`../shared/lib.js`) instead of absolute paths, so the same build in two checkouts of one layout writes the same metafile. Its `outputs` are named from the working folder (`dist/main.js`, not `main.js`), list every file the build wrote, and give each a `kind`.
+- `build().files` lists every file the build wrote (source maps, declarations, license files, copied files, pages, the metafile) as absolute paths.
+- Minified CSS is smaller: longhands are written as their shorthand, hex alpha colors are used, `transparent` is `#0000`, equal values are shorter (`flex`, `transition`, `border`, times, `translate`, `background`), and a rule repeated later in the same list is dropped.
+- Faster builds of big graphs: tree shaking finds enums and builds its symbol maps on all cores (the shake phase of the 1,500-module benchmark app is about 40% faster), and dependency discovery wakes a helper thread only for files the busy workers will not take (the graph phase of that app is about 14% faster on 16 cores).
+- `--write-exports=FILE` is documented with its copy workflow, and its errors say what to do.
+
+### Added
+
+- `rkp migrate` finds a config file in a subfolder (one a package.json script names, or one found by searching two levels down), not only in the project root.
+- `rkp migrate` runs a Rollup config whose input or output is built in code (in Node's permission model, reads only) to read its exact values, and prints a command for each output. `--no-run` turns it off.
+- `rkp migrate` names the lines of an esbuild API script that change (the import, the `build()` calls that stay the same, the calls and options `@rathkit/pack` does not have).
+- `rkp migrate` follows a Vite `base` to a constant or a `.env` variable and writes `--public-path`, maps `build.lib` to a command for each format, and maps a multi-page `rollupOptions.input` to several entries, pages that share a file name included.
+- `--list-files=FILE` writes the files a build wrote, one per line.
+- `--ready-file=FILE` for `rkp serve` and `--watch` says when the server or the watcher is up, and `--port=N` sets the port of the server; the ready lines are documented.
+
+### Fixed
+
+- A page that links a style sheet which its script also imports stopped with `no built style sheet`; it builds now, with the sheet written once. A page build no longer prints (or lists in the Node API) the empty script of a style sheet it deleted.
+- A page build could leave a script's style sheet unlinked when its name ended another sheet's name.
+- Pages with the same file name in different folders (`index.html` and `nested/index.html`) are written at their own places in the output folder instead of one overwriting the other.
+- `--entry-names` was ignored for the one file of a build with a single entry and no `--splitting`; the names are now the same with and without `--splitting`.
+
+### Known gaps
+
+- CSS minification does not merge rules that are not next to each other or reorder declarations (`#23`): on 9 of the 15 corpus style sheets Pack is 2 to 25 gzip bytes above the smallest other tool.
+- Function inlining across modules (`#126`) and dead-parameter removal (`#127`) are not done: measured on the benchmark workloads they gain nothing in gzip size, and a constant table across the pieces of a big minified bundle (about 2% raw and 4% gzip on lodash-es) is not built yet.
+- `--write-exports` still needs a file that exists, and `rkp serve` and `--watch` have no `--json` stream of events (`#134`, `#136`).
+- A depfile (every file a build read, including files probed and not found; `#131`) is not in this release.
+- On the container benchmark of this release (docs/benchmarks.md), Pack is ahead of esbuild on time and memory in all 45 build cases, as in 0.4.0-beta.0, and no case that Pack won on time became a loss or a tie. The machine measured every tool 3 to 5% slower on that day than on the day of the 0.4.0-beta.0 run (esbuild 5%, Pack 5%); run back to back in one session, the 0.4.0-beta.0 build and this one differ by -1.6% (geometric mean over 30 cases of plain and minified builds), and the 1,500-module app builds about 17% faster.
+
 ## 0.4.0-beta.0 - 2026-11-19
 
 ### Changed
