@@ -72,9 +72,9 @@ run the container recipe in [rathkit/pack-bench](https://github.com/rathkit/pack
   Rathkit Pack's own checker (`rkp check`, stage 1) is not measured here, so its row has no figure. Each plugin setup was first tried on a deliberate type error to
   confirm that it reports it.
 <!-- pack-bench:begin -->
-- **Machine:** 11th Gen Intel(R) Core(TM) i7-11850H @ 2.50GHz (8 logical CPUs available to the container, cpuset 2-9), memory limit 12 GB, Linux 6.18.58.1-microsoft-standard-WSL2; WSL2, Docker Desktop 29.9.3, laptop on AC. The machine was idle: the load average was 0.67, 0.23, 0.12 before the run and 1.48, 1.5, 1.64 after it. Node 26.13.0; Rathkit Pack 0.3.0-beta.0 at commit `9f2a929` (release build, sha256 `b0507c2ab6a2`); esbuild 0.28.2, rolldown 1.2.15, @rspack/core 2.2.9, Vite 8.3.5, webpack 5.112.2 (webpack-cli 7.3.1, swc-loader 0.2.7, @swc/core 1.16.22), Rollup 4.67.5 (node-resolve 16.0.3, commonjs 29.0.3, replace 6.0.3, typescript 12.3.1, terser 1.0.2), Parcel 2 2.16.4, Parcel 3 3.0.0-alpha.2 (an alpha), webpack-dev-server 6.1.0, @rspack/dev-server 2.2.2, TypeScript 5.9.3 (tsc), ts-checker-rspack-plugin 1.7.2, fork-ts-checker-webpack-plugin 9.1.0. Run on 2026-11-19 in the pack-bench container, bench commit `856bde4`, image `4df68dbdd905`; tools started through their own executables; 7 timed runs, outputs on a RAM disk.
+- **Machine:** 11th Gen Intel(R) Core(TM) i7-11850H @ 2.50GHz (8 logical CPUs available to the container, cpuset 2-9), memory limit 12 GB, Linux 6.18.58.1-microsoft-standard-WSL2; WSL2, Docker Desktop 29.9.3, laptop on AC. The machine was idle: the load average was 0.52, 1.01, 1.25 before the run and 1.11, 1.26, 1.38 after it. Node 26.13.0; Rathkit Pack 0.4.0-beta.0 at commit `8931949` (release build, sha256 `e76397fd0482`); esbuild 0.28.2, rolldown 1.2.15, @rspack/core 2.2.9, Vite 8.3.5, webpack 5.112.2 (webpack-cli 7.3.1, swc-loader 0.2.7, @swc/core 1.16.22), Rollup 4.67.5 (node-resolve 16.0.3, commonjs 29.0.3, replace 6.0.3, typescript 12.3.1, terser 1.0.2), Parcel 2 2.16.4, Parcel 3 3.0.0-alpha.2 (an alpha), webpack-dev-server 6.1.0, @rspack/dev-server 2.2.2, TypeScript 5.9.3 (tsc), ts-checker-rspack-plugin 1.7.2, fork-ts-checker-webpack-plugin 9.1.0. Run on 2026-11-24 in the pack-bench container, bench commit `f1b5813`, image `1535fd26ad5d`; tools started through their own executables; 7 timed runs, outputs on a RAM disk.
 
-Reproduce: in [rathkit/pack-bench](https://github.com/rathkit/pack-bench) at commit `856bde4`, build Pack at commit `9f2a929` with `container/build-pack.sh`, then run `container/run.sh --pack-bin <that binary> -- --work /work --results /results/20261119T125801Z.json --tools rathkit,esbuild,rolldown,rspack,vite,webpack,rollup,parcel2,parcel3 --rebuild --rebuild-modes plain,minify --dev --typecheck`.
+Reproduce: in [rathkit/pack-bench](https://github.com/rathkit/pack-bench) at commit `f1b5813`, build Pack at commit `8931949` with `container/build-pack.sh`, then run `container/run.sh --pack-bin <that binary> -- --work /work --results /results/20261124T042236Z.json --tools rathkit,esbuild,rolldown,rspack,vite,webpack,rollup,parcel2,parcel3 --rebuild --rebuild-modes plain,minify --dev --typecheck`.
 
 ## Time (median ms, lower is better)
 
@@ -82,85 +82,85 @@ Plain:
 
 | | Rathkit Pack | esbuild | rolldown | rspack | Vite | webpack | Rollup | Parcel 2 | Parcel 3 |
 |---|---|---|---|---|---|---|---|---|---|
-| TypeScript compiler | 175 | 353 | 681 | 335 | 849 | 1241 | 8537 | 2182 | 577 |
-| three.js | 38 | 61 | 137 | 143 | 229 | 582 | 2387 | 710 | 89 |
-| lodash-es | 18 | 34 | 108 | 122 | 182 | 728 | 3577 | 1057 | 7 |
-| React + react-dom/server | 11 | 18 | 106 | 95 | 167 | 381 | 2153 | 599 | 37 |
-| rxjs | 10 | 22 | 103 | 104 | 161 | 544 | 2864 | 740 | 24 |
-| 1,500-module app | 83 | 492 | 212 | 580 | 302 | 1843 | 5561 | failed | 187 |
-| 500-module TypeScript app | 24 | 54 | 147 | 326 | 217 | 925 | 2224 | 1196 | 69 |
-| Preact app (TSX) | 6 | 9 | 85 | 93 | 149 | 339 | 1890 | 537 | 14 |
-| Vue app (render functions) | 17 | 42 | 151 | 122 | 180 | 612 | 2211 | 680 | 57 |
-| Solid app (no JSX) | 9 | 15 | 90 | 94 | 157 | 363 | 1863 | 544 | 22 |
-| Svelte app (precompiled) | 9 | 15 | 97 | 107 | 162 | 461 | 2212 | 606 | 20 |
-| Monorepo-style TypeScript app | 12 | 21 | 95 | 141 | 163 | 641 | 1986 | 807 | 25 |
-| date-fns | 12 | 27 | 97 | 111 | 162 | 475 | 4297 | 815 | 34 |
-| Zod | 12 | 19 | 104 | 109 | 171 | 522 | 2318 | 608 | 26 |
-| D3 | 14 | 23 | 106 | 104 | 174 | 496 | 2176 | 594 | 29 |
+| TypeScript compiler | 181 | 368 | 711 | 345 | 886 | 1290 | 8792 | 2319 | 579 |
+| three.js | 42 | 61 | 138 | 149 | 240 | 600 | 2468 | 733 | 84 |
+| lodash-es | 20 | 36 | 115 | 126 | 187 | 760 | 3646 | 1093 | 9 |
+| React + react-dom/server | 13 | 20 | 109 | 99 | 176 | 397 | 2221 | 596 | 40 |
+| rxjs | 12 | 23 | 110 | 107 | 168 | 573 | 2926 | 768 | 25 |
+| 1,500-module app | 69 | 493 | 220 | 582 | 310 | 1870 | 5612 | failed | 198 |
+| 500-module TypeScript app | 24 | 57 | 146 | 332 | 226 | 957 | 2258 | 1228 | 72 |
+| Preact app (TSX) | 5 | 11 | 90 | 95 | 154 | 347 | 1932 | 558 | 15 |
+| Vue app (render functions) | 18 | 44 | 152 | 125 | 184 | 634 | 2226 | 684 | 60 |
+| Solid app (no JSX) | 9 | 16 | 92 | 102 | 162 | 371 | 1895 | 563 | 22 |
+| Svelte app (precompiled) | 10 | 16 | 101 | 110 | 171 | 480 | 2267 | 616 | 22 |
+| Monorepo-style TypeScript app | 13 | 22 | 97 | 145 | 167 | 656 | 2044 | 845 | 27 |
+| date-fns | 13 | 29 | 103 | 115 | 176 | 493 | 4346 | 787 | 35 |
+| Zod | 13 | 19 | 106 | 111 | 177 | 539 | 2352 | 633 | 30 |
+| D3 | 15 | 24 | 111 | 104 | 180 | 509 | 2218 | 600 | 30 |
 
 Minified:
 
 | | Rathkit Pack | esbuild | rolldown | rspack | Vite | webpack | Rollup | Parcel 2 | Parcel 3 |
 |---|---|---|---|---|---|---|---|---|---|
-| TypeScript compiler | 257 | 364 | 811 | 1689 | 1024 | 18436 | 27880 | 3630 | 1395 |
-| three.js | 46 | 68 | 143 | 297 | 237 | 2476 | 3528 | 844 | 129 |
-| lodash-es | 21 | 35 | 117 | 160 | 190 | 1438 | 4060 | 1108 | 7 |
-| React + react-dom/server | 16 | 19 | 106 | 169 | 175 | 1419 | 2892 | 771 | 63 |
-| rxjs | 13 | 22 | 113 | 152 | 162 | 1433 | 3116 | 794 | 27 |
-| 1,500-module app | 88 | 489 | 217 | 793 | 313 | 4067 | 5603 | failed | 176 |
-| 500-module TypeScript app | 28 | 55 | 146 | 471 | 219 | 3826 | 2952 | 1238 | 74 |
-| Preact app (TSX) | 7 | 9 | 87 | 108 | 150 | 627 | 2083 | 554 | 16 |
-| Vue app (render functions) | 21 | 45 | 166 | 348 | 194 | 3193 | 2739 | 877 | 89 |
-| Solid app (no JSX) | 11 | 16 | 92 | 126 | 158 | 893 | 1976 | 575 | 31 |
-| Svelte app (precompiled) | 11 | 15 | 96 | 131 | 161 | 935 | 2429 | 645 | 23 |
-| Monorepo-style TypeScript app | 15 | 21 | 96 | 229 | 163 | 2572 | 2309 | 850 | 27 |
-| date-fns | 15 | 27 | 100 | 125 | 170 | 771 | 4503 | 797 | 36 |
-| Zod | 15 | 20 | 107 | 142 | 172 | 1239 | 2790 | 677 | 37 |
-| D3 | 17 | 24 | 110 | 145 | 177 | 1280 | 2635 | 649 | 47 |
+| TypeScript compiler | 267 | 375 | 834 | 1766 | 1040 | 18886 | 28503 | 3748 | 1433 |
+| three.js | 47 | 70 | 154 | 306 | 250 | 2543 | 3637 | 877 | 135 |
+| lodash-es | 23 | 37 | 121 | 163 | 195 | 1497 | 4170 | 1138 | 9 |
+| React + react-dom/server | 17 | 20 | 114 | 175 | 183 | 1479 | 2983 | 794 | 67 |
+| rxjs | 14 | 23 | 115 | 158 | 168 | 1475 | 3195 | 815 | 28 |
+| 1,500-module app | 73 | 499 | 221 | 787 | 316 | 4114 | 5650 | failed | 185 |
+| 500-module TypeScript app | 28 | 56 | 146 | 486 | 232 | 3912 | 3030 | 1292 | 81 |
+| Preact app (TSX) | 7 | 10 | 89 | 112 | 158 | 645 | 2131 | 596 | 17 |
+| Vue app (render functions) | 22 | 47 | 171 | 357 | 197 | 3297 | 2806 | 930 | 95 |
+| Solid app (no JSX) | 12 | 17 | 95 | 127 | 167 | 914 | 2026 | 589 | 32 |
+| Svelte app (precompiled) | 13 | 16 | 105 | 131 | 176 | 962 | 2489 | 656 | 26 |
+| Monorepo-style TypeScript app | 16 | 22 | 99 | 237 | 169 | 2634 | 2343 | 840 | 27 |
+| date-fns | 15 | 29 | 102 | 129 | 172 | 784 | 4583 | 811 | 36 |
+| Zod | 16 | 20 | 109 | 149 | 177 | 1286 | 2863 | 697 | 36 |
+| D3 | 18 | 25 | 115 | 152 | 185 | 1319 | 2716 | 677 | 50 |
 
 Minified with a source map:
 
 | | Rathkit Pack | esbuild | rolldown | rspack | Vite | webpack | Rollup | Parcel 2 | Parcel 3 |
 |---|---|---|---|---|---|---|---|---|---|
-| TypeScript compiler | 316 | 529 | 915 | 1971 | 1106 | 19182 | 28854 | 4739 | 1494 |
-| three.js | 57 | 83 | 155 | 338 | 250 | 2644 | 3625 | 1043 | 144 |
-| lodash-es | 29 | 37 | 120 | 169 | 191 | 1507 | 4120 | 1149 | 8 |
-| React + react-dom/server | 20 | 24 | 116 | 186 | 177 | 1501 | 2969 | 854 | 69 |
-| rxjs | 15 | 28 | 116 | 165 | 162 | 1484 | 3115 | 814 | 29 |
-| 1,500-module app | 102 | 509 | 225 | 808 | 321 | 4215 | 5602 | failed | 181 |
-| 500-module TypeScript app | 34 | 58 | 150 | 518 | 224 | 3856 | 3041 | 1418 | 77 |
-| Preact app (TSX) | 9 | 12 | 87 | 108 | 154 | 653 | 2101 | 592 | 18 |
-| Vue app (render functions) | 25 | 88 | 184 | 389 | 196 | 3364 | 2800 | 1057 | 101 |
-| Solid app (no JSX) | 14 | 17 | 93 | 131 | 163 | 943 | 1984 | 600 | 35 |
-| Svelte app (precompiled) | 12 | 16 | 99 | 135 | 165 | 971 | 2452 | 666 | 24 |
-| Monorepo-style TypeScript app | 17 | 23 | 98 | 250 | 164 | 2662 | 2333 | 884 | 28 |
-| date-fns | 16 | 29 | 103 | 128 | 167 | 794 | 4552 | 879 | 39 |
-| Zod | 20 | 21 | 109 | 154 | 178 | 1288 | 2818 | 723 | 40 |
-| D3 | 20 | 26 | 115 | 153 | 180 | 1328 | 2694 | 705 | 50 |
+| TypeScript compiler | 329 | 537 | 945 | 2011 | 1144 | 19572 | 29563 | 4841 | 1535 |
+| three.js | 59 | 87 | 162 | 355 | 254 | 2730 | 3761 | 1086 | 148 |
+| lodash-es | 29 | 43 | 126 | 181 | 195 | 1571 | 4184 | 1192 | 8 |
+| React + react-dom/server | 23 | 26 | 119 | 193 | 190 | 1559 | 3071 | 887 | 73 |
+| rxjs | 17 | 30 | 121 | 169 | 173 | 1532 | 3201 | 848 | 30 |
+| 1,500-module app | 86 | 506 | 225 | 820 | 321 | 4214 | 5643 | failed | 189 |
+| 500-module TypeScript app | 35 | 61 | 149 | 534 | 232 | 3959 | 3106 | 1460 | 79 |
+| Preact app (TSX) | 9 | 13 | 92 | 113 | 158 | 673 | 2154 | 602 | 19 |
+| Vue app (render functions) | 26 | 92 | 192 | 422 | 212 | 3505 | 3022 | 1085 | 102 |
+| Solid app (no JSX) | 14 | 18 | 99 | 132 | 169 | 967 | 2036 | 619 | 36 |
+| Svelte app (precompiled) | 14 | 18 | 102 | 139 | 168 | 1005 | 2514 | 688 | 28 |
+| Monorepo-style TypeScript app | 18 | 24 | 102 | 262 | 171 | 2708 | 2382 | 926 | 29 |
+| date-fns | 17 | 30 | 102 | 132 | 177 | 820 | 4598 | 843 | 37 |
+| Zod | 21 | 22 | 114 | 155 | 184 | 1328 | 2888 | 721 | 44 |
+| D3 | 21 | 26 | 119 | 161 | 192 | 1378 | 2745 | 727 | 51 |
 
-Geometric mean of each tool's time relative to Rathkit Pack, over the workloads each tool built: plain, esbuild 2.0x, rolldown 7.3x, rspack 8.1x, Vite 11.4x, webpack 34.3x, Rollup 156.9x, Parcel 2 48.7x, Parcel 3 2.3x;
-minified, esbuild 1.7x, rolldown 6.1x, rspack 10.5x, Vite 9.5x, webpack 84.8x, Rollup 158.1x, Parcel 2 43.7x, Parcel 3 2.3x;
-minified with a map, esbuild 1.6x, rolldown 5.2x, rspack 9.3x, Vite 8.0x, webpack 72.8x, Rollup 132.3x, Parcel 2 39.7x, Parcel 3 2.1x.
+Geometric mean of each tool's time relative to Rathkit Pack, over the workloads each tool built: plain, esbuild 2.0x, rolldown 7.1x, rspack 8.0x, Vite 11.2x, webpack 33.6x, Rollup 151.9x, Parcel 2 46.6x, Parcel 3 2.3x;
+minified, esbuild 1.7x, rolldown 6.0x, rspack 10.4x, Vite 9.4x, webpack 83.5x, Rollup 154.9x, Parcel 2 42.5x, Parcel 3 2.4x;
+minified with a map, esbuild 1.6x, rolldown 5.2x, rspack 9.3x, Vite 8.0x, webpack 72.0x, Rollup 130.4x, Parcel 2 38.5x, Parcel 3 2.1x.
 
 ## Peak memory (MB, minified with a map)
 
 | | Rathkit Pack | esbuild | rolldown | rspack | Vite | webpack | Rollup | Parcel 2 | Parcel 3 |
 |---|---|---|---|---|---|---|---|---|---|
-| TypeScript compiler | 192 | 265 | 532 | 423 | 464 | 1777 | 3174 | 1398 | 373 |
-| three.js | 42 | 60 | 205 | 193 | 226 | 490 | 709 | 566 | 149 |
-| lodash-es | 21 | 56 | 237 | 144 | 265 | 349 | 568 | 534 | 27 |
-| React + react-dom/server | 21 | 29 | 189 | 131 | 213 | 325 | 595 | 504 | 182 |
-| rxjs | 12 | 49 | 224 | 131 | 209 | 360 | 487 | 483 | 90 |
-| 1,500-module app | 93 | 380 | 468 | 350 | 496 | 1051 | 844 | failed | 242 |
-| 500-module TypeScript app | 26 | 55 | 194 | 181 | 205 | 532 | 596 | 571 | 81 |
-| Preact app (TSX) | 9 | 20 | 143 | 113 | 168 | 211 | 435 | 348 | 58 |
-| Vue app (render functions) | 18 | 88 | 319 | 178 | 208 | 541 | 621 | 584 | 200 |
-| Solid app (no JSX) | 12 | 22 | 160 | 119 | 190 | 241 | 414 | 378 | 87 |
-| Svelte app (precompiled) | 11 | 27 | 206 | 123 | 224 | 235 | 465 | 420 | 91 |
-| Monorepo-style TypeScript app | 13 | 34 | 162 | 154 | 198 | 463 | 507 | 524 | 71 |
-| date-fns | 13 | 41 | 196 | 124 | 216 | 210 | 769 | 514 | 77 |
-| Zod | 20 | 42 | 252 | 133 | 280 | 318 | 546 | 452 | 145 |
-| D3 | 19 | 41 | 266 | 132 | 299 | 304 | 555 | 453 | 157 |
+| TypeScript compiler | 191 | 265 | 499 | 422 | 470 | 1962 | 3162 | 1391 | 373 |
+| three.js | 42 | 60 | 205 | 191 | 230 | 489 | 710 | 566 | 141 |
+| lodash-es | 21 | 56 | 235 | 145 | 260 | 351 | 567 | 533 | 27 |
+| React + react-dom/server | 21 | 29 | 203 | 131 | 213 | 326 | 595 | 504 | 186 |
+| rxjs | 12 | 49 | 222 | 130 | 204 | 339 | 486 | 488 | 88 |
+| 1,500-module app | 95 | 380 | 468 | 352 | 491 | 1038 | 844 | failed | 246 |
+| 500-module TypeScript app | 27 | 55 | 192 | 178 | 203 | 535 | 597 | 571 | 81 |
+| Preact app (TSX) | 9 | 20 | 143 | 113 | 169 | 211 | 436 | 346 | 58 |
+| Vue app (render functions) | 18 | 88 | 323 | 175 | 208 | 541 | 622 | 587 | 197 |
+| Solid app (no JSX) | 12 | 22 | 163 | 119 | 191 | 241 | 413 | 381 | 81 |
+| Svelte app (precompiled) | 11 | 27 | 204 | 122 | 220 | 234 | 466 | 421 | 90 |
+| Monorepo-style TypeScript app | 14 | 34 | 168 | 155 | 188 | 464 | 508 | 526 | 71 |
+| date-fns | 14 | 41 | 196 | 123 | 224 | 206 | 767 | 517 | 77 |
+| Zod | 20 | 42 | 260 | 132 | 278 | 317 | 549 | 448 | 139 |
+| D3 | 20 | 41 | 266 | 132 | 295 | 302 | 553 | 453 | 152 |
 
 ## Output size (KB / gzip KB, minified)
 
@@ -208,41 +208,41 @@ Plain:
 
 | | Rathkit Pack | esbuild | rolldown | rspack | Vite | webpack | Rollup | Parcel 2 | Parcel 3 |
 |---|---|---|---|---|---|---|---|---|---|
-| TypeScript compiler | 62.7 | 113 | 579 | 263 | 718 | 775 | 4749 | 59.5 | 108 |
-| three.js | 12.5 | 58.1 | 64.5 | 76.0 | 99.2 | 194 | 459 | 23.4 | 18.3 |
-| lodash-es | 14.3 | 41.2 | 35.6 | 63.1 | 49.0 | 238 | 228 | 48.3 | 2.8 |
-| React + react-dom/server | 5.7 | 16.9 | 34.9 | 30.2 | 41.7 | 85.7 | 191 | 16.5 | 11.5 |
-| rxjs | 6.9 | 23.1 | 30.8 | 41.1 | 26.7 | 149 | 114 | 21.0 | 5.9 |
-| 1,500-module app | 42.5 | 482 | 141 | 530 | 174 | 1124 | 1300 | failed | 32.4 |
-| 500-module TypeScript app | 17.5 | 53.0 | 75.1 | 265 | 92.4 | 455 | 572 | 29.6 | 8.6 |
-| Preact app (TSX) | 2.4 | 14.3 | 15.5 | 29.5 | 21.1 | 54.6 | 324 | 12.6 | 2.7 |
-| Vue app (render functions) | 8.1 | 35.7 | 73.9 | 55.4 | 47.6 | 190 | 232 | 20.9 | 15.3 |
-| Solid app (no JSX) | 4.7 | 19.9 | 22.2 | 32.9 | 27.9 | 71.8 | 43.9 | 13.8 | 8.3 |
-| Svelte app (precompiled) | 4.6 | 20.2 | 21.2 | 42.0 | 29.7 | 112 | 99.5 | 19.9 | 5.4 |
-| Monorepo-style TypeScript app | 7.8 | 25.1 | 26.5 | 82.5 | 29.5 | 223 | 416 | 21.1 | 6.0 |
-| date-fns | 8.6 | 28.7 | 27.8 | 50.6 | 31.5 | 101 | 100 | 19.5 | 6.2 |
-| Zod | 9.0 | 21.5 | 30.2 | 43.4 | 37.1 | 139 | 228 | 20.4 | 10.4 |
-| D3 | 9.2 | 19.7 | 31.6 | 39.7 | 38.0 | 116 | 232 | 17.2 | 9.7 |
+| TypeScript compiler | 65.4 | 116 | 596 | 267 | 742 | 801 | 4877 | 64.6 | 110 |
+| three.js | 12.5 | 59.2 | 66.2 | 82.0 | 99.7 | 206 | 492 | 24.7 | 17.2 |
+| lodash-es | 15.6 | 42.0 | 38.4 | 64.3 | 48.0 | 249 | 239 | 55.9 | 2.4 |
+| React + react-dom/server | 6.1 | 17.0 | 34.7 | 31.5 | 40.2 | 87.7 | 195 | 18.2 | 11.1 |
+| rxjs | 6.2 | 24.6 | 32.0 | 39.7 | 28.0 | 141 | 110 | 19.9 | 7.0 |
+| 1,500-module app | 40.9 | 485 | 144 | 549 | 176 | 1151 | 1321 | failed | 36.8 |
+| 500-module TypeScript app | 16.4 | 55.8 | 80.1 | 275 | 94.3 | 458 | 575 | 27.8 | 8.5 |
+| Preact app (TSX) | 3.6 | 14.8 | 16.9 | 29.2 | 19.6 | 54.9 | 326 | 12.4 | 2.8 |
+| Vue app (render functions) | 8.1 | 38.2 | 78.4 | 56.9 | 48.2 | 197 | 243 | 22.0 | 13.4 |
+| Solid app (no JSX) | 4.1 | 19.4 | 21.0 | 33.8 | 28.2 | 75.5 | 45.8 | 14.7 | 4.9 |
+| Svelte app (precompiled) | 4.9 | 23.8 | 22.5 | 45.4 | 29.3 | 114 | 98.2 | 20.3 | 5.4 |
+| Monorepo-style TypeScript app | 8.5 | 27.4 | 24.1 | 85.9 | 31.4 | 233 | 418 | 23.9 | 5.5 |
+| date-fns | 8.9 | 27.0 | 24.1 | 49.8 | 30.1 | 104 | 105 | 17.9 | 5.8 |
+| Zod | 9.0 | 26.2 | 28.0 | 43.5 | 37.2 | 139 | 234 | 20.1 | 9.8 |
+| D3 | 7.9 | 22.6 | 32.7 | 40.3 | 40.3 | 119 | 234 | 17.6 | 10.5 |
 
 Minified:
 
 | | Rathkit Pack | esbuild | rolldown | rspack | Vite | webpack | Rollup | Parcel 2 | Parcel 3 |
 |---|---|---|---|---|---|---|---|---|---|
-| TypeScript compiler | 65.0 | 77.2 | 722 | 1674 | 873 | 18210 | 24153 | n/a | 116 |
-| three.js | 16.6 | 65.2 | 73.8 | 229 | 109 | 1978 | 1537 | n/a | 19.6 |
-| lodash-es | 17.2 | 41.4 | 40.4 | 98.4 | 47.6 | 869 | 706 | n/a | 2.6 |
-| React + react-dom/server | 9.4 | 15.0 | 39.8 | 101 | 45.4 | 1061 | 864 | n/a | 12.5 |
-| rxjs | 8.9 | 24.3 | 38.2 | 93.1 | 29.8 | 930 | 305 | n/a | 6.0 |
-| 1,500-module app | 46.4 | 485 | 142 | 713 | 178 | 3283 | 1404 | n/a | 30.8 |
-| 500-module TypeScript app | 21.5 | 54.0 | 76.6 | 409 | 96.7 | 3272 | 1286 | n/a | 9.2 |
-| Preact app (TSX) | 5.4 | 14.3 | 17.3 | 40.9 | 21.3 | 298 | 498 | n/a | 4.6 |
-| Vue app (render functions) | 9.6 | 40.7 | 96.6 | 282 | 59.8 | 2725 | 725 | n/a | 15.1 |
-| Solid app (no JSX) | 7.6 | 21.6 | 25.1 | 59.0 | 29.8 | 534 | 124 | n/a | 6.2 |
-| Svelte app (precompiled) | 7.2 | 21.7 | 23.6 | 62.0 | 30.0 | 521 | 289 | n/a | 5.7 |
-| Monorepo-style TypeScript app | 9.3 | 25.9 | 25.8 | 174 | 31.2 | 2088 | 667 | n/a | 8.2 |
-| date-fns | 9.5 | 25.9 | 25.3 | 60.7 | 36.1 | 346 | 294 | n/a | 5.0 |
-| Zod | 9.6 | 27.0 | 31.4 | 79.9 | 40.0 | 801 | 657 | n/a | 10.0 |
-| D3 | 9.7 | 22.0 | 35.5 | 81.0 | 41.8 | 837 | 661 | n/a | 7.7 |
+| TypeScript compiler | 64.1 | 77.1 | 743 | 1740 | 900 | 18592 | 24663 | n/a | 113 |
+| three.js | 16.9 | 69.0 | 77.0 | 233 | 110 | 2054 | 1573 | n/a | 17.9 |
+| lodash-es | 18.4 | 40.9 | 39.6 | 103 | 48.8 | 903 | 723 | n/a | 2.8 |
+| React + react-dom/server | 8.0 | 14.1 | 37.9 | 106 | 45.7 | 1111 | 895 | n/a | 10.5 |
+| rxjs | 8.2 | 22.3 | 41.6 | 90.0 | 28.2 | 971 | 315 | n/a | 5.9 |
+| 1,500-module app | 44.3 | 485 | 150 | 716 | 179 | 3282 | 1350 | n/a | 36.5 |
+| 500-module TypeScript app | 19.7 | 53.6 | 80.3 | 422 | 96.5 | 3343 | 1316 | n/a | 8.2 |
+| Preact app (TSX) | 4.8 | 14.6 | 18.2 | 40.5 | 21.2 | 316 | 508 | n/a | 2.7 |
+| Vue app (render functions) | 10.2 | 40.3 | 103 | 288 | 59.9 | 2758 | 743 | n/a | 15.8 |
+| Solid app (no JSX) | 8.1 | 23.4 | 24.1 | 60.4 | 30.9 | 552 | 125 | n/a | 6.6 |
+| Svelte app (precompiled) | 7.7 | 20.4 | 24.9 | 65.7 | 29.4 | 540 | 298 | n/a | 5.2 |
+| Monorepo-style TypeScript app | 10.5 | 27.7 | 27.7 | 177 | 32.5 | 2082 | 688 | n/a | 7.8 |
+| date-fns | 8.8 | 27.7 | 27.2 | 61.4 | 30.1 | 361 | 304 | n/a | 7.2 |
+| Zod | 10.0 | 29.9 | 32.8 | 80.8 | 40.3 | 823 | 687 | n/a | 10.8 |
+| D3 | 9.7 | 20.0 | 34.8 | 82.2 | 44.2 | 851 | 692 | n/a | 10.8 |
 
 Each tool runs in its own watch mode on a writable copy of the project, the first build is waited for, then one file of the project is changed 7 times (each change appends one statement), and the time from writing the file to the output file holding the statement is taken; the median of the 7 is shown.
 
@@ -253,40 +253,40 @@ Start, until the page and every module it imports have been answered:
 | | Rathkit Pack | esbuild | rspack | Vite | webpack | Parcel 2 | Parcel 3 |
 |---|---|---|---|---|---|---|---|
 | TypeScript compiler | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
-| three.js | 75.0 | 121 | 213 | 190 | 684 | 850 | 101 |
-| lodash-es | 44.3 | 99.8 | 200 | 196 | 855 | 1164 | 11.0 |
-| React + react-dom/server | 31.0 | 81.9 | 169 | 265 | 526 | 697 | 41.5 |
-| rxjs | 30.8 | 81.7 | 155 | 258 | 544 | 821 | 22.2 |
-| 1,500-module app | 316 | 570 | 468 | 1499 | 1779 | failed | 221 |
-| 500-module TypeScript app | 47.1 | 118 | 343 | 705 | 1084 | 1312 | 74.1 |
-| Preact app (TSX) | 17.9 | 68.1 | 153 | 263 | 501 | 633 | 21.0 |
-| Vue app (render functions) | 31.2 | 89.7 | 172 | 261 | 579 | 684 | 50.7 |
-| Solid app (no JSX) | 19.3 | 68.4 | 154 | 253 | 478 | 633 | 22.3 |
-| Svelte app (precompiled) | 30.3 | 79.5 | 164 | 262 | 625 | failed | failed |
-| Monorepo-style TypeScript app | 28.9 | 84.6 | 202 | 425 | 783 | 898 | 30.5 |
-| date-fns | 30.5 | 90.6 | 172 | 203 | 658 | 915 | 42.0 |
-| Zod | 42.0 | 84.2 | 172 | 204 | 643 | 756 | 44.0 |
-| D3 | 41.9 | 92.1 | 163 | 206 | 656 | 694 | 45.9 |
+| three.js | 75.9 | 124 | 223 | 198 | 715 | 881 | 105 |
+| lodash-es | 45.1 | 101 | 208 | 210 | 896 | 1228 | 12.0 |
+| React + react-dom/server | 33.0 | 85.8 | 175 | 280 | 545 | 709 | 45.7 |
+| rxjs | 32.1 | 83.2 | 161 | 270 | 564 | 851 | 24.7 |
+| 1,500-module app | 310 | 582 | 479 | 1533 | 1826 | failed | 227 |
+| 500-module TypeScript app | 50.0 | 121 | 356 | 729 | 1134 | 1334 | 81.3 |
+| Preact app (TSX) | 19.3 | 69.4 | 161 | 271 | 524 | 656 | 21.4 |
+| Vue app (render functions) | 32.2 | 90.4 | 180 | 270 | 606 | 700 | 51.7 |
+| Solid app (no JSX) | 20.2 | 70.7 | 160 | 261 | 501 | 651 | 23.7 |
+| Svelte app (precompiled) | 30.8 | 81.3 | 174 | 272 | 640 | failed | failed |
+| Monorepo-style TypeScript app | 31.2 | 89.6 | 208 | 448 | 805 | 955 | 31.3 |
+| date-fns | 31.4 | 91.1 | 174 | 212 | 685 | 932 | 42.6 |
+| Zod | 43.2 | 84.8 | 176 | 210 | 660 | 792 | 44.8 |
+| D3 | 43.5 | 93.6 | 173 | 219 | 673 | 717 | 50.5 |
 
 HMR latency, from writing a change to a module that accepts it to the update notice (the kind of notice is in the second table):
 
 | | Rathkit Pack | esbuild | rspack | Vite | webpack | Parcel 2 | Parcel 3 |
 |---|---|---|---|---|---|---|---|
 | TypeScript compiler | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
-| three.js | 19.6 | 56.3 | 30.1 | 2.0 | 39.7 | 6.8 | 32.8 |
-| lodash-es | 20.5 | 36.8 | 28.9 | 2.0 | 71.4 | 10.0 | 1.9 |
-| React + react-dom/server | 8.8 | 13.3 | 23.4 | 2.1 | 36.5 | 6.6 | 14.0 |
-| rxjs | 10.2 | 18.8 | 21.3 | 2.1 | 38.9 | 8.5 | 4.2 |
-| 1,500-module app | 135 | 464 | 50.1 | 3.0 | 197 | none | 39.9 |
-| 500-module TypeScript app | 19.4 | 53.3 | 28.8 | 14.8 | 69.7 | 9.2 | 8.7 |
-| Preact app (TSX) | 3.4 | 12.6 | 21.1 | 1.6 | 37.2 | 7.1 | 4.2 |
-| Vue app (render functions) | 9.3 | 15.1 | 22.8 | 3.3 | 39.8 | 7.2 | 11.0 |
-| Solid app (no JSX) | 3.2 | 14.1 | 20.1 | 1.4 | 36.8 | 8.9 | 5.6 |
-| Svelte app (precompiled) | 10.2 | 17.7 | 22.6 | 1.5 | 40.8 | none | none |
-| Monorepo-style TypeScript app | 9.7 | 25.0 | 28.7 | 3.9 | 62.1 | 9.6 | 6.0 |
-| date-fns | 10.3 | 25.1 | 22.6 | 2.3 | 48.2 | 9.5 | 5.9 |
-| Zod | 15.5 | 30.7 | 22.8 | 5.1 | 46.6 | 10.1 | 10.0 |
-| D3 | 13.9 | 19.5 | 22.1 | 5.4 | 40.7 | 9.0 | 10.2 |
+| three.js | 19.9 | 57.2 | 29.6 | 1.8 | 39.5 | 6.7 | 31.6 |
+| lodash-es | 21.8 | 39.4 | 30.3 | 1.9 | 76.7 | 11.4 | 1.8 |
+| React + react-dom/server | 8.4 | 14.7 | 24.1 | 1.9 | 36.1 | 7.1 | 13.4 |
+| rxjs | 9.7 | 17.8 | 22.1 | 2.1 | 39.4 | 9.6 | 4.0 |
+| 1,500-module app | 138 | 473 | 45.1 | 3.4 | 209 | none | 39.0 |
+| 500-module TypeScript app | 19.5 | 54.3 | 27.7 | 16.0 | 70.4 | 10.3 | 9.0 |
+| Preact app (TSX) | 2.9 | 11.6 | 22.5 | 2.7 | 37.9 | 7.2 | 4.5 |
+| Vue app (render functions) | 9.9 | 13.6 | 23.1 | 2.6 | 38.5 | 7.3 | 12.6 |
+| Solid app (no JSX) | 3.2 | 14.1 | 22.0 | 3.0 | 37.8 | 9.7 | 6.2 |
+| Svelte app (precompiled) | 9.1 | 20.3 | 24.2 | 1.6 | 41.7 | none | none |
+| Monorepo-style TypeScript app | 9.5 | 25.4 | 30.1 | 3.6 | 64.1 | 9.8 | 6.3 |
+| date-fns | 10.2 | 28.1 | 23.8 | 2.1 | 50.6 | 9.9 | 6.0 |
+| Zod | 13.5 | 114 | 23.1 | 1.8 | 47.8 | 9.8 | 10.6 |
+| D3 | 12.8 | 111 | 22.2 | 4.0 | 40.5 | 7.7 | 11.5 |
 
 Notice kinds: Rathkit Pack hmr; esbuild change; rspack ok/warnings; Vite update; webpack ok/warnings; Parcel 2 update; Parcel 3 update. Without a development server: rolldown (no development server (the rolldown command line has none)); Rollup (no development server).
 
@@ -300,46 +300,46 @@ Not measured: TypeScript compiler (the TypeScript compiler is a library for Node
 
 | Tool and setup | Build only (ms) | Build + check (ms) | The check adds (ms) | Memory build only (MB) | Memory build + check (MB) |
 |---|---|---|---|---|---|
-| `tsc --noEmit` alone | - | 731 | - | - | 240 |
+| `tsc --noEmit` alone | - | 751 | - | - | 237 |
 | Rathkit Pack: no type checker | not measured | not measured | - | - | - |
-| esbuild: esbuild, then `tsc --noEmit` | 66.8 | 786 | 719 | 51 | 238 |
-| rolldown: rolldown, then `tsc --noEmit` | 157 | 887 | 729 | 183 | 234 |
-| rspack: ts-checker-rspack-plugin (`async: false`) in the rspack build | 490 | 1035 | 545 | 157 | 463 |
-| Vite: `tsc --noEmit`, then `vite build` (the starter template runs `tsc -b && vite build`) | 237 | 964 | 727 | 201 | 235 |
-| webpack: fork-ts-checker-webpack-plugin (`async: false`) in the webpack build | 3891 | 4129 | 238 | 495 | 866 |
-| Rollup: @rollup/plugin-typescript with checking on (its default), reading the project tsconfig | 2315 | 2501 | 186 | 507 | 517 |
-| Parcel 2: Parcel 2, then `tsc --noEmit` | 1273 | 1990 | 717 | 542 | 540 |
-| Parcel 3: Parcel 3, then `tsc --noEmit` | 89.0 | 814 | 725 | 79 | 241 |
+| esbuild: esbuild, then `tsc --noEmit` | 68.5 | 806 | 738 | 52 | 235 |
+| rolldown: rolldown, then `tsc --noEmit` | 160 | 899 | 739 | 185 | 240 |
+| rspack: ts-checker-rspack-plugin (`async: false`) in the rspack build | 507 | 1066 | 559 | 157 | 461 |
+| Vite: `tsc --noEmit`, then `vite build` (the starter template runs `tsc -b && vite build`) | 241 | 996 | 755 | 199 | 237 |
+| webpack: fork-ts-checker-webpack-plugin (`async: false`) in the webpack build | 3977 | 4152 | 175 | 494 | 869 |
+| Rollup: @rollup/plugin-typescript with checking on (its default), reading the project tsconfig | 2357 | 2569 | 212 | 505 | 517 |
+| Parcel 2: Parcel 2, then `tsc --noEmit` | 1315 | 2040 | 724 | 543 | 541 |
+| Parcel 3: Parcel 3, then `tsc --noEmit` | 90.7 | 847 | 756 | 77 | 233 |
 
 Preact app (TSX):
 
 | Tool and setup | Build only (ms) | Build + check (ms) | The check adds (ms) | Memory build only (MB) | Memory build + check (MB) |
 |---|---|---|---|---|---|
-| `tsc --noEmit` alone | - | 496 | - | - | 208 |
+| `tsc --noEmit` alone | - | 502 | - | - | 208 |
 | Rathkit Pack: no type checker | not measured | not measured | - | - | - |
-| esbuild: esbuild, then `tsc --noEmit` | 22.8 | 514 | 491 | 17 | 208 |
-| rolldown: rolldown, then `tsc --noEmit` | 96.5 | 590 | 494 | 133 | 209 |
-| rspack: ts-checker-rspack-plugin (`async: false`) in the rspack build | 120 | 787 | 668 | 114 | 391 |
-| Vite: `tsc --noEmit`, then `vite build` (the starter template runs `tsc -b && vite build`) | 163 | 659 | 496 | 156 | 208 |
-| webpack: fork-ts-checker-webpack-plugin (`async: false`) in the webpack build | 692 | 981 | 289 | 215 | 564 |
-| Rollup: @rollup/plugin-typescript with checking on (its default), reading the project tsconfig | 941 | 1078 | 138 | 309 | 319 |
-| Parcel 2: Parcel 2, then `tsc --noEmit` | 583 | 1091 | 508 | 336 | 337 |
-| Parcel 3: Parcel 3, then `tsc --noEmit` | 28.8 | 525 | 496 | 44 | 208 |
+| esbuild: esbuild, then `tsc --noEmit` | 24.0 | 526 | 502 | 17 | 208 |
+| rolldown: rolldown, then `tsc --noEmit` | 103 | 607 | 504 | 131 | 209 |
+| rspack: ts-checker-rspack-plugin (`async: false`) in the rspack build | 124 | 790 | 666 | 113 | 391 |
+| Vite: `tsc --noEmit`, then `vite build` (the starter template runs `tsc -b && vite build`) | 172 | 681 | 509 | 162 | 208 |
+| webpack: fork-ts-checker-webpack-plugin (`async: false`) in the webpack build | 673 | 993 | 319 | 212 | 571 |
+| Rollup: @rollup/plugin-typescript with checking on (its default), reading the project tsconfig | 971 | 1102 | 131 | 310 | 317 |
+| Parcel 2: Parcel 2, then `tsc --noEmit` | 595 | 1127 | 532 | 336 | 336 |
+| Parcel 3: Parcel 3, then `tsc --noEmit` | 30.5 | 542 | 511 | 44 | 208 |
 
 Monorepo-style TypeScript app:
 
 | Tool and setup | Build only (ms) | Build + check (ms) | The check adds (ms) | Memory build only (MB) | Memory build + check (MB) |
 |---|---|---|---|---|---|
-| `tsc --noEmit` alone | - | 731 | - | - | 232 |
+| `tsc --noEmit` alone | - | 752 | - | - | 232 |
 | Rathkit Pack: no type checker | not measured | not measured | - | - | - |
-| esbuild: esbuild, then `tsc --noEmit` | 39.6 | 771 | 732 | 32 | 231 |
-| rolldown: rolldown, then `tsc --noEmit` | 109 | 846 | 737 | 157 | 232 |
-| rspack: ts-checker-rspack-plugin (`async: false`) in the rspack build | 250 | 1034 | 784 | 145 | 447 |
-| Vite: `tsc --noEmit`, then `vite build` (the starter template runs `tsc -b && vite build`) | 195 | 925 | 730 | 186 | 231 |
-| webpack: fork-ts-checker-webpack-plugin (`async: false`) in the webpack build | 2620 | 2845 | 226 | 466 | 857 |
-| Rollup: @rollup/plugin-typescript with checking on (its default), reading the project tsconfig | 1383 | 1672 | 290 | 380 | 401 |
-| Parcel 2: Parcel 2, then `tsc --noEmit` | 863 | 1612 | 748 | 491 | 494 |
-| Parcel 3: Parcel 3, then `tsc --noEmit` | 46.7 | 790 | 743 | 67 | 231 |
+| esbuild: esbuild, then `tsc --noEmit` | 42.1 | 793 | 751 | 32 | 232 |
+| rolldown: rolldown, then `tsc --noEmit` | 120 | 880 | 760 | 158 | 232 |
+| rspack: ts-checker-rspack-plugin (`async: false`) in the rspack build | 255 | 1066 | 811 | 144 | 447 |
+| Vite: `tsc --noEmit`, then `vite build` (the starter template runs `tsc -b && vite build`) | 190 | 960 | 770 | 180 | 232 |
+| webpack: fork-ts-checker-webpack-plugin (`async: false`) in the webpack build | 2672 | 2896 | 223 | 466 | 856 |
+| Rollup: @rollup/plugin-typescript with checking on (its default), reading the project tsconfig | 1419 | 1702 | 283 | 381 | 400 |
+| Parcel 2: Parcel 2, then `tsc --noEmit` | 892 | 1654 | 762 | 490 | 492 |
+| Parcel 3: Parcel 3, then `tsc --noEmit` | 50.2 | 813 | 762 | 67 | 232 |
 <!-- pack-bench:end -->
 
 (*) rspack and Rollup fold the whole generated 1,500-module app to a constant (1 and 3 KB) and Rollup does the same to the Solid app
@@ -370,22 +370,22 @@ against 49 KB), the Svelte app (24 against 27 KB) and date-fns (26 against 27 KB
 (3425 KB). Parcel 3 is an alpha.
 
 **Rebuild:** in watch mode Rathkit Pack's warm rebuild is faster than esbuild's in all 30 cases (15 workloads, plain and
-minified): 2.3 to 63.9 ms plain and 5.0 to 63.9 ms minified, against 14 to 475 ms plain and 15 to 487 ms minified for esbuild. It is
+minified): 3.6 to 65.4 ms plain and 4.8 to 64.1 ms minified, against 15 to 485 ms plain and 14 to 485 ms minified for esbuild. It is
 faster than rolldown, rspack, Vite, webpack and Rollup in all 30. Parcel 2 is faster only on the TypeScript compiler plain; Parcel 3
 is faster in 15 of the 30, mostly on the smaller inputs (lodash-es, rxjs, the generated apps, date-fns, the monorepo-style app and the
 minified Preact, Solid and Svelte apps). The lowest rebuild time plain was Pack's on 8 of the 15 workloads, Parcel 3's on 6 and Parcel
-2's on one; minified, Pack's on 6 and Parcel 3's on 9. On the 1,500-module app Pack takes 41 and 44 ms and esbuild about 475 and 487 ms.
-Rebuilds of webpack and Rollup minified take 18 and 24 s on the TypeScript compiler, against 64 ms for Pack. On Linux Pack hears of a change
+2's on one; minified, Pack's on 6 and Parcel 3's on 9. On the 1,500-module app Pack takes 41 and 44 ms and esbuild about 485 ms in both.
+Rebuilds of webpack and Rollup minified take 19 and 25 s on the TypeScript compiler, against 64 ms for Pack. On Linux Pack hears of a change
 through the kernel's file events; on macOS and Windows it still polls, so these figures say nothing about those systems.
 
-**HMR:** latency in Pack's development server is 3.2 to 135 ms (the 1,500-module app). It is lower than esbuild's in all 14 served
-workloads (esbuild 11 to 478 ms; esbuild's is a live-reload signal, not HMR), than webpack's in all 14 (36 to 199 ms) and than rspack's
-in 13 of 14 (21 to 44 ms; rspack is faster on the 1,500-module app). It is higher than Vite's in all 14 (1.3 to 14.5 ms), than Parcel 2's in
-10 of the 12 it has figures for (7.0 to 10.7 ms) and than Parcel 3's in 8 of the 13 (2.0 to 42 ms). Pack's development server started
+**HMR:** latency in Pack's development server is 2.9 to 138 ms (the 1,500-module app). It is lower than esbuild's in all 14 served
+workloads (esbuild 12 to 473 ms; esbuild's is a live-reload signal, not HMR), than webpack's in all 14 (36 to 209 ms) and than rspack's
+in 13 of 14 (22 to 45 ms; rspack is faster on the 1,500-module app). It is higher than Vite's in all 14 (1.6 to 16.0 ms), than Parcel 2's in
+9 of the 12 it has figures for (6.7 to 11.4 ms) and than Parcel 3's in 8 of the 13 (1.8 to 39 ms). Pack's development server started
 fastest on 11 of the 14 served workloads; Parcel 3 was fastest on lodash-es, rxjs and the 1,500-module app. Vite does not bundle, so its start
 covers the modules of the page only because the measurement asks for all of them. None of this was run in a browser. Parcel 2 has no figure
 for the 1,500-module app and the Svelte app, and Parcel 3 none for the Svelte app. The TypeScript compiler has no development-server figure for any tool, for the reason in the method.
 
 **Build plus type check:** Rathkit Pack's own checker (`rkp check`, stage 1) is not measured in this table, so its row has no figure and
-nothing is invented for it. The cost of `tsc --noEmit` alone is 0.49 to 0.75 s on these three workloads and 207 to 236 MB. Where a checker runs
+nothing is invented for it. The cost of `tsc --noEmit` alone is 0.50 to 0.75 s on these three workloads and 208 to 237 MB. Where a checker runs
 in the build, the check adds time on top of the build for every tool; the rows show how much.
