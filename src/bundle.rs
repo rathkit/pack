@@ -906,7 +906,7 @@ impl<'a> Bundler<'a> {
             let total = raws.len();
             let queue = std::sync::Mutex::new(raws.into_iter().enumerate().collect::<Vec<_>>());
             let done: std::sync::Mutex<Vec<Option<Result<OutputFile, Vec<Diagnostic>>>>> = std::sync::Mutex::new((0..total).map(|_| None).collect());
-            let workers = std::thread::available_parallelism().map_or(1, |n| n.get()).min(total);
+            let workers = crate::par::workers().min(total);
             std::thread::scope(|scope| {
                 for _ in 0..workers {
                     scope.spawn(|| {
@@ -1478,7 +1478,7 @@ impl<'a> Bundler<'a> {
         // core escapes them while the minifier works: the biggest one (ts5 is one 9 MB module) is not worth waiting for.
         let preparing = std::time::Instant::now();
         let (mut code, anchors, mut prep) = std::thread::scope(|scope| {
-            let escaping = options.sources_content.then(|| scope.spawn(|| { let t = std::time::Instant::now(); let r = self.escape_sources(marks); if timing { eprintln!("  escape sources: {:.1} ms", t.elapsed().as_secs_f64() * 1000.0); } r }));
+            let escaping = (options.sources_content && self.graph.modules.iter().map(|m| m.source.len()).sum::<usize>() >= crate::sourcemap::IN_PLACE_BYTES).then(|| scope.spawn(|| { let t = std::time::Instant::now(); let r = self.escape_sources(marks); if timing { eprintln!("  escape sources: {:.1} ms", t.elapsed().as_secs_f64() * 1000.0); } r }));
             let indexing = scope.spawn(|| { let t = std::time::Instant::now(); let r = self.index_sources(marks); if timing { eprintln!("  index sources: {:.1} ms", t.elapsed().as_secs_f64() * 1000.0); } r });
             let (code, anchors) = if settings.any() {
                 let mut anchors = Vec::new();
@@ -1638,7 +1638,7 @@ impl<'a> Bundler<'a> {
         let timing = std::env::var_os("RATHKIT_TIMING").is_some();
         let tracing = std::time::Instant::now();
         let generated = crate::sourcemap::Positions::new(code);
-        let workers = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let workers = crate::par::workers();
         // Small maps are traced in one go; RATHKIT_MAP_ANCHORS sets the least a range holds (tests use few).
         let least: usize = std::env::var("RATHKIT_MAP_ANCHORS").ok().and_then(|v| v.parse().ok()).unwrap_or(5_000).max(1);
         let parts = if anchors.len() < 4 * least { 1 } else { workers.min(anchors.len() / least).max(1) };

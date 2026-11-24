@@ -6,9 +6,11 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Threads to use: one per core the process may run on.
+/// Threads to use: one per core the process may run on. Asking the system takes tens of microseconds (it reads the cgroup limits), and
+/// the answer is wanted for every module of a build, so it is asked once.
 pub fn workers() -> usize {
-    std::thread::available_parallelism().map_or(1, |n| n.get())
+    static WORKERS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *WORKERS.get_or_init(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
 }
 
 /// Whether `bytes` of work in `items` pieces is enough to pay for starting threads.
