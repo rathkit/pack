@@ -984,7 +984,67 @@ fn shorten_values(css: &str) -> String {
         }
     }
     out.push_str(&css[start..]);
-    merge_rules(&out)
+    drop_empty_rules(&merge_rules(&out))
+}
+
+/// Rules with nothing in them are left out: a style rule with no declaration, and an `@media`, `@supports` or `@container` block that
+/// holds nothing else (after its own empty rules are gone). Every other at-rule stays as it is: an empty `@keyframes` still replaces an
+/// earlier one of the name, and `@layer` fixes the order of the layers. A rule with a rule inside it (nesting) is kept whole.
+fn drop_empty_rules(css: &str) -> String {
+    if !css.contains("{}") && !css.contains("{;}") {
+        return css.to_string();
+    }
+    fn walk(css: &str, out: &mut String) {
+        let mut i = 0;
+        while i < css.len() {
+            let open = skip_to(css, i, &[b'{', b'}', b';']);
+            if open >= css.len() || css.as_bytes()[open] != b'{' {
+                // A statement (`@import ...;`, `@charset ...;`) or the rest.
+                let end = (open + 1).min(css.len());
+                out.push_str(&css[i..end]);
+                i = end;
+                continue;
+            }
+            // The block that starts at `open`, to its matching `}`.
+            let mut depth = 0usize;
+            let mut j = open;
+            loop {
+                j = skip_to(css, j + 1, &[b'{', b'}']);
+                if j >= css.len() {
+                    break;
+                }
+                if css.as_bytes()[j] == b'{' {
+                    depth += 1;
+                } else if depth == 0 {
+                    break;
+                } else {
+                    depth -= 1;
+                }
+            }
+            let prelude = &css[i..open];
+            let body = &css[open + 1..j.min(css.len())];
+            let end = (j + 1).min(css.len());
+            let name = prelude.strip_prefix('@').map(|r| r.split(|c: char| !c.is_ascii_alphabetic() && c != '-').next().unwrap_or("").to_ascii_lowercase());
+            match name.as_deref() {
+                None if body.is_empty() => {}
+                Some("media" | "supports" | "container") => {
+                    let mut inner = String::new();
+                    walk(body, &mut inner);
+                    if !inner.is_empty() {
+                        out.push_str(prelude);
+                        out.push('{');
+                        out.push_str(&inner);
+                        out.push('}');
+                    }
+                }
+                _ => out.push_str(&css[i..end]),
+            }
+            i = end;
+        }
+    }
+    let mut out = String::with_capacity(css.len());
+    walk(css, &mut out);
+    out
 }
 
 /// The end of a `url(...)` whose `(` is at `open`: after the `)`, which a quoted address may hold inside its quotes.
@@ -1299,6 +1359,9 @@ fn refine_value(property: &str, value: &str) -> String {
     }
     if body.contains("transparent") && (property.ends_with("color") || matches!(property, "background" | "background-image" | "border" | "border-top" | "border-right" | "border-bottom" | "border-left" | "outline" | "column-rule" | "box-shadow" | "text-shadow")) {
         body = transparent_as_hex(&body);
+    }
+    if property.ends_with("color") || matches!(property, "background" | "background-image" | "border" | "border-top" | "border-right" | "border-bottom" | "border-left" | "outline" | "column-rule" | "box-shadow" | "text-shadow" | "text-decoration" | "fill" | "stroke") {
+        body = shortest_colors(&body);
     }
     let base = property.trim_start_matches("-webkit-").trim_start_matches("-moz-").trim_start_matches("-o-");
     if base == "flex" {
@@ -1698,6 +1761,98 @@ fn transparent_as_hex(value: &str) -> String {
     out
 }
 
+/// The named colors of CSS and their values, by name.
+const NAMED_COLORS: [(&str, u32); 148] = [
+    ("aliceblue", 0xf0f8ff), ("antiquewhite", 0xfaebd7), ("aqua", 0x00ffff), ("aquamarine", 0x7fffd4), ("azure", 0xf0ffff),
+    ("beige", 0xf5f5dc), ("bisque", 0xffe4c4), ("black", 0x000000), ("blanchedalmond", 0xffebcd), ("blue", 0x0000ff),
+    ("blueviolet", 0x8a2be2), ("brown", 0xa52a2a), ("burlywood", 0xdeb887), ("cadetblue", 0x5f9ea0), ("chartreuse", 0x7fff00),
+    ("chocolate", 0xd2691e), ("coral", 0xff7f50), ("cornflowerblue", 0x6495ed), ("cornsilk", 0xfff8dc), ("crimson", 0xdc143c),
+    ("cyan", 0x00ffff), ("darkblue", 0x00008b), ("darkcyan", 0x008b8b), ("darkgoldenrod", 0xb8860b), ("darkgray", 0xa9a9a9),
+    ("darkgreen", 0x006400), ("darkgrey", 0xa9a9a9), ("darkkhaki", 0xbdb76b), ("darkmagenta", 0x8b008b),
+    ("darkolivegreen", 0x556b2f), ("darkorange", 0xff8c00), ("darkorchid", 0x9932cc), ("darkred", 0x8b0000),
+    ("darksalmon", 0xe9967a), ("darkseagreen", 0x8fbc8f), ("darkslateblue", 0x483d8b), ("darkslategray", 0x2f4f4f),
+    ("darkslategrey", 0x2f4f4f), ("darkturquoise", 0x00ced1), ("darkviolet", 0x9400d3), ("deeppink", 0xff1493),
+    ("deepskyblue", 0x00bfff), ("dimgray", 0x696969), ("dimgrey", 0x696969), ("dodgerblue", 0x1e90ff), ("firebrick", 0xb22222),
+    ("floralwhite", 0xfffaf0), ("forestgreen", 0x228b22), ("fuchsia", 0xff00ff), ("gainsboro", 0xdcdcdc),
+    ("ghostwhite", 0xf8f8ff), ("gold", 0xffd700), ("goldenrod", 0xdaa520), ("gray", 0x808080), ("green", 0x008000),
+    ("greenyellow", 0xadff2f), ("grey", 0x808080), ("honeydew", 0xf0fff0), ("hotpink", 0xff69b4), ("indianred", 0xcd5c5c),
+    ("indigo", 0x4b0082), ("ivory", 0xfffff0), ("khaki", 0xf0e68c), ("lavender", 0xe6e6fa), ("lavenderblush", 0xfff0f5),
+    ("lawngreen", 0x7cfc00), ("lemonchiffon", 0xfffacd), ("lightblue", 0xadd8e6), ("lightcoral", 0xf08080),
+    ("lightcyan", 0xe0ffff), ("lightgoldenrodyellow", 0xfafad2), ("lightgray", 0xd3d3d3), ("lightgreen", 0x90ee90),
+    ("lightgrey", 0xd3d3d3), ("lightpink", 0xffb6c1), ("lightsalmon", 0xffa07a), ("lightseagreen", 0x20b2aa),
+    ("lightskyblue", 0x87cefa), ("lightslategray", 0x778899), ("lightslategrey", 0x778899), ("lightsteelblue", 0xb0c4de),
+    ("lightyellow", 0xffffe0), ("lime", 0x00ff00), ("limegreen", 0x32cd32), ("linen", 0xfaf0e6), ("magenta", 0xff00ff),
+    ("maroon", 0x800000), ("mediumaquamarine", 0x66cdaa), ("mediumblue", 0x0000cd), ("mediumorchid", 0xba55d3),
+    ("mediumpurple", 0x9370db), ("mediumseagreen", 0x3cb371), ("mediumslateblue", 0x7b68ee), ("mediumspringgreen", 0x00fa9a),
+    ("mediumturquoise", 0x48d1cc), ("mediumvioletred", 0xc71585), ("midnightblue", 0x191970), ("mintcream", 0xf5fffa),
+    ("mistyrose", 0xffe4e1), ("moccasin", 0xffe4b5), ("navajowhite", 0xffdead), ("navy", 0x000080), ("oldlace", 0xfdf5e6),
+    ("olive", 0x808000), ("olivedrab", 0x6b8e23), ("orange", 0xffa500), ("orangered", 0xff4500), ("orchid", 0xda70d6),
+    ("palegoldenrod", 0xeee8aa), ("palegreen", 0x98fb98), ("paleturquoise", 0xafeeee), ("palevioletred", 0xdb7093),
+    ("papayawhip", 0xffefd5), ("peachpuff", 0xffdab9), ("peru", 0xcd853f), ("pink", 0xffc0cb), ("plum", 0xdda0dd),
+    ("powderblue", 0xb0e0e6), ("purple", 0x800080), ("rebeccapurple", 0x663399), ("red", 0xff0000), ("rosybrown", 0xbc8f8f),
+    ("royalblue", 0x4169e1), ("saddlebrown", 0x8b4513), ("salmon", 0xfa8072), ("sandybrown", 0xf4a460), ("seagreen", 0x2e8b57),
+    ("seashell", 0xfff5ee), ("sienna", 0xa0522d), ("silver", 0xc0c0c0), ("skyblue", 0x87ceeb), ("slateblue", 0x6a5acd),
+    ("slategray", 0x708090), ("slategrey", 0x708090), ("snow", 0xfffafa), ("springgreen", 0x00ff7f), ("steelblue", 0x4682b4),
+    ("tan", 0xd2b48c), ("teal", 0x008080), ("thistle", 0xd8bfd8), ("tomato", 0xff6347), ("turquoise", 0x40e0d0),
+    ("violet", 0xee82ee), ("wheat", 0xf5deb3), ("white", 0xffffff), ("whitesmoke", 0xf5f5f5), ("yellow", 0xffff00),
+    ("yellowgreen", 0x9acd32),
+];
+
+/// A color written the shorter way: a named color as hex where that is shorter (`white` is `#fff`, `yellow` is `#ff0`), and a hex color as its
+/// name where that is shorter (`#f00` is `red`, `#ffc0cb` is `pink`); on a tie the spelling stays as it is. Only whole tokens are looked at, so
+/// `var(--white)`, a function's name, a string and a `url()` are not touched, and the caller says which properties hold colors.
+fn shortest_colors(value: &str) -> String {
+    let b = value.as_bytes();
+    let mut out = String::with_capacity(value.len());
+    let mut i = 0;
+    let starts_token = |at: usize| at == 0 || matches!(b[at - 1], b' ' | b',' | b'(' | b'/');
+    let ends_token = |at: usize| at >= b.len() || matches!(b[at], b' ' | b',' | b')' | b'/');
+    let short_hex = |rgb: u32| -> String {
+        let (r, g, bl) = ((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8);
+        if [r, g, bl].iter().all(|c| c >> 4 == c & 15) { format!("#{:x}{:x}{:x}", r & 15, g & 15, bl & 15) } else { format!("#{rgb:06x}") }
+    };
+    while i < b.len() {
+        let c = b[i];
+        if c == b'"' || c == b'\'' {
+            let end = (skip_to(value, i + 1, &[c]) + 1).min(b.len());
+            out.push_str(&value[i..end]);
+            i = end;
+        } else if c == b'(' && value[..i].to_ascii_lowercase().ends_with("url") {
+            let end = url_end(value, i);
+            out.push_str(&value[i..end]);
+            i = end;
+        } else if c == b'#' && starts_token(i) {
+            let digits = value[i + 1..].bytes().take_while(u8::is_ascii_hexdigit).count();
+            let rgb = match digits {
+                3 => u32::from_str_radix(&value[i + 1..i + 4], 16).ok().map(|v| ((v >> 8) * 17) << 16 | (((v >> 4) & 15) * 17) << 8 | (v & 15) * 17),
+                6 => u32::from_str_radix(&value[i + 1..i + 7], 16).ok(),
+                _ => None,
+            };
+            let name = rgb.and_then(|rgb| NAMED_COLORS.iter().filter(|(_, v)| *v == rgb).map(|(n, _)| *n).min_by_key(|n| n.len()));
+            match name {
+                Some(name) if name.len() < digits + 1 && ends_token(i + 1 + digits) => out.push_str(name),
+                _ => out.push_str(&value[i..i + 1 + digits]),
+            }
+            i += 1 + digits;
+        } else if c.is_ascii_alphabetic() && starts_token(i) {
+            let len = b[i..].iter().take_while(|x| x.is_ascii_alphanumeric()).count();
+            let word = &value[i..i + len];
+            let lower = word.to_ascii_lowercase();
+            let found = if ends_token(i + len) { NAMED_COLORS.binary_search_by(|(n, _)| (*n).cmp(lower.as_str())).ok() } else { None };
+            match found {
+                Some(at) if short_hex(NAMED_COLORS[at].1).len() < len => out.push_str(&short_hex(NAMED_COLORS[at].1)),
+                _ => out.push_str(word),
+            }
+            i += len;
+        } else {
+            let ch = value[i..].chars().next().expect("a character");
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
 /// A zero length written with a unit, `0px`, is `0` where it stands outside any call (a shadow's offsets and blur).
 fn zero_lengths_at_top(value: &str) -> String {
     let mut depth = 0i32;
@@ -1968,6 +2123,20 @@ mod tests {
         assert_eq!(minify_text("a { margin: 0.5em -0.25em 10.5px 0; w: calc(1 + 0.5) ; x: a0.5 }"), "a{margin:.5em -.25em 10.5px 0;w:calc(1 + .5);x:a0.5}");
         // Selectors, strings, urls, filters and ids are not values.
         assert_eq!(minify_text("#ffffff, a:not(#aabbcc) { content: \"#ffffff 0.5\"; b: url(#ffffff0.5); filter: progid:X(c=#FFFFFF) }"), "#ffffff,a:not(#aabbcc){content:\"#ffffff 0.5\";b:url(#ffffff0.5);filter:progid:X(c=#FFFFFF)}");
+    }
+
+    #[test]
+    fn a_rule_with_nothing_in_it_is_left_out() {
+        assert_eq!(minify_text("a{} b{color:red} @media print{c{} d{}} @media screen{e{color:red} f{}} @keyframes k{} @layer x{} @font-face{} @supports (a:b){g{}}"), "b{color:red}@media screen{e{color:red}}@keyframes k{}@layer x{}@font-face{}");
+        assert_eq!(minify_text("a{color:red;b{}} @import \"x.css\"; .c{content:\"{}\"}"), "a{color:red;b{}}@import \"x.css\";.c{content:\"{}\"}");
+    }
+
+    #[test]
+    fn a_color_is_written_the_shorter_way() {
+        assert_eq!(minify_text("a { color: black; background: white url(white.png) no-repeat; border: 1px solid Red; fill: #ff0000; stroke: yellow; outline: 1px solid #ffc0cb }"), "a{color:#000;background:#fff url(white.png) no-repeat;border:1px solid Red;fill:red;stroke:#ff0;outline:1px solid pink}");
+        // A tie stays as written, and what is not a whole color token is left alone.
+        assert_eq!(minify_text("a { color: blue; background-color: #0ff; border-color: gray; font-family: white; box-shadow: 0 0 var(--white) 2px #fffa }"), "a{color:blue;background-color:#0ff;border-color:gray;font-family:white;box-shadow:0 0 var(--white) 2px #fffa}");
+        assert_eq!(minify_text("a { background: linear-gradient(to right, white, black 50%, #f00) }"), "a{background:linear-gradient(to right,#fff,#000 50%,red)}");
     }
 
     #[test]
