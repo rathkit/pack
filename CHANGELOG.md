@@ -49,6 +49,7 @@ about stability.
 - Function inlining across modules (`#126`) and dead-parameter removal (`#127`) are not done: measured on the benchmark workloads they gain nothing in gzip size, and a constant table across the pieces of a big minified bundle (about 2% raw and 4% gzip on lodash-es) is not built yet.
 - `--write-exports` still needs a file that exists, and `rkp serve` and `--watch` have no `--json` stream of events (`#134`, `#136`).
 - A depfile (every file a build read, including files probed and not found; `#131`) is not in this release.
+- The corpus run of this release builds and checks 61 of the 63 projects once the migrate commands are fixed: `tanstack-query-basic` and `tanstack-query-simple` do not install, because pnpm 11's supply-chain policy stops on `solid-js@1.9.20` ("high-risk trust downgrade"). That is the package's publication, not a Pack failure; the two projects built in the corpus of 0.4.0-beta.0.
 - On the container benchmark of this release (docs/benchmarks.md), Pack is ahead of esbuild on time and memory in all 45 build cases, as in 0.4.0-beta.0, and no case that Pack won on time became a loss or a tie. The machine measured every tool 3 to 5% slower on that day than on the day of the 0.4.0-beta.0 run (esbuild 5%, Pack 5%); run back to back in one session, the 0.4.0-beta.0 build and this one differ by -1.6% (geometric mean over 30 cases of plain and minified builds), and the 1,500-module app builds about 17% faster.
 
 ## 0.4.0-beta.0 - 2026-11-19
