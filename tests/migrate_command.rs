@@ -383,3 +383,20 @@ fn vite_multi_page_input_is_mapped_to_several_entries() {
     let out = stdout(&rkp(&dir, &["migrate"]));
     assert!(out.contains("build:rkp: rkp bundle index.html nested/index.html --config vite.config.js"), "{out}");
 }
+
+#[test]
+fn a_pattern_in_the_input_is_not_a_page_and_a_config_in_a_folder_finds_the_page_beside_it() {
+    let dir = vite_project("glob", "export default { build: { rollupOptions: { input: ['*.html', 'pages/**/*.html'] } } };\n", &[]);
+    let out = stdout(&rkp(&dir, &["migrate"]));
+    assert!(out.contains("build:rkp: rkp bundle index.html --config vite.config.js") && out.contains("does not expand patterns"), "{out}");
+    // The project has no `index.html` of its own: the page is the one beside the config.
+    let dir = std::env::temp_dir().join(format!("rkp-migrate-vite-folder-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("demo")).unwrap();
+    std::fs::write(dir.join("package.json"), "{\"devDependencies\":{\"vite\":\"1\"},\"scripts\":{\"dev\":\"vite --config demo/vite.config.js\"}}").unwrap();
+    std::fs::write(dir.join("demo/index.html"), "<script type=module src=/demo/main.js></script>").unwrap();
+    std::fs::write(dir.join("demo/vite.config.js"), "export default {};\n").unwrap();
+    let out = stdout(&rkp(&dir, &["migrate"]));
+    assert!(out.contains("build:rkp: rkp bundle demo/index.html --config demo/vite.config.js"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
