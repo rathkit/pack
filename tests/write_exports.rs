@@ -1,4 +1,4 @@
-//! `--write-exports=FILE` names a file that must exist; a copy of `package.json` leaves the project's own alone.
+//! `--write-exports=FILE` names a file that is made from `package.json` when it is missing; a copy of `package.json` leaves the project's own alone.
 
 use std::process::Command;
 
@@ -16,13 +16,25 @@ fn rkp(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
 }
 
 #[test]
-fn a_file_that_does_not_exist_is_an_error_that_names_it_and_says_to_copy() {
+fn a_file_that_does_not_exist_is_made_from_the_projects_package_json() {
     let dir = project("missing");
+    let before = std::fs::read_to_string(dir.join("package.json")).unwrap();
+    let run = rkp(&dir, &["src/index.js", "--outdir", "dist", "--entry-names=[name]", "--write-exports=dist/package.json"]);
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(std::fs::read_to_string(dir.join("package.json")).unwrap(), before);
+    let made = std::fs::read_to_string(dir.join("dist/package.json")).unwrap();
+    assert!(made.contains("\"main\": \"./index.js\"") && made.contains("\"name\": \"lib\""), "{made}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_missing_file_and_no_package_json_is_an_error_that_names_both() {
+    let dir = project("none");
+    std::fs::remove_file(dir.join("package.json")).unwrap();
     let run = rkp(&dir, &["src/index.js", "--outdir", "dist", "--entry-names=[name]", "--write-exports=dist/package.json"]);
     assert!(!run.status.success());
     let message = String::from_utf8_lossy(&run.stderr);
-    assert!(message.contains("dist") && message.contains("package.json") && message.contains("copy package.json"), "{message}");
-    assert!(!dir.join("dist/package.json").exists());
+    assert!(message.contains("dist") && message.contains("no package.json"), "{message}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
