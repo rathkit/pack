@@ -1815,8 +1815,17 @@ fn write_pages(job: &Job, dir: &std::path::Path, output: &rathkit_pack::bundle::
     let css_extension = job.bundle_options.out_extensions.iter().find(|(from, _)| from == ".css").map_or(".css", |(_, to)| to.as_str());
     let sheets: Vec<&str> = output.files.iter().map(|f| f.name.as_str()).filter(|n| n.ends_with(css_extension)).collect();
     let public = job.cwd.join("public");
+    // A page is written at its place under the folder that holds all the pages, so `index.html` and `nested/index.html` stay two files.
+    let root = pages_root(&job.pages).unwrap_or_else(|| job.cwd.clone());
     for page in &job.pages {
         let mut html = page.html.clone();
+        let under = page.file.strip_prefix(&root).ok().and_then(|p| p.parent()).map(|p| p.to_path_buf()).unwrap_or_default();
+        // The files are written in `dir`: a page in a folder below it reaches them one folder up for each folder, unless the public path is absolute.
+        let public_path = if job.options.public_path.starts_with('/') || job.options.public_path.contains("://") {
+            job.options.public_path.clone()
+        } else {
+            format!("{}{}", "../".repeat(under.components().count()), job.options.public_path)
+        };
         // Every change to the text, with the place it is made at; applied last first so the places of the others stay true.
         let mut edits: Vec<(usize, usize, String)> = Vec::new();
         // With ES modules each script and sheet is a file of its own. In the other formats everything is one file, which the
@@ -1859,7 +1868,7 @@ fn write_pages(job: &Job, dir: &std::path::Path, output: &rathkit_pack::bundle::
                 chunk.file.clone()
             };
             if used.insert(file.clone()) {
-                edits.push((reference.start, reference.end, format!("{}{}", job.options.public_path, file)));
+                edits.push((reference.start, reference.end, format!("{}{}", public_path, file)));
             } else {
                 edits.push((reference.tag_start, reference.tag_end, String::new()));
             }
@@ -1884,13 +1893,13 @@ fn write_pages(job: &Job, dir: &std::path::Path, output: &rathkit_pack::bundle::
             let name = rathkit_pack::loader::asset_name(&job.options.asset_names, &file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), &bytes);
             std::fs::write(dir.join(&name), &bytes).map_err(|e| format!("{name}: {e}"))?;
             rathkit_pack::written::record(&dir.join(&name), rathkit_pack::written::Kind::Asset, bytes.len() as u64);
-            edits.push((reference.start, reference.end, format!("{}{name}{suffix}", job.options.public_path)));
+            edits.push((reference.start, reference.end, format!("{}{name}{suffix}", public_path)));
         }
         edits.sort_by_key(|(start, _, _)| std::cmp::Reverse(*start));
         for (start, end, text) in edits {
             html.replace_range(start..end, &text);
         }
-        let links: String = sheets.iter().filter(|n| !mentions_file(&html, n)).map(|n| format!("<link rel=\"stylesheet\" href=\"{}{n}\">\n", job.options.public_path)).collect();
+        let links: String = sheets.iter().filter(|n| !mentions_file(&html, n)).map(|n| format!("<link rel=\"stylesheet\" href=\"{}{n}\">\n", public_path)).collect();
         if !links.is_empty() {
             match html.to_ascii_lowercase().find("</head>") {
                 Some(at) => html.insert_str(at, &links),
@@ -1901,12 +1910,28 @@ fn write_pages(job: &Job, dir: &std::path::Path, output: &rathkit_pack::bundle::
         if let Some(host) = &job.host {
             html = host.transform_built_page(&html, &format!("/{}", relative.to_string_lossy().replace('\\', "/")))?;
         }
-        let target = dir.join(relative.file_name().map(std::path::PathBuf::from).unwrap_or_default());
+        let target = dir.join(&under).join(relative.file_name().map(std::path::PathBuf::from).unwrap_or_default());
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        }
         std::fs::write(&target, &html).map_err(|e| format!("{}: {e}", target.display()))?;
         rathkit_pack::written::record(&target, rathkit_pack::written::Kind::Html, html.len() as u64);
         println!("{}  page", target.display());
     }
     copy_public(&public, dir)
+}
+
+/// The folder that holds every page: pages are written under their place in it.
+fn pages_root(pages: &[Page]) -> Option<std::path::PathBuf> {
+    let mut root: Option<std::path::PathBuf> = None;
+    for page in pages {
+        let dir = page.file.parent()?;
+        root = Some(match root {
+            None => dir.to_path_buf(),
+            Some(r) => r.components().zip(dir.components()).take_while(|(a, b)| a == b).map(|(a, _)| a).collect(),
+        });
+    }
+    root
 }
 
 /// Whether `html` names the file `name` as a whole: the name is not the end of a longer file name (`m.css` is not in `chunk-qm.css`).

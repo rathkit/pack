@@ -329,12 +329,7 @@ fn vite(dir: &Path, package: Option<&Json>) -> Option<Finding> {
     if let Some(input) = expression_after(&text, "input") {
         let html: Vec<String> = string_literals(&input).into_iter().filter(|l| l.ends_with(".html")).map(|l| l.trim_start_matches("./").to_string()).collect();
         if html.len() > 1 {
-            let names: Vec<&str> = html.iter().map(|h| h.rsplit('/').next().unwrap_or(h)).collect();
-            if names.iter().enumerate().all(|(i, n)| !names[..i].contains(n)) {
-                pages = html;
-            } else {
-                finding.notes.push(format!("build.rollupOptions.input has several pages ({}) that share a file name: rkp writes each page to the output folder under its file name, so they would overwrite one another; only index.html is in the command, build the others with their own `rkp bundle PAGE --outdir DIR`", html.join(", ")));
-            }
+            pages = html;
         } else if let Some(one) = html.first().filter(|h| h.as_str() != "index.html") {
             pages = vec![one.clone()];
         } else if html.is_empty() && input.starts_with(['{', '[']) {

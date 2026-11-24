@@ -378,8 +378,8 @@ fn vite_multi_page_input_is_mapped_to_several_entries() {
     let built = rkp(&dir, &args[1..].iter().map(String::as_str).collect::<Vec<_>>());
     assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
     assert!(dir.join("dist/index.html").is_file() && dir.join("dist/about.html").is_file());
-    // Pages with the same file name in different folders would overwrite one another: the note says so, and the command has one page.
+    // Pages with the same file name in different folders keep their folders in the output.
     let dir = vite_project("clash", "export default { build: { rollupOptions: { input: { a: 'index.html', b: 'nested/index.html' } } } };\n", &[]);
     let out = stdout(&rkp(&dir, &["migrate"]));
-    assert!(out.contains("build:rkp: rkp bundle index.html --config vite.config.js") && out.contains("share a file name"), "{out}");
+    assert!(out.contains("build:rkp: rkp bundle index.html nested/index.html --config vite.config.js"), "{out}");
 }
