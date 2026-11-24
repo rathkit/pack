@@ -40,6 +40,7 @@ about stability.
 - A page that links a style sheet which its script also imports stopped with `no built style sheet`; it builds now, with the sheet written once. A page build no longer prints (or lists in the Node API) the empty script of a style sheet it deleted.
 - A page build could leave a script's style sheet unlinked when its name ended another sheet's name.
 - Pages with the same file name in different folders (`index.html` and `nested/index.html`) are written at their own places in the output folder instead of one overwriting the other.
+- `rkp migrate` no longer prints a pattern of `rollupOptions.input` (`pages/**/*.html`) as a page, and finds the page beside a Vite config that is in a folder (`demo/vite.config.js` and `demo/index.html`).
 - `--entry-names` was ignored for the one file of a build with a single entry and no `--splitting`; the names are now the same with and without `--splitting`.
 
 ### Known gaps

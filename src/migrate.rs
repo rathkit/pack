@@ -324,10 +324,19 @@ fn vite(dir: &Path, package: Option<&Json>) -> Option<Finding> {
     subfolder_note(&mut finding, config.as_ref());
     let page = std::fs::read_to_string(dir.join("index.html")).ok();
     let lib = expression_after(&text, "lib").filter(|l| l.starts_with('{'));
-    let mut pages = vec!["index.html".to_string()];
+    // The page is `index.html` of the project, or of the folder of the config when the project has none (`demo/vite.config.js` with `demo/index.html`).
+    let mut pages = vec![match config.as_ref().and_then(|c| c.rsplit_once('/')) {
+        Some((folder, _)) if !dir.join("index.html").is_file() && dir.join(folder).join("index.html").is_file() => format!("{folder}/index.html"),
+        _ => "index.html".to_string(),
+    }];
     // Several pages: `build.rollupOptions.input` as a list or an object of page paths (Vite's multi-page apps).
     if let Some(input) = expression_after(&text, "input") {
-        let html: Vec<String> = string_literals(&input).into_iter().filter(|l| l.ends_with(".html")).map(|l| l.trim_start_matches("./").to_string()).collect();
+        let literals: Vec<String> = string_literals(&input).into_iter().filter(|l| l.ends_with(".html")).collect();
+        // A pattern (`pages/**/*.html`) is not a page: rkp does not expand it.
+        let html: Vec<String> = literals.iter().filter(|l| !l.contains(['*', '?', '['])).map(|l| l.trim_start_matches("./").to_string()).collect();
+        if html.len() < literals.len() {
+            finding.notes.push("build.rollupOptions.input has a pattern (`*.html`): rkp does not expand patterns, so give every page to `rkp bundle PAGE...`".to_string());
+        }
         if html.len() > 1 {
             pages = html;
         } else if let Some(one) = html.first().filter(|h| h.as_str() != "index.html") {
