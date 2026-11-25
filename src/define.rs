@@ -353,7 +353,7 @@ impl Defines {
                         NodeKind::Call { callee, .. } => callee,
                         _ => return None,
                     };
-                    if ast[at].has(crate::ast::flags::OPTIONAL) && self.value(ast, sem, next, full).is_some_and(|c| c.nullish()) {
+                    if ast[at].has(crate::ast::flags::OPTIONAL) && self.value(ast, sem, next, full, depth + 1).is_some_and(|c| c.nullish()) {
                         return Some(Const::Undefined);
                     }
                     at = next;

@@ -251,7 +251,7 @@ pub fn analyze(graph: &Graph, linked: &Linked, shaken: &crate::shake::Shaken) ->
                     continue;
                 }
                 let value = match site.args.get(i) {
-                    Some(&arg) => value_of(ast, sem, site.module, arg, &candidates, &param_at),
+                    Some(&arg) => value_of(ast, sem, site.module, arg, &candidates, &param_at, 0),
                     None => Lat::One(Const::Undefined),
                 };
                 let joined = join(&candidates[site.candidate].state[i], &value);
@@ -310,11 +310,15 @@ fn reads_arguments(ast: &Ast, sem: &Semantic, body: NodeId) -> bool {
 }
 
 /// What the argument expression `node` is worth, given what is known of the parameters it may pass on.
-fn value_of(ast: &Ast, sem: &Semantic, module: ModuleId, node: NodeId, candidates: &[Candidate], param_at: &HashMap<(ModuleId, SymbolId), (usize, usize)>) -> Lat {
+fn value_of(ast: &Ast, sem: &Semantic, module: ModuleId, node: NodeId, candidates: &[Candidate], param_at: &HashMap<(ModuleId, SymbolId), (usize, usize)>, depth: u16) -> Lat {
+    // A chain of 50,000 `||` is a tree that deep: past a few levels nothing is known.
+    if depth > 40 {
+        return Lat::Many;
+    }
     if let Some(c) = Defines::default().fold(ast, sem, node) {
         return Lat::One(c);
     }
-    let again = |n: NodeId| value_of(ast, sem, module, n, candidates, param_at);
+    let again = |n: NodeId| value_of(ast, sem, module, n, candidates, param_at, depth + 1);
     match ast[node].kind {
         NodeKind::Ident(_) => match sem.symbol_of(node).and_then(|s| param_at.get(&(module, s))) {
             Some(&(c, i)) if !candidates[c].bad && sem.symbol(sem.symbol_of(node).expect("a symbol")).writes == 0 => candidates[c].state[i].clone(),
