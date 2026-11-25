@@ -12,8 +12,8 @@ Known differences from the corpus runner's command (not bugs of migrate; the gui
 |---|---|---|---|---|
 | vue3-realworld | vite | `rkp bundle index.html --config vite.config.ts --outdir dist --minify` | ok | unchanged |
 | zustand | esbuild+rollup | `rkp bundle src/index.ts --outdir dist --splitting`, `... --outfile dist/index.js --format=cjs`, `... --outfile dist/esm/index.mjs` (the config is a function; it is run since #121) | ok (all three, run here after #121) | unchanged |
-| dayjs | rollup | none (the config build/rollup.config.js is found since #122; it is a function of other values, so its input is not a plain string) | not run (no command) | unchanged |
-| marked | esbuild | none (esbuild API script esbuild.config.js: since #123 the notes give the line of the import and what it becomes, the `build()` calls at lines 42 and 47 that stay the same, and the plugin that stays in `plugins`; there is no command line to print) | not run (no command) | unchanged |
+| dayjs | rollup | `rkp bundle src/index.js --outfile dayjs.min.js --format=iife --global-name=dayjs --minify` (the config is a function; the commands come from the plain `input` and `fileName` of the calls in build/index.js, and the calls whose names are made in a loop are left out) | ok (run here; the global is `dayjs.default`, the note says so) | unchanged |
+| marked | esbuild | `rkp bundle src/marked.ts --outfile lib/marked.esm.js --minify --sourcemap` (entry point and plain strings of the `build()` calls in esbuild.config.js; the umd build has no command and a note says why) | ok (run here) | unchanged |
 | conduit-react | vite | `rkp bundle index.html --config vite.config.ts --outdir dist --minify` | ok | unchanged |
 | vue-naive-admin | vite | `rkp bundle index.html --config vite.config.js --outdir dist --minify` | ok | unchanged |
 | vite-template-react-ts | vite | `rkp bundle index.html --config vite.config.ts --outdir dist --minify` | ok | unchanged |
@@ -28,8 +28,8 @@ Known differences from the corpus runner's command (not bugs of migrate; the gui
 | rbush | rollup | `rkp bundle index.js --outfile dist/index.js --global-name=RBush --minify` | ok | unchanged |
 | d3-array | rollup | `rkp bundle src/index.js --outfile dist/index.js --minify` | ok | unchanged |
 | d3-hierarchy | rollup | `rkp bundle src/index.js --outfile dist/index.js --minify` | ok | unchanged |
-| preact | rollup | none (rollup only as a dependency, no config file in the root) | not run (no command) | unchanged |
-| signals | esbuild | none (esbuild only as a dependency; no command) | not run (no command) | unchanged |
+| preact | rollup | `rkp bundle src/index.js --outfile dist/preact.mjs` (from the `source` and `module` fields of package.json; the build script is code, not a config) | ok (run here) | unchanged |
+| signals | esbuild | 27 commands from the `source`, `main`, `module` and `exports` fields of the 9 workspace packages that have a `source` (microbundle reads the same fields), for example `rkp bundle packages/core/src/index.ts --outfile packages/core/dist/signals-core.js --format=cjs` | `packages/core` run here: ok | unchanged |
 | underscore | rollup | `rkp bundle modules/index-all.js --outfile dist/index-all.js` | ok | unchanged |
 | solid-template-basic | vite | `rkp bundle index.html --config vite.config.ts --outdir dist --minify` | ok | unchanged |
 | solid-template-router | vite | `rkp bundle index.html --config vite.config.ts --outdir dist --minify` | ok | unchanged |

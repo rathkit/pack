@@ -82,3 +82,5 @@ on this small program: not a benchmark, and not claimed to be smaller.)
   `--dts` for declaration files replace the usual `rollup-plugin-dts` and a hand-written `exports` map.
 
 `rkp migrate` reads a config for the plain strings in its text. When the input or the output is not one (a list built by a function, a path built with `path.join`), it runs the config in Node's permission model (reads only: no file writes, no child processes; `--no-run` turns that off) and prints one command for each output of the list, as `build:rkp`, `build:rkp-2`, and so on. A `umd` output becomes `--format=iife --global-name=NAME`, and the note says so.
+
+A config that is a function of other values (`module.exports = (config) => ...`) is read through the scripts beside it that call it: each call with a plain `input` and `fileName` gives a command, and a call whose names are made in a loop does not. A project with no config that builds from package.json (`source`, `main`, `module`, `exports`, as microbundle does, in the package and in the packages of a workspace) gets one command for each file those fields name; `unpkg` and other umd files get a note.
