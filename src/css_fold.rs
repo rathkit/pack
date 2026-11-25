@@ -9,9 +9,52 @@
 //! - each longhand is there once.
 //!
 //! `margin-top`..`margin-left`, `padding-*`, `border-*-width`/`-style`/`-color` and the four corner radii are
-//! handled; shorthands with support gaps (`inset`, `gap`, the two-value `overflow`) are not made.
+//! handled in every build. Shorthands that older browsers do not have (`inset`, `margin-inline` and the other logical ones, `gap`, the
+//! two-value `overflow`) are made only when the build has a target with engines that all have them (`Support`).
 
 use crate::css::skip_to;
+use crate::target::{Feature, Target};
+
+/// The shorthands that the browsers of the build all have, and so may be written.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Support {
+    pub inset: bool,
+    pub logical: bool,
+    pub gap: bool,
+    pub overflow: bool,
+}
+
+impl Support {
+    pub fn of(target: Target) -> Support {
+        Support { inset: target.css_supports(Feature::CssInset), logical: target.css_supports(Feature::CssLogical), gap: target.css_supports(Feature::CssGap), overflow: target.css_supports(Feature::CssOverflow) }
+    }
+
+    fn any(self) -> bool {
+        self.inset || self.logical || self.gap || self.overflow
+    }
+}
+
+/// A shorthand of two values and its two longhands, in the order the shorthand takes them.
+struct Pair {
+    short: &'static str,
+    longs: [&'static str; 2],
+    kind: u8,
+}
+
+const LOGICAL: u8 = 0;
+const GAP: u8 = 1;
+const OVERFLOW: u8 = 2;
+
+const PAIRS: &[Pair] = &[
+    Pair { short: "margin-inline", longs: ["margin-inline-start", "margin-inline-end"], kind: LOGICAL },
+    Pair { short: "margin-block", longs: ["margin-block-start", "margin-block-end"], kind: LOGICAL },
+    Pair { short: "padding-inline", longs: ["padding-inline-start", "padding-inline-end"], kind: LOGICAL },
+    Pair { short: "padding-block", longs: ["padding-block-start", "padding-block-end"], kind: LOGICAL },
+    Pair { short: "inset-inline", longs: ["inset-inline-start", "inset-inline-end"], kind: LOGICAL },
+    Pair { short: "inset-block", longs: ["inset-block-start", "inset-block-end"], kind: LOGICAL },
+    Pair { short: "gap", longs: ["row-gap", "column-gap"], kind: GAP },
+    Pair { short: "overflow", longs: ["overflow-x", "overflow-y"], kind: OVERFLOW },
+];
 
 /// A shorthand and its longhands in the order its four values take.
 struct Family {
@@ -20,6 +63,7 @@ struct Family {
 }
 
 const FAMILIES: &[Family] = &[
+    Family { short: "inset", longs: ["top", "right", "bottom", "left"] },
     Family { short: "margin", longs: ["margin-top", "margin-right", "margin-bottom", "margin-left"] },
     Family { short: "padding", longs: ["padding-top", "padding-right", "padding-bottom", "padding-left"] },
     Family { short: "border-width", longs: ["border-top-width", "border-right-width", "border-bottom-width", "border-left-width"] },
@@ -143,13 +187,18 @@ fn expand<'a>(p: &[&'a str]) -> Option<[&'a str; 4]> {
 }
 
 /// The rewritten body; the text itself when nothing applies or the body is not a plain list of declarations.
-pub fn fold(body: &str) -> String {
-    if !body.contains(':') || (!body.contains("-top") && !body.contains("-right") && !body.contains("-bottom") && !body.contains("-left")) {
+pub fn fold(body: &str, support: Support) -> String {
+    let sides = body.contains("-top") || body.contains("-right") || body.contains("-bottom") || body.contains("-left") || (support.inset && (body.contains("top:") || body.contains("left:") || body.contains("right:") || body.contains("bottom:")));
+    let pairs = support.any() && (body.contains("-start") || body.contains("-end") || body.contains("gap") || body.contains("overflow"));
+    if !body.contains(':') || (!sides && !pairs) {
         return body.to_string();
     }
     let Some(mut decls) = split(body) else { return body.to_string() };
     let mut changed = false;
     for fam in FAMILIES {
+        if fam.short == "inset" && !support.inset {
+            continue;
+        }
         let mut i = 0;
         while i < decls.len() {
             let name = decls[i].name.to_ascii_lowercase();
@@ -222,6 +271,9 @@ pub fn fold(body: &str) -> String {
             i += 1;
         }
     }
+    if pairs {
+        changed |= fold_pairs(&mut decls, support);
+    }
     if !changed {
         return body.to_string();
     }
@@ -235,9 +287,101 @@ pub fn fold(body: &str) -> String {
     out
 }
 
+/// A pair of values of one or two parts: `(first, second)`, the second being the first when there is one.
+fn two<'a>(p: &[&'a str]) -> Option<[&'a str; 2]> {
+    match p.len() {
+        1 => Some([p[0], p[0]]),
+        2 => Some([p[0], p[1]]),
+        _ => None,
+    }
+}
+
+fn reduce2(a: &str, b: &str) -> String {
+    fn z(x: &str) -> &str {
+        if crate::css::is_zero_length(x) { "0" } else { x }
+    }
+    let (a, b) = (z(a), z(b));
+    if a == b { a.to_string() } else { format!("{a} {b}") }
+}
+
+/// The two-value shorthands (`margin-inline`, `gap`, `overflow`): two longhands in a row become the shorthand, and a longhand after its
+/// shorthand is written into it. The same conditions as for the four sides.
+fn fold_pairs(decls: &mut Vec<Decl>, support: Support) -> bool {
+    let mut changed = false;
+    for pair in PAIRS {
+        let allowed = match pair.kind {
+            LOGICAL => support.logical,
+            GAP => support.gap,
+            _ => support.overflow,
+        };
+        if !allowed {
+            continue;
+        }
+        let mut i = 0;
+        while i < decls.len() {
+            let name = decls[i].name.to_ascii_lowercase();
+            if name == pair.short {
+                let mut j = i + 1;
+                let mut seen = [false; 2];
+                while j < decls.len() {
+                    let n = decls[j].name.to_ascii_lowercase();
+                    match pair.longs.iter().position(|l| *l == n) {
+                        Some(k) if !seen[k] => {
+                            seen[k] = true;
+                            j += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                if j > i + 1 {
+                    let imp = decls[i].important;
+                    let values = parts(&decls[i].value).and_then(|p| two(&p).map(|a| a.map(str::to_string)));
+                    let ok = values.is_some() && decls[i + 1..j].iter().all(|d| d.important == imp && parts(&d.value).is_some_and(|p| p.len() == 1));
+                    if ok {
+                        let mut values = values.unwrap();
+                        for d in &decls[i + 1..j] {
+                            let k = pair.longs.iter().position(|l| *l == d.name.to_ascii_lowercase()).unwrap();
+                            values[k] = d.value.clone();
+                        }
+                        decls[i].value = reduce2(&values[0], &values[1]);
+                        decls.drain(i + 1..j);
+                        changed = true;
+                    }
+                }
+                i += 1;
+                continue;
+            }
+            if pair.longs.contains(&name.as_str()) && i + 1 < decls.len() {
+                let next = decls[i + 1].name.to_ascii_lowercase();
+                let different = pair.longs.contains(&next.as_str()) && next != name;
+                let single = |d: &Decl| parts(&d.value).is_some_and(|p| p.len() == 1);
+                if different && decls[i].important == decls[i + 1].important && single(&decls[i]) && single(&decls[i + 1]) {
+                    let (first, second) = if name == pair.longs[0] { (&decls[i], &decls[i + 1]) } else { (&decls[i + 1], &decls[i]) };
+                    let value = reduce2(&first.value, &second.value);
+                    let imp = first.important;
+                    decls.splice(i..i + 2, [Decl { name: pair.short.to_string(), value, important: imp }]);
+                    changed = true;
+                    i += 1;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+    }
+    changed
+}
+
 #[cfg(test)]
 mod tests {
-    use super::fold;
+    use super::{fold as fold_with, Support};
+
+    fn fold(body: &str) -> String {
+        fold_with(body, Support::default())
+    }
+
+    fn all(body: &str) -> String {
+        fold_with(body, Support { inset: true, logical: true, gap: true, overflow: true })
+    }
 
     #[test]
     fn four_sides_in_a_row_become_the_shorthand() {
@@ -278,5 +422,44 @@ mod tests {
     #[test]
     fn calls_with_spaces_count_as_one_value() {
         assert_eq!(fold("margin-top:calc(1px + 2px);margin-right:0;margin-bottom:calc(1px + 2px);margin-left:0"), "margin:calc(1px + 2px) 0");
+    }
+
+    #[test]
+    fn the_shorthands_with_support_gaps_are_made_only_with_support() {
+        let cases = [
+            ("top:0;right:0;bottom:0;left:0", "inset:0"),
+            ("left:1px;top:2px;right:1px;bottom:2px", "inset:2px 1px"),
+            ("margin-inline-start:1px;margin-inline-end:2px", "margin-inline:1px 2px"),
+            ("padding-block-end:3px;padding-block-start:3px;color:red", "padding-block:3px;color:red"),
+            ("row-gap:4px;column-gap:8px", "gap:4px 8px"),
+            ("column-gap:0px;row-gap:0", "gap:0"),
+            ("overflow-x:hidden;overflow-y:auto", "overflow:hidden auto"),
+            ("overflow:hidden;overflow-y:auto", "overflow:hidden auto"),
+            ("gap:1px;column-gap:2px", "gap:1px 2px"),
+            ("inset:0;top:5px", "inset:5px 0 0"),
+        ];
+        for (before, after) in cases {
+            assert_eq!(all(before), after, "{before}");
+            assert_eq!(fold(before), before.replace("padding-block-end:3px;padding-block-start:3px", "padding-block-end:3px;padding-block-start:3px"), "{before} without support");
+        }
+        // Only what the browsers have: gap and overflow without the logical ones.
+        let some = Support { gap: true, ..Support::default() };
+        assert_eq!(fold_with("row-gap:1px;column-gap:1px;margin-inline-start:1px;margin-inline-end:1px", some), "gap:1px;margin-inline-start:1px;margin-inline-end:1px");
+    }
+
+    #[test]
+    fn a_pair_that_could_differ_is_left_alone() {
+        for body in [
+            "row-gap:1px;color:red;column-gap:2px",
+            "row-gap:var(--a);column-gap:2px",
+            "row-gap:1px!important;column-gap:2px",
+            "row-gap:1px;row-gap:2px",
+            "overflow-x:inherit;overflow-y:auto",
+            "gap:1px 2px 3px;column-gap:2px",
+            "top:0;right:0;bottom:0",
+            "top:0;right:0;bottom:0;left:var(--l)",
+        ] {
+            assert_eq!(all(body), body);
+        }
     }
 }

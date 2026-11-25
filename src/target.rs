@@ -65,6 +65,15 @@ pub enum Feature {
     NumberLiteral,
     /// `\u{1F600}` in a string.
     UnicodeEscape,
+    /// CSS `inset` for `top`, `right`, `bottom` and `left`. The four CSS features here are not syntax of the language: only an engine in the
+    /// target, not a year, says whether the style sheet may use them.
+    CssInset,
+    /// CSS `margin-inline`, `margin-block`, `padding-inline`, `padding-block`, `inset-inline` and `inset-block`.
+    CssLogical,
+    /// CSS `gap` for `row-gap` and `column-gap`, in flex containers as well as grids.
+    CssGap,
+    /// CSS `overflow` with two values for `overflow-x` and `overflow-y`.
+    CssOverflow,
 }
 
 impl Feature {
@@ -79,6 +88,7 @@ impl Feature {
             Feature::LogicalAssignment | Feature::NumericSeparator => 2021,
             Feature::ClassField | Feature::ClassPrivate | Feature::ClassStaticBlock | Feature::TopLevelAwait => 2022,
             Feature::Arrow | Feature::Class | Feature::LetConst | Feature::Template | Feature::Destructuring | Feature::Params | Feature::Spread | Feature::ForOf | Feature::ObjectLiteral | Feature::Generator | Feature::NewTarget | Feature::NumberLiteral | Feature::UnicodeEscape => 2015,
+            Feature::CssInset | Feature::CssLogical | Feature::CssGap | Feature::CssOverflow => 2015,
         }
     }
 
@@ -113,6 +123,10 @@ impl Feature {
             Feature::NewTarget => "new.target",
             Feature::NumberLiteral => "a binary or octal literal (0b11, 0o7)",
             Feature::UnicodeEscape => "a code point escape (\\u{1F600})",
+            Feature::CssInset => "the CSS inset shorthand",
+            Feature::CssLogical => "the CSS margin-inline, padding-block and the other logical shorthands",
+            Feature::CssGap => "the CSS gap shorthand in a flex container",
+            Feature::CssOverflow => "the CSS overflow shorthand with two values",
         }
     }
 }
@@ -149,6 +163,11 @@ const COMPAT: &[(Feature, &[(&str, (u16, u16))])] = &[
     (Feature::NewTarget, &[("chrome", (46, 0)), ("edge", (14, 0)), ("firefox", (41, 0)), ("safari", (10, 0)), ("ios", (10, 0)), ("node", (5, 0)), ("opera", (33, 0))]),
     (Feature::NumberLiteral, &[("chrome", (41, 0)), ("edge", (12, 0)), ("firefox", (25, 0)), ("safari", (9, 0)), ("ios", (9, 0)), ("node", (4, 0)), ("opera", (28, 0))]),
     (Feature::UnicodeEscape, &[("chrome", (44, 0)), ("edge", (12, 0)), ("firefox", (40, 0)), ("safari", (9, 0)), ("ios", (9, 0)), ("node", (4, 0)), ("opera", (31, 0))]),
+    // CSS. From the compatibility tables of MDN (@mdn/browser-compat-data); `gap` is the flex container column, which came after the grid one.
+    (Feature::CssInset, &[("chrome", (87, 0)), ("edge", (87, 0)), ("firefox", (66, 0)), ("safari", (14, 1)), ("ios", (14, 5)), ("opera", (73, 0))]),
+    (Feature::CssLogical, &[("chrome", (87, 0)), ("edge", (87, 0)), ("firefox", (66, 0)), ("safari", (14, 1)), ("ios", (14, 5)), ("opera", (73, 0))]),
+    (Feature::CssGap, &[("chrome", (84, 0)), ("edge", (84, 0)), ("firefox", (63, 0)), ("safari", (14, 1)), ("ios", (14, 5)), ("opera", (70, 0))]),
+    (Feature::CssOverflow, &[("chrome", (68, 0)), ("edge", (79, 0)), ("firefox", (61, 0)), ("safari", (13, 1)), ("ios", (13, 4)), ("opera", (55, 0))]),
 ];
 
 /// The features that came with es2015.
@@ -181,13 +200,15 @@ pub struct Target {
     year: u16,
     /// The features some engine of the target lacks, one bit each.
     lacks: u64,
+    /// An engine was named, so the browsers the style sheets must work in are known.
+    engines: bool,
     /// The target as it was written, for messages.
     label: &'static str,
 }
 
 impl Target {
     /// Nothing is rewritten.
-    pub const ESNEXT: Target = Target { year: u16::MAX, lacks: 0, label: "esnext" };
+    pub const ESNEXT: Target = Target { year: u16::MAX, lacks: 0, engines: false, label: "esnext" };
 
     /// A list of `es2015` to `es2025` (`es6` is `es2015`), `esnext`, and engines with a version (`chrome80`, `safari13.1`, `node18`,
     /// `firefox78`, `ios14.5`, `edge90`, `opera70`), separated by commas. The output uses only what all of them have.
@@ -195,6 +216,7 @@ impl Target {
         let mut year = u16::MAX;
         let mut lacks = 0u64;
         let mut seen = false;
+        let mut engines = false;
         for item in text.split(',') {
             let lower: String = item.trim().to_ascii_lowercase().split_whitespace().collect();
             if lower.is_empty() {
@@ -223,6 +245,8 @@ impl Target {
             if !ENGINES.contains(&engine) {
                 return Err(format!("'{item}' is not a target: use es5, es2015 to es2025, esnext, or an engine with a version (one of {}), such as chrome80", ENGINES.join(", ")));
             }
+            // Node runs no style sheets: a target of only Node says nothing about the browsers.
+            engines |= engine != "node";
             let mut numbers = version.split('.');
             let major = numbers.next().and_then(|n| n.parse::<u16>().ok());
             let minor = numbers.next().map_or(Some(0), |n| n.parse::<u16>().ok());
@@ -245,12 +269,18 @@ impl Target {
             return Err("an empty target: use es5, es2015 to es2025, esnext, or an engine with a version such as chrome80".to_string());
         }
         let label: &'static str = Box::leak(text.trim().to_ascii_lowercase().into_boxed_str());
-        Ok(Target { year, lacks, label })
+        Ok(Target { year, lacks, engines, label })
     }
 
     /// Whether the target has the feature as it is: its language year does, and so does every engine in it.
     pub fn supports(self, feature: Feature) -> bool {
         self.year >= feature.since() && self.lacks & (1 << (feature as u32)) == 0
+    }
+
+    /// Whether a style sheet may use a CSS feature: an engine is named and every engine named has it. With no engine (`esnext`, `es2020`)
+    /// nothing is known about the browsers, and the answer is no.
+    pub fn css_supports(self, feature: Feature) -> bool {
+        self.engines && self.lacks & (1 << (feature as u32)) == 0
     }
 
     /// Whether the target lacks any syntax that came with es2015, so the output must be written in es5 (arrow functions, `let`, classes).
