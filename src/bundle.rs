@@ -1267,7 +1267,7 @@ impl<'a> Bundler<'a> {
                             }
                         })
                         .collect();
-                    let rendered = css::render_mapped(&sheet.text, &sheet.parsed, &replacements, sheet.local.then_some(sheet.seed.as_str()), settings.whitespace, mapping);
+                    let rendered = css::render_mapped(&sheet.text, &sheet.parsed, &replacements, sheet.local.then_some(sheet.seed.as_str()), settings.whitespace, mapping, crate::css_fold::Support::of(self.target));
                     for h in rendered.hoisted {
                         if !hoisted.contains(&h) {
                             hoisted.push(h);

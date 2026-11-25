@@ -710,11 +710,11 @@ pub struct Rendered {
 /// Writes the sheet with `replacements` applied. `seed` is mixed into local names so two
 /// sheets with the same class do not collide.
 pub fn render(text: &str, parsed: &Parsed, replacements: &[Replacement], local: Option<&str>, minify: bool) -> Rendered {
-    render_mapped(text, parsed, replacements, local, minify, false)
+    render_mapped(text, parsed, replacements, local, minify, false, crate::css_fold::Support::default())
 }
 
 /// `render`, and with `want_map` also the places in the output that stand for places in `text`.
-pub fn render_mapped(text: &str, parsed: &Parsed, replacements: &[Replacement], local: Option<&str>, minify: bool, want_map: bool) -> Rendered {
+pub fn render_mapped(text: &str, parsed: &Parsed, replacements: &[Replacement], local: Option<&str>, minify: bool, want_map: bool, support: crate::css_fold::Support) -> Rendered {
     let mut anchors: Vec<(usize, u32)> = Vec::new();
     let mut out = String::with_capacity(text.len());
     let mut hoisted = Vec::new();
@@ -923,7 +923,7 @@ pub fn render_mapped(text: &str, parsed: &Parsed, replacements: &[Replacement], 
     let (css, anchors) = if minify {
         let offsets: Vec<usize> = anchors.iter().map(|a| a.0).collect();
         let (css, moved) = minify_mapped(&out, &offsets);
-        let css = if want_map { css } else { shorten_values(&css) };
+        let css = if want_map { css } else { shorten_values(&css, support) };
         (css, moved.into_iter().zip(anchors.iter().map(|a| a.1)).collect())
     } else {
         (out, anchors)
@@ -933,13 +933,18 @@ pub fn render_mapped(text: &str, parsed: &Parsed, replacements: &[Replacement], 
 
 /// Removes comments (but not `/*! ... */`) and whitespace that does not matter.
 pub fn minify_text(text: &str) -> String {
-    shorten_values(&minify_mapped(text, &[]).0)
+    shorten_values(&minify_mapped(text, &[]).0, crate::css_fold::Support::default())
+}
+
+/// `minify_text` for a build whose browsers are known.
+pub fn minify_text_for(text: &str, support: crate::css_fold::Support) -> String {
+    shorten_values(&minify_mapped(text, &[]).0, support)
 }
 
 /// Shorter spellings of what stands in declarations of minified text: `#ffffff` is `#fff`, `0.5` is `.5`. Strings and `url()` are copied
 /// as they are, as is a declaration that holds `progid` (an old filter that reads colors as text). Only text without a source map goes
 /// through this: it moves the positions that a map points to.
-fn shorten_values(css: &str) -> String {
+fn shorten_values(css: &str, support: crate::css_fold::Support) -> String {
     let bytes = css.as_bytes();
     let mut out = String::with_capacity(css.len());
     let mut start = 0;
@@ -984,7 +989,7 @@ fn shorten_values(css: &str) -> String {
         }
     }
     out.push_str(&css[start..]);
-    drop_empty_rules(&merge_rules(&out))
+    drop_empty_rules(&merge_rules(&out, support))
 }
 
 /// Rules with nothing in them are left out: a style rule with no declaration, and an `@media`, `@supports` or `@container` block that
@@ -1114,7 +1119,7 @@ fn selector_is_plain(sel: &str) -> bool {
 }
 
 /// Rules that follow each other: the same selector is one rule with both bodies, and the same body is one rule with both selectors.
-fn merge_rules(css: &str) -> String {
+fn merge_rules(css: &str, support: crate::css_fold::Support) -> String {
     let mut items: Vec<(String, Option<String>)> = Vec::new(); // (header or whole text, body of a plain rule)
     let mut i = 0;
     while i < css.len() {
@@ -1155,12 +1160,12 @@ fn merge_rules(css: &str) -> String {
         let inner = &css[stop + 1..j.min(css.len())];
         if header.starts_with('@') {
             let name: String = header[1..].chars().take_while(|c| c.is_ascii_alphabetic() || *c == '-').collect();
-            let text = if matches!(name.as_str(), "media" | "supports" | "layer" | "container") { format!("{header}{{{}}}", merge_rules(inner)) } else { css[start..end].to_string() };
+            let text = if matches!(name.as_str(), "media" | "supports" | "layer" | "container") { format!("{header}{{{}}}", merge_rules(inner, support)) } else { css[start..end].to_string() };
             items.push((text, None));
         } else if inner.contains('{') || header.is_empty() {
             items.push((css[start..end].to_string(), None));
         } else {
-            items.push((header.to_string(), Some(crate::css_fold::fold(inner))));
+            items.push((header.to_string(), Some(crate::css_fold::fold(inner, support))));
         }
         i = end;
     }
