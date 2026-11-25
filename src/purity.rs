@@ -14,6 +14,14 @@ use crate::semantic::{Semantic, SymbolId};
 use std::cell::Cell;
 use std::collections::HashMap;
 
+/// The modules of the bundle, for a name that is imported: the `const` it stands for, in the module that declares it.
+pub struct World<'a> {
+    pub graph: &'a crate::graph::Graph,
+    pub linked: &'a crate::link::Linked,
+    /// By module: the `const` declarations of its top level (see `Purity::consts`).
+    pub consts: &'a [HashMap<SymbolId, NodeId>],
+}
+
 /// Built-in globals whose mere mention cannot fail: they exist in every JavaScript
 /// environment. Any other unresolved name might not be defined, and reading it would throw.
 const SAFE_GLOBALS: &[&str] = &[
@@ -48,6 +56,8 @@ pub struct Purity<'a> {
     /// The `const` declarations of the module's top level that name one plain name, by symbol: the initializer. A name whose value is
     /// a number or a string is a primitive, so arithmetic on it runs no code.
     pub consts: Option<&'a HashMap<SymbolId, NodeId>>,
+    /// The bundle, so that an imported `const` can be followed to its value; with the module this is the analysis of.
+    pub world: Option<(&'a World<'a>, crate::graph::ModuleId)>,
     /// How deep the check of a function body is (a body that calls functions checks those too).
     pub depth: Cell<u8>,
 }
@@ -125,11 +135,15 @@ impl Purity<'_> {
             NodeKind::Template { exprs, .. } => ast.list(exprs).iter().all(|&e| self.is_primitive(e)),
             NodeKind::Array(items) => ast.list(items).iter().all(|&e| match ast[e].kind {
                 NodeKind::Hole => true,
-                // Spreading runs the iterator protocol.
-                NodeKind::Spread(_) => false,
+                // Spreading runs the iterator protocol; of an array that is written out in the module and never changed, that is the array's own.
+                NodeKind::Spread(arg) => self.is_constant_array(arg),
                 _ => self.expr_is_pure(e),
             }),
             NodeKind::Object(props) => ast.list(props).iter().all(|&p| {
+                // `{ ...a }` copies the values of the properties of `a`: free of effects when `a` is an object of the module made of plain values.
+                if let NodeKind::Spread(arg) = ast[p].kind {
+                    return self.is_constant_object(arg);
+                }
                 let NodeKind::Property { key, value, kind } = ast[p].kind else { return false };
                 let computed = ast[p].has(flags::COMPUTED);
                 (!computed || self.is_primitive(key)) && (kind != crate::ast::PropKind::Init || self.expr_is_pure(value))
@@ -358,6 +372,65 @@ impl Purity<'_> {
 
     /// A value that is certainly a number, string, boolean, null or similar, known without
     /// running anything, so no `valueOf`/`toString` can be invoked on it.
+    /// The initializer of the `const` that the name `sym` of this module stands for, and the analysis of the module that has it: this module for a
+    /// name it declares, another for a name it imports.
+    fn with_const<R>(&self, sym: SymbolId, f: impl FnOnce(&Purity, NodeId) -> R) -> Option<R> {
+        if let Some(&init) = self.consts.and_then(|c| c.get(&sym)) {
+            return Some(f(self, init));
+        }
+        let (world, module) = self.world?;
+        let crate::link::Binding::Symbol { module: other, symbol } = world.linked.binding(module, sym)? else { return None };
+        let parsed = world.graph.module(*other).parsed.as_ref()?;
+        let init = *world.consts.get(other.index())?.get(symbol)?;
+        let there = Purity { source: &world.graph.module(*other).source, ast: &parsed.ast, semantic: &parsed.semantic, defines: self.defines, pure_calls: self.pure_calls, functions: None, consts: Some(&world.consts[other.index()]), world: Some((world, *other)), depth: Cell::new(self.depth.get()) };
+        Some(f(&there, init))
+    }
+
+    /// A name that nothing assigns, declared with `const` at the top of the module to an object literal of plain values: no accessor (copying it
+    /// would run the getter) and no key that is computed from something that could run code.
+    fn is_constant_object(&self, id: NodeId) -> bool {
+        let NodeKind::Ident(_) = self.ast[id].kind else { return false };
+        let Some(sym) = self.semantic.symbol_of(id) else { return false };
+        if self.depth.get() >= CALL_DEPTH {
+            return false;
+        }
+        self.with_const(sym, |at, init| {
+            let NodeKind::Object(props) = at.ast[init].kind else { return false };
+            at.depth.set(at.depth.get() + 1);
+            let plain = at.ast.list(props).iter().all(|&p| match at.ast[p].kind {
+                NodeKind::Spread(arg) => at.is_constant_object(arg),
+                NodeKind::Property { key, value, kind } => (!at.ast[p].has(flags::COMPUTED) || at.is_primitive(key)) && kind == crate::ast::PropKind::Init && at.expr_is_pure(value),
+                _ => false,
+            });
+            at.depth.set(at.depth.get() - 1);
+            plain
+        })
+        .unwrap_or(false)
+    }
+
+    /// A name that nothing assigns, declared with `const` at the top of the module to an array literal of values with no effects (and no
+    /// holes): reading it through `...` or `.includes` calls only the array's own iterator.
+    fn is_constant_array(&self, id: NodeId) -> bool {
+        let ast = self.ast;
+        let NodeKind::Ident(_) = ast[id].kind else { return false };
+        let Some(sym) = self.semantic.symbol_of(id) else { return false };
+        if self.depth.get() >= CALL_DEPTH {
+            return false;
+        }
+        self.with_const(sym, |at, init| {
+            let NodeKind::Array(items) = at.ast[init].kind else { return false };
+            at.depth.set(at.depth.get() + 1);
+            let pure = at.ast.list(items).iter().all(|&e| match at.ast[e].kind {
+                NodeKind::Hole => false,
+                NodeKind::Spread(arg) => at.is_constant_array(arg),
+                _ => at.expr_is_pure(e),
+            });
+            at.depth.set(at.depth.get() - 1);
+            pure
+        })
+        .unwrap_or(false)
+    }
+
     fn is_primitive(&self, id: NodeId) -> bool {
         let ast = self.ast;
         match ast[id].kind {
@@ -367,12 +440,12 @@ impl Purity<'_> {
             NodeKind::Unary { op: UnaryOp::Neg | UnaryOp::Pos | UnaryOp::BitNot, arg } => self.is_primitive(arg),
             NodeKind::Binary { op, left, right } => match op {
                 // Walked along the left side in a loop: a sum of 50,000 terms is a tree that deep, and this runs on a worker's small stack.
-                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::Exp => {
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::Exp | BinOp::BitOr | BinOp::BitAnd | BinOp::BitXor | BinOp::Shl | BinOp::Shr | BinOp::UShr => {
                     if !self.is_primitive(right) {
                         return false;
                     }
                     let mut at = left;
-                    while let NodeKind::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::Exp, left, right } = ast[at].kind {
+                    while let NodeKind::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::Exp | BinOp::BitOr | BinOp::BitAnd | BinOp::BitXor | BinOp::Shl | BinOp::Shr | BinOp::UShr, left, right } = ast[at].kind {
                         if !self.is_primitive(right) {
                             return false;
                         }
@@ -385,14 +458,16 @@ impl Purity<'_> {
             },
             // A name that nothing assigns, declared with `const` at the top of the module to a primitive.
             NodeKind::Ident(name) => match self.semantic.symbol_of(id) {
-                Some(sym) => self.consts.and_then(|c| c.get(&sym)).is_some_and(|&init| {
-                    self.depth.get() < CALL_DEPTH && {
-                        self.depth.set(self.depth.get() + 1);
-                        let primitive = self.is_primitive(init);
-                        self.depth.set(self.depth.get() - 1);
-                        primitive
-                    }
-                }),
+                Some(sym) => self
+                    .with_const(sym, |at, init| {
+                        at.depth.get() < CALL_DEPTH && {
+                            at.depth.set(at.depth.get() + 1);
+                            let primitive = at.is_primitive(init);
+                            at.depth.set(at.depth.get() - 1);
+                            primitive
+                        }
+                    })
+                    .unwrap_or(false),
                 None => matches!(ast.atom(name), "Infinity" | "NaN" | "undefined"),
             },
             // `Math.pow(2, 10)` and `Math.PI`: the global `Math` is not shadowed, and its numeric functions run no code on primitives.
@@ -412,7 +487,7 @@ mod tests {
     fn pure(src: &str) -> bool {
         let parsed = parse(src, ParseOptions::new(true)).unwrap_or_else(|e| panic!("{}: {src}", e.message));
         let NodeKind::Program(body) = parsed.ast[parsed.ast.root].kind else { unreachable!() };
-        let analysis = Purity { source: src, ast: &parsed.ast, semantic: &parsed.semantic, defines: None, pure_calls: &[], functions: None, consts: None, depth: Cell::new(0) };
+        let analysis = Purity { source: src, ast: &parsed.ast, semantic: &parsed.semantic, defines: None, pure_calls: &[], functions: None, consts: None, world: None, depth: Cell::new(0) };
         analysis.statement_is_pure(parsed.ast.list(body)[0])
     }
 
@@ -422,6 +497,16 @@ mod tests {
             assert!(pure(src), "{src}");
         }
         for src in ["const a = make(1);", "const b = /* @__PURE__ */ make(effect());", "const c = /* not pure */ make();", "const d = /* @__PURE__ */ make(...args);"] {
+            assert!(!pure(src), "{src}");
+        }
+    }
+
+    #[test]
+    fn bitwise_arithmetic_on_primitives_is_pure() {
+        for src in ["const a = ~(1 | 2 | 4), b = 1 << 3, c = (5 & 3) ^ 1, d = -1 >>> 1, e = 8 >> 1;"] {
+            assert!(pure(src), "{src}");
+        }
+        for src in ["const a = x | 1;", "const b = f() << 1;"] {
             assert!(!pure(src), "{src}");
         }
     }

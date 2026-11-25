@@ -248,7 +248,7 @@ fn shaking_on_several_threads_matches_one() {
     let linked = link(&r.graph);
     let enums = EnumTable::build(&r.graph);
     for (i, module) in r.graph.modules.iter().enumerate() {
-        let alone = build_parts(&r.graph, module.id, Some((&enums, &linked)));
+        let alone = build_parts(&r.graph, module.id, Some((&enums, &linked)), None);
         assert_eq!(alone.parts.len(), r.shaken.modules[i].parts.len(), "{}", module.path.display());
         for (a, b) in alone.parts.iter().zip(&r.shaken.modules[i].parts) {
             assert_eq!((a.stmt, &a.declares, &a.uses, a.effects), (b.stmt, &b.declares, &b.uses, b.effects));

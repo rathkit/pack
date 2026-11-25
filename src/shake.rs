@@ -97,10 +97,10 @@ pub fn keep_everything(graph: &Graph) -> Shaken {
         .iter()
         .map(|m| {
             if !graph.keeps_modules {
-                return build_parts(graph, m.id, None);
+                return build_parts(graph, m.id, None, None);
             }
-            let kept = m.memo.parts.get_or_init(|| (settings.clone(), build_parts(graph, m.id, None)));
-            if kept.0 == settings { kept.1.clone() } else { build_parts(graph, m.id, None) }
+            let kept = m.memo.parts.get_or_init(|| (settings.clone(), build_parts(graph, m.id, None, None)));
+            if kept.0 == settings { kept.1.clone() } else { build_parts(graph, m.id, None, None) }
         })
         .collect();
     for module in &mut modules {
@@ -118,10 +118,13 @@ pub fn shake(graph: &Graph, linked: &Linked) -> Shaken {
 /// `entry_exports` false: nobody reads what the entries export (an iife with no global name), so only their effects are kept.
 pub fn shake_entries(graph: &Graph, linked: &Linked, entry_exports: bool) -> Shaken {
     let enums = EnumTable::build(graph);
+    // The `const` declarations of every module, so that a purity check can follow an imported name to its value.
+    let const_maps: Vec<HashMap<SymbolId, NodeId>> = if crate::par::worth_it(graph.modules.len(), graph.modules.iter().map(|m| m.source.len()).sum()) { crate::par::map(graph.modules.len(), |i| top_level_consts(graph, graph.modules[i].id)) } else { (0..graph.modules.len()).map(|i| top_level_consts(graph, graph.modules[i].id)).collect() };
+    let world = crate::purity::World { graph, linked, consts: &const_maps };
     // Each module's parts depend on nothing the others make, so a big program is split up side by side. The map from a symbol to the
     // parts that declare it is made there too: it reads only that module's parts.
     let build = |i: usize| {
-        let module = build_parts(graph, graph.modules[i].id, Some((&enums, linked)));
+        let module = build_parts(graph, graph.modules[i].id, Some((&enums, linked)), Some(&world));
         let by_symbol = parts_by_symbol(&module);
         (module, by_symbol)
     };
@@ -462,8 +465,34 @@ let mut uses = Vec::new();
     uses
 }
 
+/// The `const` declarations of an ES module's top level that name one plain name, by symbol: the initializer.
+fn top_level_consts(graph: &Graph, id: ModuleId) -> HashMap<SymbolId, NodeId> {
+    let module = graph.module(id);
+    let mut consts = HashMap::new();
+    let (ModuleKind::Esm, Some(parsed)) = (module.kind, module.parsed.as_ref()) else { return consts };
+    use crate::ast::NodeKind;
+    let (ast, semantic) = (&parsed.ast, &parsed.semantic);
+    let NodeKind::Program(body) = ast[ast.root].kind else { return consts };
+    for &stmt in ast.list(body) {
+        let declaration = match ast[stmt].kind {
+            NodeKind::ExportNamed(export) => ast.export(export).decl.unwrap_or(stmt),
+            _ => stmt,
+        };
+        if let NodeKind::VarDecl { kind: crate::ast::VarKind::Const, decls } = ast[declaration].kind {
+            for &d in ast.list(decls) {
+                if let NodeKind::VarDeclarator { target, init: Some(init) } = ast[d].kind {
+                    if let Some(sym) = matches!(ast[target].kind, NodeKind::BindingIdent(_)).then(|| semantic.symbol_of(target)).flatten() {
+                        consts.insert(sym, init);
+                    }
+                }
+            }
+        }
+    }
+    consts
+}
+
 /// Splits an ES module's top level into parts. Other kinds of module have none.
-fn build_parts(graph: &Graph, id: ModuleId, enums: Option<(&EnumTable, &Linked)>) -> ModuleShake {
+fn build_parts(graph: &Graph, id: ModuleId, enums: Option<(&EnumTable, &Linked)>, world: Option<&crate::purity::World>) -> ModuleShake {
     let module = graph.module(id);
     let (ModuleKind::Esm, Some(parsed)) = (module.kind, module.parsed.as_ref()) else { return ModuleShake::default() };
     use crate::ast::NodeKind;
@@ -472,31 +501,30 @@ fn build_parts(graph: &Graph, id: ModuleId, enums: Option<(&EnumTable, &Linked)>
     let root = semantic.root_scope();
     let NodeKind::Program(body) = ast[ast.root].kind else { return ModuleShake::default() };
     let mut functions = HashMap::new();
-    let mut consts = HashMap::new();
+    let own_consts;
+    let mut collected = HashMap::new();
     for &stmt in ast.list(body) {
         let declaration = match ast[stmt].kind {
             NodeKind::ExportNamed(export) => ast.export(export).decl.unwrap_or(stmt),
             _ => stmt,
         };
-        match ast[declaration].kind {
-            NodeKind::Function { name: Some(n), .. } if ast[declaration].has(crate::ast::flags::DECL) => {
+        if let NodeKind::Function { name: Some(n), .. } = ast[declaration].kind {
+            if ast[declaration].has(crate::ast::flags::DECL) {
                 if let Some(sym) = semantic.symbol_of(n) {
                     functions.insert(sym, declaration);
                 }
             }
-            NodeKind::VarDecl { kind: crate::ast::VarKind::Const, decls } => {
-                for &d in ast.list(decls) {
-                    if let NodeKind::VarDeclarator { target, init: Some(init) } = ast[d].kind {
-                        if let Some(sym) = matches!(ast[target].kind, NodeKind::BindingIdent(_)).then(|| semantic.symbol_of(target)).flatten() {
-                            consts.insert(sym, init);
-                        }
-                    }
-                }
-            }
-            _ => {}
         }
     }
-    let purity = Purity { source: &module.source, ast, semantic, defines, pure_calls: &graph.pure_calls, functions: Some(&functions), consts: Some(&consts), depth: std::cell::Cell::new(0) };
+    let consts = match world {
+        Some(w) => &w.consts[id.index()],
+        None => {
+            collected.extend(top_level_consts(graph, id));
+            own_consts = collected;
+            &own_consts
+        }
+    };
+    let purity = Purity { source: &module.source, ast, semantic, defines, pure_calls: &graph.pure_calls, functions: Some(&functions), consts: Some(consts), world: world.map(|w| (w, id)), depth: std::cell::Cell::new(0) };
     let mut parts = Vec::new();
     let mut stack = Vec::new();
     for &stmt in ast.list(body) {
