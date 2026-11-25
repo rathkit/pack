@@ -1431,6 +1431,11 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                         && matches!(b.ast.list(*quasis), [q] if matches!(b.ast[*q].kind, NodeKind::TemplateElement { cooked: Some(c), .. } if b.ast.atom(c) == a.ast.atom(*sa)))
                 }
                 (NodeKind::Num(na), NodeKind::Num(nb)) => na.get().to_bits() == nb.get().to_bits(),
+                // An expression of constants written as the value it has.
+                (NodeKind::Binary { .. } | NodeKind::Unary { .. } | NodeKind::Template { .. } | NodeKind::Conditional { .. }, _) => {
+                    let defines = crate::define::Defines::default();
+                    matches!((defines.fold(&a.ast, &a.semantic, x), defines.fold(&b.ast, &b.semantic, y)), (Some(left), Some(right)) if left == right)
+                }
                 _ => false,
             };
             if rewritten {
@@ -2007,11 +2012,11 @@ mod tests {
     #[test]
     fn a_string_takes_the_quote_that_needs_the_fewest_escapes() {
         assert_eq!(syntax(r#"x = "say \"hi\"" + y + "\"b\"";"#), r#"x='say "hi"'+y+'"b"'"#);
-        assert_eq!(syntax(r#"x = 'it\'s' + "it's";"#), r#"x="it's"+"it's""#);
+        assert_eq!(syntax(r#"x = 'it\'s' + y + "it's";"#), r#"x="it's"+y+"it's""#);
         // A tie keeps the quote it has; a string that has both quotes takes the one it has fewer of.
-        assert_eq!(syntax(r#"x = 'a"b\'c' + "a\"b'c\"d";"#), r#"x='a"b\'c'+'a"b\'c"d'"#);
+        assert_eq!(syntax(r#"x = 'a"b\'c' + y + "a\"b'c\"d";"#), r#"x='a"b\'c'+y+'a"b\'c"d'"#);
         // Other escapes stay as they are, and a backslash in front of the quote is its own escape.
-        assert_eq!(syntax(r#"x = f("\\\"\n" + "a");"#), r#"x=f('\\"\n'+"a")"#);
+        assert_eq!(syntax(r#"x = f("\\\"\n" + y + "a");"#), r#"x=f('\\"\n'+y+"a")"#);
         // A directive keeps its quotes.
         assert_eq!(syntax(r#"function f() { "use \"x\""; }"#), r#"function f(){"use \"x\""}"#);
     }

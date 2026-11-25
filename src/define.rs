@@ -16,7 +16,58 @@ pub enum Const {
     Str(String),
 }
 
+/// `ToInt32`: the number as a 32-bit integer, wrapping.
+fn to_int32(n: f64) -> i32 {
+    if !n.is_finite() {
+        return 0;
+    }
+    (n.trunc().rem_euclid(4294967296.0) as u64 as u32) as i32
+}
+
+/// The value of `left op right` for two constants, when JavaScript's answer is the plain one: numbers, and `+` on two strings or a string and an integer.
+fn arithmetic(op: BinOp, l: &Const, r: &Const) -> Option<Const> {
+    if let (BinOp::Add, Const::Str(_), _) | (BinOp::Add, _, Const::Str(_)) = (op, l, r) {
+        let (a, b) = (l.to_text()?, r.to_text()?);
+        return Some(Const::Str(a + &b));
+    }
+    let (Const::Num(a), Const::Num(b)) = (l, r) else { return None };
+    let (a, b) = (*a, *b);
+    let num = |v: f64| Some(Const::Num(v));
+    match op {
+        BinOp::Add => num(a + b),
+        BinOp::Sub => num(a - b),
+        BinOp::Mul => num(a * b),
+        BinOp::Div => num(a / b),
+        BinOp::Rem => num(a % b),
+        // `**` has cases where JavaScript and Rust differ (`1 ** Infinity`, `NaN ** 0`): whole numbers only.
+        BinOp::Exp => (a.fract() == 0.0 && b.fract() == 0.0 && (0.0..=64.0).contains(&b) && a.abs() <= 1e6).then(|| Const::Num(a.powf(b))),
+        BinOp::BitOr => num((to_int32(a) | to_int32(b)) as f64),
+        BinOp::BitAnd => num((to_int32(a) & to_int32(b)) as f64),
+        BinOp::BitXor => num((to_int32(a) ^ to_int32(b)) as f64),
+        BinOp::Shl => num((to_int32(a).wrapping_shl(to_int32(b) as u32 & 31)) as f64),
+        BinOp::Shr => num((to_int32(a) >> (to_int32(b) as u32 & 31)) as f64),
+        BinOp::UShr => num(((to_int32(a) as u32) >> (to_int32(b) as u32 & 31)) as f64),
+        BinOp::Lt => Some(Const::Bool(a < b)),
+        BinOp::Le => Some(Const::Bool(a <= b)),
+        BinOp::Gt => Some(Const::Bool(a > b)),
+        BinOp::Ge => Some(Const::Bool(a >= b)),
+        _ => None,
+    }
+}
+
 impl Const {
+    /// The value as the text `String(value)` gives, where that is plain: strings, `true`, `false`, `null`, `undefined`, and whole numbers.
+    pub fn to_text(&self) -> Option<String> {
+        match self {
+            Const::Str(s) => Some(s.clone()),
+            Const::Bool(b) => Some(b.to_string()),
+            Const::Null => Some("null".to_string()),
+            Const::Undefined => Some("undefined".to_string()),
+            Const::Num(n) if n.fract() == 0.0 && n.abs() < 9007199254740992.0 => Some(format!("{}", *n as i64)),
+            Const::Num(_) => None,
+        }
+    }
+
     pub fn truthy(&self) -> bool {
         match self {
             Const::Undefined | Const::Null => false,
@@ -229,6 +280,16 @@ impl Defines {
     /// The value of `node` when it is a constant: a literal, a defined expression whose value is
     /// one, or an operator on those.
     pub fn eval(&self, ast: &Ast, sem: &Semantic, node: NodeId) -> Option<Const> {
+        self.value(ast, sem, node, false)
+    }
+
+    /// As `eval`, and arithmetic, comparisons, `~`, `+` on strings and template literals of constants are worked out too: what the minifier writes
+    /// in place of an expression that has one value.
+    pub fn fold(&self, ast: &Ast, sem: &Semantic, node: NodeId) -> Option<Const> {
+        self.value(ast, sem, node, true)
+    }
+
+    fn value(&self, ast: &Ast, sem: &Semantic, node: NodeId, full: bool) -> Option<Const> {
         match ast[node].kind {
             NodeKind::Null => Some(Const::Null),
             NodeKind::Bool(b) => Some(Const::Bool(b)),
@@ -237,18 +298,26 @@ impl Defines {
             NodeKind::Ident(a) if ast.atom(a) == "undefined" && sem.symbol_of(node).is_none() && self.lookup(ast, sem, node).is_none() => Some(Const::Undefined),
             NodeKind::Ident(_) | NodeKind::Member { .. } | NodeKind::ImportMeta => self.lookup(ast, sem, node)?.value.clone(),
             NodeKind::Unary { op, arg } => match op {
-                UnaryOp::Not => Some(Const::Bool(!self.eval(ast, sem, arg)?.truthy())),
-                UnaryOp::Typeof => Some(Const::Str(self.eval(ast, sem, arg)?.type_name().to_string())),
-                UnaryOp::Void => self.eval(ast, sem, arg).map(|_| Const::Undefined),
-                UnaryOp::Neg => match self.eval(ast, sem, arg)? {
+                UnaryOp::Not => Some(Const::Bool(!self.value(ast, sem, arg, full)?.truthy())),
+                UnaryOp::Typeof => Some(Const::Str(self.value(ast, sem, arg, full)?.type_name().to_string())),
+                UnaryOp::Void => self.value(ast, sem, arg, full).map(|_| Const::Undefined),
+                UnaryOp::Neg => match self.value(ast, sem, arg, full)? {
                     Const::Num(n) => Some(Const::Num(-n)),
+                    _ => None,
+                },
+                UnaryOp::BitNot if full => match self.value(ast, sem, arg, full)? {
+                    Const::Num(n) => Some(Const::Num(!to_int32(n) as f64)),
+                    _ => None,
+                },
+                UnaryOp::Pos if full => match self.value(ast, sem, arg, full)? {
+                    Const::Num(n) => Some(Const::Num(n)),
                     _ => None,
                 },
                 _ => None,
             },
             NodeKind::Binary { op, left, right } => match op {
                 BinOp::LogAnd | BinOp::LogOr | BinOp::Nullish => {
-                    let l = self.eval(ast, sem, left)?;
+                    let l = self.value(ast, sem, left, full)?;
                     let keeps_left = match op {
                         BinOp::LogAnd => !l.truthy(),
                         BinOp::LogOr => l.truthy(),
@@ -257,19 +326,35 @@ impl Defines {
                     if keeps_left {
                         Some(l)
                     } else {
-                        self.eval(ast, sem, right)
+                        self.value(ast, sem, right, full)
                     }
                 }
                 BinOp::StrictEq | BinOp::StrictNe | BinOp::Eq | BinOp::Ne => {
-                    let (l, r) = (self.eval(ast, sem, left)?, self.eval(ast, sem, right)?);
+                    let (l, r) = (self.value(ast, sem, left, full)?, self.value(ast, sem, right, full)?);
                     let equal = if matches!(op, BinOp::StrictEq | BinOp::StrictNe) { l.strictly_equals(&r) } else { l.loosely_equals(&r)? };
                     Some(Const::Bool(equal == matches!(op, BinOp::StrictEq | BinOp::Eq)))
                 }
+                _ if full => {
+                    let (l, r) = (self.value(ast, sem, left, full)?, self.value(ast, sem, right, full)?);
+                    arithmetic(op, &l, &r)
+                }
                 _ => None,
             },
+            NodeKind::Template { quasis, exprs } if full => {
+                let (quasis, exprs) = (ast.list(quasis), ast.list(exprs));
+                let mut out = String::new();
+                for (i, &q) in quasis.iter().enumerate() {
+                    let NodeKind::TemplateElement { cooked: Some(c), .. } = ast[q].kind else { return None };
+                    out.push_str(ast.atom(c));
+                    if let Some(&e) = exprs.get(i) {
+                        out.push_str(&self.value(ast, sem, e, full)?.to_text()?);
+                    }
+                }
+                Some(Const::Str(out))
+            }
             NodeKind::Conditional { test, cons, alt } => {
-                let test = self.eval(ast, sem, test)?;
-                self.eval(ast, sem, if test.truthy() { cons } else { alt })
+                let test = self.value(ast, sem, test, full)?;
+                self.value(ast, sem, if test.truthy() { cons } else { alt }, full)
             }
             _ => None,
         }
