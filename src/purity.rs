@@ -125,8 +125,8 @@ impl Purity<'_> {
             NodeKind::Template { exprs, .. } => ast.list(exprs).iter().all(|&e| self.is_primitive(e)),
             NodeKind::Array(items) => ast.list(items).iter().all(|&e| match ast[e].kind {
                 NodeKind::Hole => true,
-                // Spreading runs the iterator protocol.
-                NodeKind::Spread(_) => false,
+                // Spreading runs the iterator protocol; of an array that is written out in the module and never changed, that is the array's own.
+                NodeKind::Spread(arg) => self.is_constant_array(arg),
                 _ => self.expr_is_pure(e),
             }),
             NodeKind::Object(props) => ast.list(props).iter().all(|&p| {
@@ -358,6 +358,27 @@ impl Purity<'_> {
 
     /// A value that is certainly a number, string, boolean, null or similar, known without
     /// running anything, so no `valueOf`/`toString` can be invoked on it.
+    /// A name that nothing assigns, declared with `const` at the top of the module to an array literal of values with no effects (and no
+    /// holes): reading it through `...` or `.includes` calls only the array's own iterator.
+    fn is_constant_array(&self, id: NodeId) -> bool {
+        let ast = self.ast;
+        let NodeKind::Ident(_) = ast[id].kind else { return false };
+        let Some(sym) = self.semantic.symbol_of(id) else { return false };
+        let Some(&init) = self.consts.and_then(|c| c.get(&sym)) else { return false };
+        if self.depth.get() >= CALL_DEPTH {
+            return false;
+        }
+        let NodeKind::Array(items) = ast[init].kind else { return false };
+        self.depth.set(self.depth.get() + 1);
+        let pure = ast.list(items).iter().all(|&e| match ast[e].kind {
+            NodeKind::Hole => false,
+            NodeKind::Spread(arg) => self.is_constant_array(arg),
+            _ => self.expr_is_pure(e),
+        });
+        self.depth.set(self.depth.get() - 1);
+        pure
+    }
+
     fn is_primitive(&self, id: NodeId) -> bool {
         let ast = self.ast;
         match ast[id].kind {
@@ -367,12 +388,12 @@ impl Purity<'_> {
             NodeKind::Unary { op: UnaryOp::Neg | UnaryOp::Pos | UnaryOp::BitNot, arg } => self.is_primitive(arg),
             NodeKind::Binary { op, left, right } => match op {
                 // Walked along the left side in a loop: a sum of 50,000 terms is a tree that deep, and this runs on a worker's small stack.
-                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::Exp => {
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::Exp | BinOp::BitOr | BinOp::BitAnd | BinOp::BitXor | BinOp::Shl | BinOp::Shr | BinOp::UShr => {
                     if !self.is_primitive(right) {
                         return false;
                     }
                     let mut at = left;
-                    while let NodeKind::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::Exp, left, right } = ast[at].kind {
+                    while let NodeKind::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::Exp | BinOp::BitOr | BinOp::BitAnd | BinOp::BitXor | BinOp::Shl | BinOp::Shr | BinOp::UShr, left, right } = ast[at].kind {
                         if !self.is_primitive(right) {
                             return false;
                         }
@@ -422,6 +443,16 @@ mod tests {
             assert!(pure(src), "{src}");
         }
         for src in ["const a = make(1);", "const b = /* @__PURE__ */ make(effect());", "const c = /* not pure */ make();", "const d = /* @__PURE__ */ make(...args);"] {
+            assert!(!pure(src), "{src}");
+        }
+    }
+
+    #[test]
+    fn bitwise_arithmetic_on_primitives_is_pure() {
+        for src in ["const a = ~(1 | 2 | 4), b = 1 << 3, c = (5 & 3) ^ 1, d = -1 >>> 1, e = 8 >> 1;"] {
+            assert!(pure(src), "{src}");
+        }
+        for src in ["const a = x | 1;", "const b = f() << 1;"] {
             assert!(!pure(src), "{src}");
         }
     }
