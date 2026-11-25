@@ -400,3 +400,52 @@ fn a_pattern_in_the_input_is_not_a_page_and_a_config_in_a_folder_finds_the_page_
     assert!(out.contains("build:rkp: rkp bundle demo/index.html --config demo/vite.config.js"), "{out}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn project(name: &str, files: &[(&str, &str)]) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("rkp-migrate-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (path, text) in files {
+        let at = dir.join(path);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(at, text).unwrap();
+    }
+    dir
+}
+
+#[test]
+fn an_esbuild_script_that_builds_with_plain_strings_gets_a_command_for_each_format_it_can_write() {
+    let script = "import * as esbuild from 'esbuild';\nfunction config(options) {\n  return { entryPoints: ['src/lib.ts'], bundle: true, minify: true, ...options };\n}\n\nawait esbuild.build(config({\n  format: 'esm',\n  outfile: 'lib/lib.esm.js',\n}));\n\nawait esbuild.build(config({\n  format: 'cjs',\n  outfile: 'lib/lib.cjs',\n}));\n\nawait esbuild.build(config({\n  format: 'umd',\n  outfile: 'lib/lib.umd.js',\n}));\n";
+    let dir = project("esbuild-plain-strings", &[("package.json", "{\"scripts\":{\"build\":\"node esbuild.config.js\"},\"devDependencies\":{\"esbuild\":\"1\"}}"), ("esbuild.config.js", script)]);
+    let out = stdout(&rkp(&dir, &["migrate"]));
+    assert!(out.contains("build:rkp: rkp bundle src/lib.ts --outfile lib/lib.esm.js --minify\n"), "{out}");
+    assert!(out.contains("build:rkp-2: rkp bundle src/lib.ts --format=cjs --outfile lib/lib.cjs --minify\n"), "{out}");
+    // The format it cannot write has no command, and says why.
+    assert!(!out.contains("lib.umd.js --minify") && out.contains("format 'umd'"), "{out}");
+    assert!(out.contains("the commands come from the entry points and the plain strings of the build() calls"), "{out}");
+}
+
+#[test]
+fn a_rollup_config_that_is_a_function_gets_its_commands_from_the_script_that_calls_it() {
+    let config = "const { terser } = require('rollup-plugin-terser')\nmodule.exports = (config) => {\n  const { input, fileName, name } = config\n  return { input: { input, plugins: [terser()] }, output: { file: fileName, format: 'umd', name: name || 'lib' } }\n}\n";
+    let driver = "const configFactory = require('./rollup.config')\nfor (const l of locales) {\n  build(configFactory({ input: `./src/locale/${l}`, fileName: `./locale/${l}` }))\n}\nbuild(configFactory({\n  input: './src/index.js',\n  fileName: './lib.min.js'\n}))\n";
+    let dir = project("rollup-driven-by-script", &[("package.json", "{\"scripts\":{\"build\":\"node build\"},\"devDependencies\":{\"rollup\":\"4\"}}"), ("build/rollup.config.js", config), ("build/index.js", driver)]);
+    let out = stdout(&rkp(&dir, &["migrate", "--no-run"]));
+    // The call whose names are made in a loop is left out; the one with plain strings is the command.
+    assert!(out.contains("build:rkp: rkp bundle src/index.js --outfile lib.min.js --format=iife --global-name=lib --minify\n"), "{out}");
+    assert!(!out.contains("locale") && !out.contains("stand-in"), "{out}");
+}
+
+#[test]
+fn a_package_with_a_source_field_gets_a_command_for_each_file_it_names() {
+    let core = "{\"name\":\"core\",\"source\":\"src/index.ts\",\"main\":\"dist/core.js\",\"module\":\"dist/core.module.js\",\"unpkg\":\"dist/core.min.js\",\"types\":\"dist/core.d.ts\",\"exports\":{\".\":{\"types\":\"./dist/core.d.ts\",\"import\":\"./dist/core.mjs\",\"require\":\"./dist/core.js\"}}}";
+    let dir = project("package-source-field", &[("package.json", "{\"private\":true,\"devDependencies\":{\"microbundle\":\"0.15.1\"}}"), ("pnpm-workspace.yaml", "packages:\n  - \"packages/*\"\n"), ("packages/core/package.json", core), ("packages/core/src/index.ts", "export const a = 1;\n"), ("packages/other/package.json", "{\"name\":\"other\"}")]);
+    let out = stdout(&rkp(&dir, &["migrate"]));
+    assert!(out.starts_with("microbundle (dependency microbundle, source in packages/core/package.json)"), "{out}");
+    assert!(out.contains("build:rkp: rkp bundle packages/core/src/index.ts --outfile packages/core/dist/core.module.js\n"), "{out}");
+    assert!(out.contains("build:rkp-2: rkp bundle packages/core/src/index.ts --outfile packages/core/dist/core.js --format=cjs\n"), "{out}");
+    assert!(out.contains("build:rkp-3: rkp bundle packages/core/src/index.ts --outfile packages/core/dist/core.mjs\n"), "{out}");
+    assert!(out.contains("dist/core.min.js is a umd file"), "{out}");
+    // The built files are the same as what the commands say: run one.
+    let built = rkp(&dir, &["bundle", "packages/core/src/index.ts", "--outfile", "packages/core/dist/core.module.js"]);
+    assert!(built.status.success() && dir.join("packages/core/dist/core.module.js").is_file());
+}

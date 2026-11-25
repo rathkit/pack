@@ -51,6 +51,7 @@ pub fn detect_with(dir: &Path, run_config: bool) -> Vec<Finding> {
     found.extend(vite(dir, package.as_ref()));
     found.extend(webpack(dir, package.as_ref()));
     found.extend(rollup(dir, package.as_ref(), run_config));
+    found.extend(package_entries(dir, package.as_ref()));
     found.extend(rspack(dir, package.as_ref()));
     found
 }
@@ -203,8 +204,75 @@ fn esbuild(dir: &Path, package: Option<&Json>) -> Option<Finding> {
         }
         finding.evidence.push(format!("API in {file}"));
         finding.notes.extend(esbuild_api_notes(&file, &text));
+        let (commands, skipped) = esbuild_api_commands(&file, &text);
+        finding.notes.extend(skipped);
+        for command in commands {
+            let name = if finding.commands.iter().any(|(n, _)| n == "build:rkp") { format!("build:rkp-{}", finding.commands.len() + 1) } else { "build:rkp".to_string() };
+            finding.commands.push((name, command));
+        }
     }
     (!finding.evidence.is_empty()).then_some(finding)
+}
+
+/// The string written right after `key:` at the start of `text` (`input: './a.js'`), not a template with `${`.
+fn literal_here(text: &str, key: &str) -> Option<String> {
+    let rest = text.strip_prefix(key)?.trim_start().strip_prefix(':')?.trim_start();
+    let quote = rest.chars().next().filter(|c| matches!(c, '\'' | '"' | '`'))?;
+    let body = &rest[1..];
+    let value = &body[..body.find(quote)?];
+    (!value.contains("${") && !value.contains('\n')).then(|| value.to_string())
+}
+
+/// The commands that the `build()` calls of an esbuild script give when their entry points, `outfile` or `outdir` and `format` are plain
+/// strings (the options a helper function adds to every call count, as in `config({ format: 'esm', outfile: 'lib/a.js' })`), and the notes for
+/// the calls that are left out.
+fn esbuild_api_commands(file: &str, text: &str) -> (Vec<String>, Vec<String>) {
+    let mut commands = Vec::new();
+    let mut notes = Vec::new();
+    let Some(at) = text.find("entryPoints") else { return (commands, notes) };
+    let Some(open) = text[at..].find('[').map(|i| at + i) else { return (commands, notes) };
+    let Some(close) = text[open..].find(']').map(|i| open + i) else { return (commands, notes) };
+    let entries = string_literals(&text[open..close]);
+    if entries.is_empty() || entries.iter().any(|e| e.contains('*')) {
+        return (commands, notes);
+    }
+    let entries: Vec<String> = entries.iter().map(|e| e.trim_start_matches("./").to_string()).collect();
+    let mut common = String::new();
+    if let Some(platform) = literal_after(text, "platform") {
+        common.push_str(&format!(" --platform={platform}"));
+    }
+    if flag_after(text, "minify") {
+        common.push_str(" --minify");
+    }
+    if flag_after(text, "sourcemap") {
+        common.push_str(" --sourcemap");
+    }
+    for call in text.split("build(").skip(1) {
+        let call = &call[..call.find("\nawait ").unwrap_or(call.len())];
+        let format = literal_after(call, "format");
+        let target = match (literal_after(call, "outfile"), literal_after(call, "outdir")) {
+            (Some(f), _) => format!(" --outfile {}", f.trim_start_matches("./")),
+            (None, Some(d)) => format!(" --outdir {}", d.trim_start_matches("./")),
+            _ => continue,
+        };
+        let flag = match format.as_deref() {
+            Some("esm") | None => String::new(),
+            Some("cjs") => " --format=cjs".to_string(),
+            Some("iife") => " --format=iife".to_string(),
+            Some(other) => {
+                notes.push(format!("{file}: the build of{} has format '{other}', which rkp does not write (esm, cjs and iife are): no command is written for it", target.trim_start_matches(" --outfile").trim_start_matches(" --outdir")));
+                continue;
+            }
+        };
+        let command = format!("rkp bundle {}{flag}{target}{common}", entries.join(" "));
+        if !commands.contains(&command) {
+            commands.push(command);
+        }
+    }
+    if !commands.is_empty() {
+        notes.push(format!("the commands come from the entry points and the plain strings of the build() calls in {file}; options it builds in code (plugins, banner, define) are not in them"));
+    }
+    (commands, notes)
 }
 
 /// Whether the line has `what` (a call such as `context(` or an option such as `write: false`) as a word of its own: not the end of a longer name.
@@ -678,6 +746,7 @@ fn rollup(dir: &Path, package: Option<&Json>, run: bool) -> Option<Finding> {
     subfolder_note(&mut finding, config.as_ref());
     let mut build = "rkp bundle".to_string();
     let mut no_input = false;
+    let mut driven: Vec<(String, String)> = Vec::new();
     // What the text of the config does not give (an input or an output built in code) is read by running it, when that is safe.
     let rolled = if run { config.as_deref().filter(|c| is_script(c)).filter(|_| !text_is_complete(&text)).and_then(|c| run_rollup_config(dir, c)) } else { None };
     if rolled.is_some() {
@@ -690,7 +759,12 @@ fn rollup(dir: &Path, package: Option<&Json>, run: bool) -> Option<Finding> {
                 build.push_str(&format!(" {}", input.trim_start_matches("./")));
             }
             None => {
-                finding.notes.push("the config's input is not a plain string (or there is no config): no command is written; run `rkp bundle ENTRY... --outfile FILE` with the entries of the config".to_string());
+                driven = config.as_deref().map(|c| rollup_driven(dir, c, &text)).unwrap_or_default();
+                if driven.is_empty() {
+                    finding.notes.push("the config's input is not a plain string (or there is no config): no command is written; run `rkp bundle ENTRY... --outfile FILE` with the entries of the config".to_string());
+                } else {
+                    finding.notes.push("the config is a function that a script calls: the commands come from the plain `input` and `fileName` strings of those calls".to_string());
+                }
                 no_input = true;
             }
         }
@@ -703,7 +777,9 @@ fn rollup(dir: &Path, package: Option<&Json>, run: bool) -> Option<Finding> {
                 // A config that builds the file name or the output list in code: without an output `rkp bundle` prints the bundle and writes nothing.
                 let stem = input_name.as_deref().and_then(|i| i.rsplit('/').next()).map(|n| n.rsplit_once('.').map_or(n, |(a, _)| a).to_string()).unwrap_or_else(|| "index".to_string());
                 build.push_str(&format!(" --outfile dist/{stem}.js"));
-                finding.notes.push("the output file is not a plain string in the config: --outfile dist/... is a stand-in, set the file you publish".to_string());
+                if driven.is_empty() {
+                    finding.notes.push("the output file is not a plain string in the config: --outfile dist/... is a stand-in, set the file you publish".to_string());
+                }
             }
         }
         match literal_after(output, "format").as_deref() {
@@ -745,6 +821,25 @@ fn rollup(dir: &Path, package: Option<&Json>, run: bool) -> Option<Finding> {
     if !no_input {
         finding.commands.push(("build:rkp".to_string(), build));
     }
+    let terser = modules.iter().any(|m| m == "@rollup/plugin-terser" || m == "rollup-plugin-terser");
+    let umd = literal_after(text.find("output").map_or("", |i| &text[i..]), "format").is_some_and(|f| f == "umd" || f == "iife");
+    let global = text.find("name ||").and_then(|i| string_literals(&text[i..(i + 40).min(text.len())]).into_iter().next());
+    if umd && !driven.is_empty() {
+        finding.notes.push("iife puts the module's exports on the global: a default export is `NAME.default`, where Rollup's umd put the default export itself on the global (`output.exports: 'default'`)".to_string());
+    }
+    for (i, (input, file)) in driven.iter().enumerate() {
+        let mut command = format!("rkp bundle {input} --outfile {file}");
+        if umd {
+            command.push_str(" --format=iife");
+            if let Some(name) = &global {
+                command.push_str(&format!(" --global-name={name}"));
+            }
+        }
+        if terser {
+            command.push_str(" --minify");
+        }
+        finding.commands.push((if i == 0 { "build:rkp".to_string() } else { format!("build:rkp-{}", i + 1) }, command));
+    }
     if let Some(items) = &rolled {
         let minify = modules.iter().any(|m| m == "@rollup/plugin-terser" || m == "rollup-plugin-terser");
         let config = config.as_deref().unwrap_or("the config");
@@ -764,6 +859,124 @@ fn rollup(dir: &Path, package: Option<&Json>, run: bool) -> Option<Finding> {
             finding.commands.push((if i == 0 { "build:rkp".to_string() } else { format!("build:rkp-{}", i + 1) }, command));
         }
     }
+    Some(finding)
+}
+
+/// `(input, file)` of each call in the scripts next to a Rollup config that is a function: `build(configFactory({ input: './src/a.js', fileName: './a.min.js' }))`.
+/// Only plain strings count; the calls whose names are built in a loop (a template with `${}`) are left out.
+fn rollup_driven(dir: &Path, config: &str, config_text: &str) -> Vec<(String, String)> {
+    let _ = config_text;
+    let folder = Path::new(config).parent().map(Path::to_path_buf).unwrap_or_default();
+    let stem = Path::new(config).file_stem().and_then(|s| s.to_str()).unwrap_or("rollup.config");
+    let mut out = Vec::new();
+    let mut files: Vec<_> = std::fs::read_dir(dir.join(&folder)).into_iter().flatten().flatten().filter(|e| e.path().is_file()).collect();
+    files.sort_by_key(|e| e.file_name());
+    for entry in files {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !CONFIG_EXTENSIONS.iter().any(|x| name.ends_with(&format!(".{x}"))) || folder.join(&name) == Path::new(config) {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(entry.path()) else { continue };
+        if !text.contains(stem) {
+            continue;
+        }
+        for (at, _) in text.match_indices("input") {
+            let Some(input) = literal_here(&text[at..], "input") else { continue };
+            let next = text[at + 5..].find("input").map_or(text.len(), |n| at + 5 + n);
+            let object = &text[at..next.min(at + 400)];
+            let file = ["fileName", "file"].iter().find_map(|k| object.match_indices(k).find_map(|(i, _)| literal_here(&object[i..], k)));
+            if let Some(file) = file {
+                let pair = (input.trim_start_matches("./").to_string(), file.trim_start_matches("./").to_string());
+                if !out.contains(&pair) {
+                    out.push(pair);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The builds that a package.json `source` field stands for (microbundle reads it, and so do other tools): `source` is the entry, `main`,
+/// `module` and `exports` are the files, in the package and in the packages of a workspace.
+fn package_entries(dir: &Path, package: Option<&Json>) -> Option<Finding> {
+    let package = package?;
+    let mut folders: Vec<String> = vec![String::new()];
+    let mut globs: Vec<String> = Vec::new();
+    match package.get("workspaces") {
+        Some(Json::Array(list)) => globs.extend(list.iter().filter_map(|w| w.as_str().map(String::from))),
+        Some(other) => globs.extend(other.get("packages").and_then(Json::as_array).unwrap_or(&[]).iter().filter_map(|w| w.as_str().map(String::from))),
+        None => {}
+    }
+    if let Ok(yaml) = std::fs::read_to_string(dir.join("pnpm-workspace.yaml")) {
+        globs.extend(yaml.lines().filter_map(|l| l.trim().strip_prefix("- ")).map(|g| g.trim().trim_matches(['"', '\'']).to_string()));
+    }
+    for glob in globs {
+        let Some(base) = glob.strip_suffix("/*") else { continue };
+        if base.contains('*') || base.starts_with('/') || base.split('/').any(|p| p == "..") {
+            continue;
+        }
+        let mut names: Vec<String> = std::fs::read_dir(dir.join(base)).into_iter().flatten().flatten().filter(|e| e.path().is_dir()).filter_map(|e| e.file_name().into_string().ok()).collect();
+        names.sort();
+        folders.extend(names.into_iter().map(|n| format!("{base}/{n}")));
+    }
+    let microbundle = has_dependency(Some(package), "microbundle");
+    let mut finding = Finding { tool: if microbundle { "microbundle" } else { "package.json" }, evidence: Vec::new(), commands: Vec::new(), notes: Vec::new() };
+    if microbundle {
+        finding.evidence.push("dependency microbundle".to_string());
+    }
+    let mut seen: Vec<String> = Vec::new();
+    for folder in folders {
+        let prefix = if folder.is_empty() { String::new() } else { format!("{folder}/") };
+        let json = if folder.is_empty() { None } else { std::fs::read_to_string(dir.join(&folder).join("package.json")).ok().and_then(|t| Json::parse(&t).ok()) };
+        let pkg = if folder.is_empty() { package } else { match &json { Some(j) => j, None => continue } };
+        let Some(source) = pkg.get("source").and_then(Json::as_str) else { continue };
+        let source = source.trim_start_matches("./");
+        if !dir.join(&prefix).join(source).is_file() {
+            continue;
+        }
+        finding.evidence.push(format!("source in {prefix}package.json"));
+        let module_type = pkg.get("type").and_then(Json::as_str) == Some("module");
+        let mut outputs: Vec<(String, bool)> = Vec::new(); // (file, is_cjs)
+        let by_name = |file: &str, cjs_by_default: bool| if file.ends_with(".mjs") { false } else if file.ends_with(".cjs") { true } else { cjs_by_default && !module_type };
+        if let Some(file) = pkg.get("module").and_then(Json::as_str) {
+            outputs.push((file.to_string(), false));
+        }
+        if let Some(file) = pkg.get("main").and_then(Json::as_str) {
+            outputs.push((file.to_string(), by_name(file, true)));
+        }
+        if let Some(entry) = pkg.get("exports").and_then(|e| e.get(".")) {
+            if let Some(file) = entry.as_str() {
+                outputs.push((file.to_string(), by_name(file, true)));
+            }
+            for (key, value) in entry.as_object().unwrap_or(&[]) {
+                let Some(file) = value.as_str() else { continue };
+                match key.as_str() {
+                    "import" | "browser" | "module" => outputs.push((file.to_string(), false)),
+                    "require" => outputs.push((file.to_string(), true)),
+                    "default" => outputs.push((file.to_string(), by_name(file, false))),
+                    _ => {}
+                }
+            }
+        }
+        for key in ["unpkg", "umd:main", "jsdelivr"] {
+            if let Some(file) = pkg.get(key).and_then(Json::as_str) {
+                finding.notes.push(format!("{prefix}package.json {key}: {file} is a umd file, which rkp does not write (esm, cjs and iife are); iife with --global-name is the form for a page"));
+            }
+        }
+        for (file, cjs) in outputs {
+            let file = file.trim_start_matches("./");
+            if file.ends_with(".d.ts") || file.ends_with(".json") || seen.iter().any(|s| s == &format!("{prefix}{file}")) {
+                continue;
+            }
+            seen.push(format!("{prefix}{file}"));
+            let name = if finding.commands.is_empty() { "build:rkp".to_string() } else { format!("build:rkp-{}", finding.commands.len() + 1) };
+            finding.commands.push((name, format!("rkp bundle {prefix}{source} --outfile {prefix}{file}{}", if cjs { " --format=cjs" } else { "" })));
+        }
+    }
+    if finding.commands.is_empty() {
+        return None;
+    }
+    finding.notes.push("the commands come from the `source`, `main`, `module` and `exports` fields of package.json: add --minify for a file you publish minified, and check the output of the tool's own build".to_string());
     Some(finding)
 }
 
