@@ -53,3 +53,16 @@ fn a_tagged_template_is_not_folded() {
     assert!(run_pack.status.success());
     assert_eq!(run(&dir, "a.js"), run(&dir, "o.mjs"));
 }
+
+#[test]
+fn a_sum_of_many_terms_is_built_and_not_a_stack_overflow() {
+    // 50,000 terms are a tree that deep; the evaluator gives up past a few levels instead of walking it (the worst-case star graph did this).
+    let dir = std::env::temp_dir().join(format!("rkp-fold-deep-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let terms: Vec<String> = (0..50000).map(|i| (i % 7).to_string()).collect();
+    std::fs::write(dir.join("a.js"), format!("console.log({});\n", terms.join(" + "))).unwrap();
+    let run_pack = Command::new(env!("CARGO_BIN_EXE_rkp")).current_dir(&dir).args(["bundle", "a.js", "--minify", "--format=esm", "--outfile", "o.mjs"]).output().unwrap();
+    assert!(run_pack.status.success(), "{}", String::from_utf8_lossy(&run_pack.stderr));
+    assert_eq!(run(&dir, "a.js"), run(&dir, "o.mjs"));
+}

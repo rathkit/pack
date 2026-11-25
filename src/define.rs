@@ -280,16 +280,20 @@ impl Defines {
     /// The value of `node` when it is a constant: a literal, a defined expression whose value is
     /// one, or an operator on those.
     pub fn eval(&self, ast: &Ast, sem: &Semantic, node: NodeId) -> Option<Const> {
-        self.value(ast, sem, node, false)
+        self.value(ast, sem, node, false, 0)
     }
 
     /// As `eval`, and arithmetic, comparisons, `~`, `+` on strings and template literals of constants are worked out too: what the minifier writes
     /// in place of an expression that has one value.
     pub fn fold(&self, ast: &Ast, sem: &Semantic, node: NodeId) -> Option<Const> {
-        self.value(ast, sem, node, true)
+        self.value(ast, sem, node, true, 0)
     }
 
-    fn value(&self, ast: &Ast, sem: &Semantic, node: NodeId, full: bool) -> Option<Const> {
+    fn value(&self, ast: &Ast, sem: &Semantic, node: NodeId, full: bool, depth: u16) -> Option<Const> {
+        // A sum of 50,000 terms is a tree that deep, and this runs on a worker's small stack: past a few levels the answer is no constant.
+        if depth > 40 {
+            return None;
+        }
         match ast[node].kind {
             NodeKind::Null => Some(Const::Null),
             NodeKind::Bool(b) => Some(Const::Bool(b)),
@@ -298,18 +302,18 @@ impl Defines {
             NodeKind::Ident(a) if ast.atom(a) == "undefined" && sem.symbol_of(node).is_none() && self.lookup(ast, sem, node).is_none() => Some(Const::Undefined),
             NodeKind::Ident(_) | NodeKind::Member { .. } | NodeKind::ImportMeta => self.lookup(ast, sem, node)?.value.clone(),
             NodeKind::Unary { op, arg } => match op {
-                UnaryOp::Not => Some(Const::Bool(!self.value(ast, sem, arg, full)?.truthy())),
-                UnaryOp::Typeof => Some(Const::Str(self.value(ast, sem, arg, full)?.type_name().to_string())),
-                UnaryOp::Void => self.value(ast, sem, arg, full).map(|_| Const::Undefined),
-                UnaryOp::Neg => match self.value(ast, sem, arg, full)? {
+                UnaryOp::Not => Some(Const::Bool(!self.value(ast, sem, arg, full, depth + 1)?.truthy())),
+                UnaryOp::Typeof => Some(Const::Str(self.value(ast, sem, arg, full, depth + 1)?.type_name().to_string())),
+                UnaryOp::Void => self.value(ast, sem, arg, full, depth + 1).map(|_| Const::Undefined),
+                UnaryOp::Neg => match self.value(ast, sem, arg, full, depth + 1)? {
                     Const::Num(n) => Some(Const::Num(-n)),
                     _ => None,
                 },
-                UnaryOp::BitNot if full => match self.value(ast, sem, arg, full)? {
+                UnaryOp::BitNot if full => match self.value(ast, sem, arg, full, depth + 1)? {
                     Const::Num(n) => Some(Const::Num(!to_int32(n) as f64)),
                     _ => None,
                 },
-                UnaryOp::Pos if full => match self.value(ast, sem, arg, full)? {
+                UnaryOp::Pos if full => match self.value(ast, sem, arg, full, depth + 1)? {
                     Const::Num(n) => Some(Const::Num(n)),
                     _ => None,
                 },
@@ -317,7 +321,7 @@ impl Defines {
             },
             NodeKind::Binary { op, left, right } => match op {
                 BinOp::LogAnd | BinOp::LogOr | BinOp::Nullish => {
-                    let l = self.value(ast, sem, left, full)?;
+                    let l = self.value(ast, sem, left, full, depth + 1)?;
                     let keeps_left = match op {
                         BinOp::LogAnd => !l.truthy(),
                         BinOp::LogOr => l.truthy(),
@@ -326,16 +330,16 @@ impl Defines {
                     if keeps_left {
                         Some(l)
                     } else {
-                        self.value(ast, sem, right, full)
+                        self.value(ast, sem, right, full, depth + 1)
                     }
                 }
                 BinOp::StrictEq | BinOp::StrictNe | BinOp::Eq | BinOp::Ne => {
-                    let (l, r) = (self.value(ast, sem, left, full)?, self.value(ast, sem, right, full)?);
+                    let (l, r) = (self.value(ast, sem, left, full, depth + 1)?, self.value(ast, sem, right, full, depth + 1)?);
                     let equal = if matches!(op, BinOp::StrictEq | BinOp::StrictNe) { l.strictly_equals(&r) } else { l.loosely_equals(&r)? };
                     Some(Const::Bool(equal == matches!(op, BinOp::StrictEq | BinOp::Eq)))
                 }
                 _ if full => {
-                    let (l, r) = (self.value(ast, sem, left, full)?, self.value(ast, sem, right, full)?);
+                    let (l, r) = (self.value(ast, sem, left, full, depth + 1)?, self.value(ast, sem, right, full, depth + 1)?);
                     arithmetic(op, &l, &r)
                 }
                 _ => None,
@@ -347,14 +351,14 @@ impl Defines {
                     let NodeKind::TemplateElement { cooked: Some(c), .. } = ast[q].kind else { return None };
                     out.push_str(ast.atom(c));
                     if let Some(&e) = exprs.get(i) {
-                        out.push_str(&self.value(ast, sem, e, full)?.to_text()?);
+                        out.push_str(&self.value(ast, sem, e, full, depth + 1)?.to_text()?);
                     }
                 }
                 Some(Const::Str(out))
             }
             NodeKind::Conditional { test, cons, alt } => {
-                let test = self.value(ast, sem, test, full)?;
-                self.value(ast, sem, if test.truthy() { cons } else { alt }, full)
+                let test = self.value(ast, sem, test, full, depth + 1)?;
+                self.value(ast, sem, if test.truthy() { cons } else { alt }, full, depth + 1)
             }
             _ => None,
         }
