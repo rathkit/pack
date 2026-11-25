@@ -77,7 +77,7 @@ impl Const {
         }
     }
 
-    fn nullish(&self) -> bool {
+    pub fn nullish(&self) -> bool {
         matches!(self, Const::Undefined | Const::Null)
     }
 
@@ -344,6 +344,21 @@ impl Defines {
                 }
                 _ => None,
             },
+            // `a?.b.c` is `undefined` when what stands before the first `?.` that can be told is `null` or `undefined`.
+            NodeKind::Chain(inner) if full => {
+                let mut at = inner;
+                loop {
+                    let next = match ast[at].kind {
+                        NodeKind::Member { object, .. } => object,
+                        NodeKind::Call { callee, .. } => callee,
+                        _ => return None,
+                    };
+                    if ast[at].has(crate::ast::flags::OPTIONAL) && self.value(ast, sem, next, full, depth + 1).is_some_and(|c| c.nullish()) {
+                        return Some(Const::Undefined);
+                    }
+                    at = next;
+                }
+            }
             NodeKind::Template { quasis, exprs } if full => {
                 let (quasis, exprs) = (ast.list(quasis), ast.list(exprs));
                 let mut out = String::new();

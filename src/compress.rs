@@ -204,7 +204,7 @@ fn self_precedence_ok(ast: &Ast, left: NodeId) -> bool {
 }
 
 pub(crate) fn plan(source: &str, ast: &Ast, sem: &Semantic, tokens: &[Token], barriers: &[u32], legacy: bool, shared_top: bool) -> Plan {
-    let mut ctx = Ctx { legacy, shared_top, source, ast, sem, tokens, barriers, parent: vec![None; ast.node_count() + 1], actions: vec![Action::Keep; tokens.len()], locked: vec![false; tokens.len()], dead: Vec::new(), kept_semi: Vec::new(), done: Default::default(), visited: Default::default(), as_expr: Default::default(), inlined: Default::default(), seq_returns: Default::default(), closers: vec![false; tokens.len()], listed: Default::default(), joined_ifs: Default::default(), consumed: Default::default(), removed: Default::default(), texts: Vec::new(), text_index: Default::default() };
+    let mut ctx = Ctx { legacy, shared_top, source, ast, sem, tokens, barriers, parent: vec![None; ast.node_count() + 1], actions: vec![Action::Keep; tokens.len()], locked: vec![false; tokens.len()], dead: Vec::new(), folded: Vec::new(), kept_semi: Vec::new(), done: Default::default(), visited: Default::default(), as_expr: Default::default(), inlined: Default::default(), seq_returns: Default::default(), closers: vec![false; tokens.len()], listed: Default::default(), joined_ifs: Default::default(), consumed: Default::default(), removed: Default::default(), texts: Vec::new(), text_index: Default::default() };
     let mut order = Vec::new();
     let mut stack = vec![ast.root];
     while let Some(n) = stack.pop() {
@@ -279,6 +279,8 @@ struct Ctx<'a> {
     locked: Vec<bool>,
     /// Token ranges `[from, to)` that are left out whatever else was decided.
     dead: Vec<(usize, usize)>,
+    /// Token ranges written as one value (`fold_constant`): what is inside is not rewritten again.
+    folded: Vec<(usize, usize)>,
     kept_semi: Vec<usize>,
     /// `if` statements already turned into expressions, as the `else` of another.
     done: crate::fxhash::FastSet<NodeId>,
@@ -453,7 +455,7 @@ impl Ctx<'_> {
     fn fold_constant(&mut self, n: NodeId) -> bool {
         let (ast, tokens) = (self.ast, self.tokens);
         let node = &ast[n];
-        if !matches!(node.kind, NodeKind::Binary { .. } | NodeKind::Unary { .. } | NodeKind::Template { .. } | NodeKind::Conditional { .. }) {
+        if !matches!(node.kind, NodeKind::Binary { .. } | NodeKind::Unary { .. } | NodeKind::Template { .. } | NodeKind::Conditional { .. } | NodeKind::Chain(_)) {
             return false;
         }
         // The template of a tagged template is what the tag is called with: its strings, not a value.
@@ -472,7 +474,7 @@ impl Ctx<'_> {
             Const::Undefined => "void 0".to_string(),
         };
         let (first, last) = (self.first_tok(node.span.start), self.last_tok(node.span.end));
-        if last < first || last >= tokens.len() || self.locked[first] {
+        if last < first || last >= tokens.len() || self.locked[first] || self.folded.iter().any(|&(a, b)| a <= first && last <= b) {
             return false;
         }
         let original: usize = (first..=last).map(|i| (tokens[i].end - tokens[i].start) as usize).sum();
@@ -491,13 +493,71 @@ impl Ctx<'_> {
         if last > first {
             self.dead.push((first + 1, last + 1));
         }
+        self.folded.push((first, last));
+        true
+    }
+
+    /// `a || b`, `a && b` and `a ?? b` where `a` is a constant: the one operand that is the value. `undefined || x` is `x`, `1 || f()` is `1`.
+    fn fold_logical(&mut self, n: NodeId) -> bool {
+        let (ast, tokens) = (self.ast, self.tokens);
+        let NodeKind::Binary { op: op @ (crate::ast::BinOp::LogAnd | crate::ast::BinOp::LogOr | crate::ast::BinOp::Nullish), left, right } = ast[n].kind else { return false };
+        let (first_token, last_token) = (self.first_tok(ast[n].span.start), self.last_tok(ast[n].span.end));
+        if self.folded.iter().any(|&(a, b)| a <= first_token && last_token <= b) {
+            return false;
+        }
+        let Some(c) = crate::define::Defines::default().fold(ast, self.sem, left) else { return false };
+        // Where the value is used as a reference (`this` of a call, what `delete` deletes), the operand alone would mean something else.
+        if let Some(parent) = self.parent[n.index()] {
+            match ast[parent].kind {
+                NodeKind::Call { callee, .. } | NodeKind::New { callee, .. } if callee == n => return false,
+                NodeKind::TaggedTemplate { tag, .. } if tag == n => return false,
+                NodeKind::Unary { op: UnaryOp::Delete, .. } => return false,
+                _ => {}
+            }
+        }
+        let keeps_left = match op {
+            crate::ast::BinOp::LogAnd => !c.truthy(),
+            crate::ast::BinOp::LogOr => c.truthy(),
+            _ => !c.nullish(),
+        };
+        // The operator: after the `)` that close the parentheses the left operand is written in.
+        let mut at = self.last_tok(ast[left].span.end) + 1;
+        let mut closers = 0;
+        while self.is(at, Punct::RParen) {
+            closers += 1;
+            at += 1;
+        }
+        if !(self.is(at, Punct::PipePipe) || self.is(at, Punct::AmpAmp) || self.is(at, Punct::QuestionQuestion)) || self.locked[at] {
+            return false;
+        }
+        if keeps_left {
+            // The right operand, in the parentheses it has, goes.
+            let mut end = self.last_tok(ast[right].span.end);
+            let mut opens = 0;
+            let mut j = at + 1;
+            while self.is(j, Punct::LParen) {
+                opens += 1;
+                j += 1;
+            }
+            end += opens;
+            if end >= tokens.len() {
+                return false;
+            }
+            self.dead.push((at, end + 1));
+        } else {
+            let first = self.first_tok(ast[left].span.start).saturating_sub(closers);
+            if first > at {
+                return false;
+            }
+            self.dead.push((first, at + 1));
+        }
         true
     }
 
     fn visit(&mut self, n: NodeId) {
         let ast = self.ast;
         let node = &ast[n];
-        if self.fold_constant(n) {
+        if self.fold_constant(n) || self.fold_logical(n) {
             return;
         }
         if node.has(flags::PARENTHESIZED) {
