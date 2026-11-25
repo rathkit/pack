@@ -449,9 +449,57 @@ impl Ctx<'_> {
         self.force(i, action);
     }
 
+    /// An expression of constants only (`1 << 4`, `"a" + "b"`, `` `x${"y"}` ``, `2 > 1`) written as the one value it has, when that is shorter.
+    fn fold_constant(&mut self, n: NodeId) -> bool {
+        let (ast, tokens) = (self.ast, self.tokens);
+        let node = &ast[n];
+        if !matches!(node.kind, NodeKind::Binary { .. } | NodeKind::Unary { .. } | NodeKind::Template { .. } | NodeKind::Conditional { .. }) {
+            return false;
+        }
+        // The template of a tagged template is what the tag is called with: its strings, not a value.
+        if matches!(node.kind, NodeKind::Template { .. }) && self.parent[n.index()].is_some_and(|p| matches!(ast[p].kind, NodeKind::TaggedTemplate { .. })) {
+            return false;
+        }
+        let Some(value) = crate::define::Defines::default().fold(ast, self.sem, n) else { return false };
+        use crate::define::Const;
+        let text = match value {
+            Const::Num(v) if v.is_finite() && v.is_sign_negative() && v != 0.0 => format!("-{}", shortest(-v)),
+            Const::Num(v) if v.is_finite() && !v.is_sign_negative() => shortest(v),
+            Const::Num(_) => return false,
+            Const::Str(s) => string_literal(&s),
+            Const::Bool(b) => (if b { "!0" } else { "!1" }).to_string(),
+            Const::Null => "null".to_string(),
+            Const::Undefined => "void 0".to_string(),
+        };
+        let (first, last) = (self.first_tok(node.span.start), self.last_tok(node.span.end));
+        if last < first || last >= tokens.len() || self.locked[first] {
+            return false;
+        }
+        let original: usize = (first..=last).map(|i| (tokens[i].end - tokens[i].start) as usize).sum();
+        if text.len() >= original {
+            return false;
+        }
+        // A sign next to a sign would read as `--`; a unary expression where a member access, a call or `**` follows needs parentheses.
+        let unary = !text.starts_with(|c: char| c.is_ascii_digit() || c == '"' || c == '\'' || c == 'n');
+        if text.starts_with('-') && first > 0 && (self.is(first - 1, Punct::Minus) || self.is(first - 1, Punct::MinusMinus)) {
+            return false;
+        }
+        let wrap = unary && (tokens.get(last + 1).is_some_and(|t| matches!(t.kind, Kind::Punct(Punct::Dot | Punct::QuestionDot | Punct::LBracket | Punct::LParen | Punct::StarStar) | Kind::NoSubTemplate | Kind::TemplateHead)) || (first > 0 && (self.kw(first - 1, Kw::Extends) || self.kw(first - 1, Kw::New))));
+        // A number is followed by `.` only inside parentheses already.
+        let text = if wrap { format!("({text})") } else { text };
+        self.force_text(first, &text);
+        if last > first {
+            self.dead.push((first + 1, last + 1));
+        }
+        true
+    }
+
     fn visit(&mut self, n: NodeId) {
         let ast = self.ast;
         let node = &ast[n];
+        if self.fold_constant(n) {
+            return;
+        }
         if node.has(flags::PARENTHESIZED) {
             self.drop_parens(n);
         }
@@ -2259,6 +2307,33 @@ pub(crate) fn shorten_number(text: &str) -> Option<String> {
     }
     let best = shortest(value);
     (best.len() < text.len()).then_some(best)
+}
+
+/// The text of a string literal for `value`, in the quote that needs the fewest escapes.
+fn string_literal(value: &str) -> String {
+    let (singles, doubles) = (value.matches('\'').count(), value.matches('"').count());
+    let quote = if doubles <= singles { '"' } else { '\'' };
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push(quote);
+    let chars: Vec<char> = value.chars().collect();
+    for (i, &c) in chars.iter().enumerate() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
+            '\0' if !chars.get(i + 1).is_some_and(|d| d.is_ascii_digit()) => out.push_str("\\0"),
+            c if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => out.push_str(&format!("\\x{:02x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push(quote);
+    out
 }
 
 fn shortest(v: f64) -> String {
