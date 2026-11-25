@@ -82,3 +82,31 @@ fn cold_warm_damaged_and_off() {
     assert_eq!(build(&dir, &blocked.join("inside"), &[], &[]), changed);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A setting that changes the output is part of what an entry answers to: the same source built another way is another entry, and
+/// each way keeps getting its own answer from the cache that it gets without one.
+#[test]
+fn a_changed_setting_is_another_entry() {
+    let dir = scratch("settings");
+    let cache = dir.join("cache");
+    let mut text = String::new();
+    for i in 0..600 {
+        text.push_str(&format!("export const value{i} = (argument) => {{ const doubled = argument ?? {i}; return doubled * 2 + {i}; }};\nglobalThis.out{i} = value{i}({i});\n"));
+    }
+    std::fs::write(dir.join("main.js"), &text).unwrap();
+    let variants: [&[&str]; 4] = [&[], &["--target=es2015"], &["--format=cjs"], &["--sourcemap"]];
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    for (n, extra) in variants.iter().enumerate() {
+        let plain = build(&dir, &cache, extra, &[("RATHKIT_CACHE", "off")]);
+        let cold = build(&dir, &cache, extra, &[]);
+        let warm = build(&dir, &cache, extra, &[]);
+        assert_eq!(cold, plain, "{extra:?}: a cold build with the cache is the build without it");
+        assert_eq!(warm, plain, "{extra:?}: a hit is the build without the cache");
+        assert!(entries(&cache).len() > n, "{extra:?}: its own entry");
+        seen.push(plain);
+    }
+    // The two that differ in the text of the output differ from the first; none was answered with another's bytes.
+    assert_ne!(seen[0], seen[1], "es2015 lowers `??`");
+    assert_ne!(seen[0], seen[2], "cjs wraps the exports");
+    let _ = std::fs::remove_dir_all(&dir);
+}

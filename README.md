@@ -368,7 +368,7 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   text is the same as one pass writes, except that declarations are not joined across a cut.
   A bundle that is one huge module is one piece. `RATHKIT_FRAGMENTS=off` turns the cutting off.
   With `RATHKIT_CACHE=on`, what the minifier made of a chunk is kept between runs (a one-shot build; not `--watch` or the dev server), so the same chunk
-  is not minified twice: a warm minified build of TypeScript's 9 MB is a third faster. An entry holds the chunk's text, the settings and the
+  is not minified twice: a warm minified build is 26% faster on TypeScript's 9 MB, 32% on React, 9% to 16% on the other six workloads measured (three.js, lodash, rxjs, d3, zod, date-fns), with the same bytes as a cold build; the first build, which fills the cache, takes 0% to 13% longer. An entry holds the chunk's text, the settings and the
   program that made it next to the answer, and a hit needs all of them to match, so the output is byte for byte what a cold build writes; a
   file that is missing, cut short, damaged or from another version is ignored and written again. The folder is `RATHKIT_CACHE_DIR`,
   else `$XDG_CACHE_HOME/rathkit/minify` or `~/.cache/rathkit/minify` (`%LOCALAPPDATA%\rathkit\minify` on Windows), kept under 512 MB
