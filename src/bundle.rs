@@ -380,6 +380,9 @@ pub struct ChunkInfo {
 /// Builds the bundle for `graph`, keeping what `shaken` says to keep.
 pub fn bundle(graph: &Graph, linked: &Linked, shaken: &Shaken, options: &Options) -> Result<Output, Vec<Diagnostic>> {
     let mut b = Bundler::new(graph, linked, shaken);
+    if options.minify.any() {
+        b.param_consts = std::sync::Arc::new(crate::paramconst::analyze(graph, linked, shaken));
+    }
     b.run(options)
 }
 
@@ -470,6 +473,8 @@ struct Bundler<'a> {
     graph: &'a Graph,
     linked: &'a Linked,
     shaken: &'a Shaken,
+    /// Parameters that have one value at every call (`paramconst`), written in place of their reads when the output is minified.
+    param_consts: std::sync::Arc<crate::paramconst::ParamConsts>,
     /// Keys in the order first seen, with the modules whose code refers to each.
     keys: Vec<Key>,
     key_refs: HashMap<Key, Vec<Option<ModuleId>>>,
@@ -647,6 +652,7 @@ impl<'a> Bundler<'a> {
             graph,
             linked,
             shaken,
+            param_consts: Default::default(),
             keys: Vec::new(),
             key_refs: HashMap::new(),
             code: HashMap::new(),
@@ -2712,6 +2718,7 @@ impl<'a> Bundler<'a> {
         fork.drop_debugger = self.drop_debugger;
         fork.out_extensions = self.out_extensions.clone();
         fork.target = self.target;
+        fork.param_consts = self.param_consts.clone();
         fork.legacy = self.legacy;
         fork.cjs_exports = self.cjs_exports;
         fork.preserve = self.preserve;
@@ -2825,6 +2832,10 @@ impl<'a> Bundler<'a> {
         let mut demanded: Vec<usize> = shake.demanded.iter().map(|s| s.index()).collect();
         demanded.sort_unstable();
         demanded.hash(&mut h);
+        // The parameters of this module that are written as the value they have.
+        let mut params: Vec<(usize, String)> = self.param_consts.iter().filter(|((m, _), _)| *m == module.id).map(|((_, s), c)| (s.index(), format!("{c:?}"))).collect();
+        params.sort_unstable();
+        params.hash(&mut h);
         h.finish()
     }
 
@@ -3228,6 +3239,11 @@ impl<'a> Scanner<'_, 'a> {
         })
     }
 
+    /// Whether some scope of the module declares a name `undefined`, which then is not the global one.
+    fn module_declares_undefined(&self) -> bool {
+        self.semantic.symbols().any(|(_, symbol)| self.ast.atom(symbol.name) == "undefined")
+    }
+
     fn push_ident_edit(&mut self, node: NodeId, pieces: Vec<Piece>) {
         let (start, end) = self.span(node);
         let shorthand = self.shorthand.contains(&node).then(|| self.module.source[start as usize..end as usize].to_string());
@@ -3390,6 +3406,22 @@ impl<'a> Scanner<'_, 'a> {
                 self.written.insert(arg);
             }
             _ => {}
+        }
+        if !self.bundler.param_consts.is_empty() && matches!(ast[node].kind, NodeKind::Ident(_)) && !self.written.contains(&node) && !ast[node].has(crate::ast::flags::ASSIGNED) {
+            if let Some(value) = self.semantic.symbol_of(node).and_then(|s| self.bundler.param_consts.get(&(self.module.id, s))) {
+                let text = match value {
+                    crate::define::Const::Undefined => Some("undefined"),
+                    crate::define::Const::Null => Some("null"),
+                    crate::define::Const::Bool(true) => Some("true"),
+                    crate::define::Const::Bool(false) => Some("false"),
+                    _ => None,
+                };
+                // `undefined` is a name that code can declare: only where nothing here does.
+                if let Some(text) = text.filter(|t| *t != "undefined" || !self.module_declares_undefined()) {
+                    self.push_ident_edit(node, vec![Piece::Text(text.to_string())]);
+                    return;
+                }
+            }
         }
         if !self.bundler.graph.defines.is_empty() {
             if matches!(ast[node].kind, NodeKind::Ident(_) | NodeKind::Member { .. } | NodeKind::ImportMeta) && !self.written.contains(&node) {
