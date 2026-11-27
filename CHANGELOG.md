@@ -16,6 +16,12 @@ What an alpha or beta does promise, and checks on every change (`tools/check-pro
 scripts in any package, a build that needs no network, provenance and checksums on every release. It promises nothing
 about stability.
 
+## Unreleased
+
+### Changed
+
+- The minifier cache is on by default (`RATHKIT_CACHE=off`, `0`, `false` or `no` turns it off). A warm minified build writes the same bytes as a cold one and is 9% to 32% faster on the eight workloads measured; the first build, which fills the cache, takes 0% to 13% longer. It writes under `$XDG_CACHE_HOME/rathkit/minify` (or `RATHKIT_CACHE_DIR`) and keeps the folder under 512 MB.
+
 ## 0.5.0-beta.0 - 2026-11-24
 
 ### Changed
