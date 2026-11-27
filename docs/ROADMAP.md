@@ -106,6 +106,8 @@ The Nx plugin: inferred tasks, executors, init, library builds, a repository of 
 - [ ] [9.5](https://github.com/rathkit/pack/issues/33) Nx init generator, so nx add @rathkit/nx-plugin works `P0`
 - [ ] [9.9](https://github.com/rathkit/pack/issues/34) Nx buildable and publishable libraries (library mode, declarations, exports) `P1`
 - [ ] [9.10](https://github.com/rathkit/pack/issues/35) Nx version matrix in CI and cache-correctness tests `P0`
+- [ ] [3.17](https://github.com/rathkit/pack/issues/189) Time: a source map adds under 15% to a minified build on every workload `P1`
+- [ ] [3.18](https://github.com/rathkit/pack/issues/190) Size: no dead code is left in the output (function-level shaking, never-written objects, no-op calls) `P1`
 
 ### 0.7.0-beta.0
 
