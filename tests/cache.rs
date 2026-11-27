@@ -1,5 +1,5 @@
 //! The persistent cache through the command line: a warm build writes what a cold one writes, a damaged or stale entry is ignored,
-//! and the cache is used only when `RATHKIT_CACHE=on` (`off` and no setting leave the folder alone).
+//! and the cache is used unless `RATHKIT_CACHE=off` (`off`, `0`, `false` and `no` leave the folder alone; no setting uses it).
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -49,11 +49,16 @@ fn cold_warm_damaged_and_off() {
     }
     std::fs::write(dir.join("main.js"), &text).unwrap();
 
-    let unset = build_unset(&dir, &cache);
-    assert!(entries(&cache).is_empty(), "with no setting the cache writes nothing");
+    for word in ["off", "0", "false", "no"] {
+        build(&dir, &cache, &[], &[("RATHKIT_CACHE", word)]);
+        assert!(entries(&cache).is_empty(), "RATHKIT_CACHE={word} writes nothing");
+    }
     let off = build(&dir, &cache, &[], &[("RATHKIT_CACHE", "off")]);
-    assert!(entries(&cache).is_empty(), "the off switch writes nothing");
+    // No setting at all is on.
+    let unset = build_unset(&dir, &cache);
+    assert_eq!(entries(&cache).len(), 1, "with no setting the cache is used");
     assert_eq!(unset, off);
+    std::fs::remove_dir_all(&cache).unwrap();
     let cold = build(&dir, &cache, &[], &[]);
     assert_eq!(cold, off);
     assert_eq!(entries(&cache).len(), 1);

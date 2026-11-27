@@ -367,12 +367,12 @@ rkp bundle src/main.ts --outfile dist/app.mjs
   written on all cores (only the top-level names are chosen for the bundle as a whole); the
   text is the same as one pass writes, except that declarations are not joined across a cut.
   A bundle that is one huge module is one piece. `RATHKIT_FRAGMENTS=off` turns the cutting off.
-  With `RATHKIT_CACHE=on`, what the minifier made of a chunk is kept between runs (a one-shot build; not `--watch` or the dev server), so the same chunk
+  What the minifier made of a chunk is kept between runs (a one-shot build; not `--watch` or the dev server), so the same chunk
   is not minified twice: a warm minified build is 26% faster on TypeScript's 9 MB, 32% on React, 9% to 16% on the other six workloads measured (three.js, lodash, rxjs, d3, zod, date-fns), with the same bytes as a cold build; the first build, which fills the cache, takes 0% to 13% longer. An entry holds the chunk's text, the settings and the
   program that made it next to the answer, and a hit needs all of them to match, so the output is byte for byte what a cold build writes; a
   file that is missing, cut short, damaged or from another version is ignored and written again. The folder is `RATHKIT_CACHE_DIR`,
   else `$XDG_CACHE_HOME/rathkit/minify` or `~/.cache/rathkit/minify` (`%LOCALAPPDATA%\rathkit\minify` on Windows), kept under 512 MB
-  (oldest entries go first); it is off unless `RATHKIT_CACHE=on` is set (it writes outside the project), and deleting the folder is always safe. Cold builds need no setting.
+  (oldest entries go first); it is on unless `RATHKIT_CACHE=off` is set (it writes outside the project, in your cache folder), and deleting the folder is always safe.
   Exported names, imported names, properties and globals never change, nor do bindings that
   a direct `eval` can see. `--keep-names` leaves functions, classes and variables that name an
   anonymous function alone, so their `.name` stays. It is on by itself when decorators are
@@ -507,8 +507,8 @@ after, and fails if anything appears, changes or goes that is not listed here.
   **`rkp analyze`** prints, or writes the page named by `--outfile`.
 - **`rkp serve`** writes nothing (but the file of `--ready-file`, and with `bundle --watch` too), and keeps pages in memory. With `--https` it makes a certificate and private key for `localhost` once and keeps
   them (mode 0600) in your cache folder (`$XDG_CACHE_HOME/rathkit/` or `~/.cache/rathkit/` on Linux): the one thing Pack writes outside the project
-  without being told a name.
-- **The minifier cache** is off unless `RATHKIT_CACHE=on`; then it writes under `$XDG_CACHE_HOME/rathkit/minify` (or `RATHKIT_CACHE_DIR`), keeps that
+  without being told a name, besides the minifier cache below.
+- **The minifier cache** is on unless `RATHKIT_CACHE=off`; it writes under `$XDG_CACHE_HOME/rathkit/minify` (or `RATHKIT_CACHE_DIR`), keeps that
   folder under 512 MB by removing its oldest entries, and deletes nothing else.
 - **Temporary folders.** The HTTPS certificate request, the declarations of a federation build and the optional checker each make a private folder
   in the system's temporary folder and remove it when they are done.
