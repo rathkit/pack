@@ -401,6 +401,10 @@ let mut uses = Vec::new();
             }
             _ => {}
         }
+        // `config.debug` where nothing writes `config` is a value: the object is not used by it.
+        if matches!(ast[node].kind, NodeKind::Member { .. }) && !written.contains(&node) && defines.is_some_and(|d| d.frozen_value(ast, semantic, node).is_some()) {
+            continue;
+        }
         match ast[node].kind {
             NodeKind::Ident(_) => {
                 if let Some(symbol) = semantic.symbol_of(node) {

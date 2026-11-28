@@ -1221,6 +1221,7 @@ fn constant_test(parsed: &parser::Parsed, n: NodeId) -> Option<bool> {
 fn removable(parsed: &parser::Parsed, n: NodeId) -> bool {
     match parsed.ast[n].kind {
         NodeKind::Empty => true,
+        NodeKind::ExprStmt(e) => !parsed.ast[n].has(flags::DIRECTIVE) && crate::define::Defines::default().fold(&parsed.ast, &parsed.semantic, e).is_some(),
         NodeKind::If { test, cons, alt: None } => constant_test(parsed, test) == Some(false) && !crate::compress::var_escapes(&parsed.ast, &parsed.semantic, cons),
         _ => false,
     }
@@ -2346,6 +2347,9 @@ mod tests {
         assert_eq!(syntax("if (false) { var v = 1 }"), "");
         assert_eq!(syntax("function g(a) { if (false) { var v = a; for (var i = 0; i < v; i++) h(i) } return 1 }"), "function g(a){return 1}");
         assert_eq!(syntax("x = true ? a : b; y = false ? a : b"), "x=a;y=b");
+        // A statement that is a value runs nothing; a directive is not one.
+        assert_eq!(syntax("function f(a) { null && a(); 1; void 0; 'x' + 'y'; return a }"), "function f(a){return a}");
+        assert_eq!(syntax("function f(a) { 'use strict'; return a }"), "function f(a){'use strict';return a}");
         assert_eq!(syntax("function f() { if (a) if (true) return 1; else return 2; else return 3 }"), "function f(){if(a)return 1;else return 3}");
         assert_eq!(syntax("function f() { return undefined; return void 0 }"), "function f(){return;return}");
     }

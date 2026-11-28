@@ -746,6 +746,11 @@ impl Ctx<'_> {
                     self.dead.push((i, i + 1));
                 }
             }
+            // A statement that is a value (`null;`, what `null && f()` came to): nothing runs, so it is not written.
+            NodeKind::ExprStmt(e) if !node.has(flags::DIRECTIVE) && self.in_statement_list(n) && crate::define::Defines::default().fold(ast, self.sem, e).is_some() => {
+                let (from, to) = (self.first_tok(node.span.start), self.last_tok(node.span.end) + 1);
+                self.dead.push((from, to));
+            }
             NodeKind::Num(_) => {
                 let i = self.first_tok(node.span.start);
                 if self.tokens.get(i).is_some_and(|t| t.kind == Kind::Number) {

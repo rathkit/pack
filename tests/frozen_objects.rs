@@ -23,6 +23,15 @@ const CASES: &[Case] = &[
         kept: &["KEPT_default"],
     },
     Case {
+        name: "an object whose every read was folded is not kept",
+        files: &[
+            ("config.mjs", "export const config = { onStop: null, tag: 'GONE_cfg', verbose: false };\n"),
+            ("main.mjs", "import { config } from './config.mjs';\nfunction stop(f) { const h = config.onStop; if (config.verbose) { console.log('GONE_verbose'); } return h ? h(f) : f; }\nconsole.log(stop(4));\n"),
+        ],
+        gone: &["GONE_cfg", "GONE_verbose"],
+        kept: &[],
+    },
+    Case {
         name: "a var in the branch that never runs goes with it, one the rest of the function reads does not",
         files: &[
             ("config.mjs", "export const config = { on: false };\n"),
