@@ -2311,7 +2311,7 @@ impl Ctx<'_> {
     // ---- branches that are decided ahead of time -----------------------------------------
 
     fn declares_var(&self, root: NodeId) -> bool {
-        declares_var(self.ast, root)
+        var_escapes(self.ast, self.sem, root)
     }
 
     fn in_statement_list(&self, n: NodeId) -> bool {
@@ -2482,6 +2482,61 @@ pub(crate) fn declares_var(ast: &Ast, root: NodeId) -> bool {
         ast.for_each_child(n, |c| stack.push(c));
     }
     false
+}
+
+/// Whether a `var` declared in `root` is seen from outside it, so that leaving `root` out would change what the rest of the program finds:
+/// a name read or written elsewhere (it is `undefined` there when `root` never runs, and a function-wide `var` makes the name exist), a
+/// property of the global object at the top of a script, a name `eval` or `with` can reach, or one that is not a plain `var` of its own
+/// (a parameter that is declared again, a pattern). A `var` that only `root` itself mentions goes with it.
+pub(crate) fn var_escapes(ast: &Ast, sem: &Semantic, root: NodeId) -> bool {
+    use crate::semantic::{ScopeKind, SymbolKind, scope_flags, symbol_flags};
+    if !declares_var(ast, root) {
+        return false;
+    }
+    let mut inside: crate::fxhash::FastMap<crate::semantic::SymbolId, (u32, u32)> = Default::default();
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        match ast[n].kind {
+            NodeKind::VarDecl { kind: VarKind::Var, decls } => {
+                for &d in ast.list(decls) {
+                    let NodeKind::VarDeclarator { target, init } = ast[d].kind else { return true };
+                    let NodeKind::BindingIdent(_) = ast[target].kind else { return true };
+                    let Some(sym) = sem.symbol_of(target) else { return true };
+                    let counts = inside.entry(sym).or_insert((0, 0));
+                    counts.1 += init.is_some() as u32;
+                }
+            }
+            NodeKind::Function { .. } | NodeKind::StaticBlock(_) => continue,
+            _ => {}
+        }
+        ast.for_each_child(n, |c| stack.push(c));
+    }
+    let root_scope = sem.root_scope();
+    for (&sym, _) in inside.iter() {
+        let symbol = sem.symbol(sym);
+        if symbol.kind != SymbolKind::Var || symbol.flags & (symbol_flags::DYNAMIC | symbol_flags::EXPORTED) != 0 || sem.scope(symbol.scope).flags & scope_flags::HAS_EVAL != 0 || (symbol.scope == root_scope && sem.scope(root_scope).kind != ScopeKind::Module) {
+            return true;
+        }
+    }
+    // Every mention of the names inside `root`, closures in it included.
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        if matches!(ast[n].kind, NodeKind::Ident(_)) {
+            if let Some(counts) = sem.symbol_of(n).and_then(|s| inside.get_mut(&s)) {
+                if ast[n].has(flags::ASSIGNED) {
+                    counts.1 += 1;
+                    counts.0 += ast[n].has(flags::READ_ALSO) as u32;
+                } else {
+                    counts.0 += 1;
+                }
+            }
+        }
+        ast.for_each_child(n, |c| stack.push(c));
+    }
+    inside.iter().any(|(&sym, &(reads, writes))| {
+        let symbol = sem.symbol(sym);
+        symbol.reads > reads || symbol.writes > writes
+    })
 }
 
 fn is_plain_identifier(text: &str) -> bool {

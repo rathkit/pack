@@ -2799,7 +2799,8 @@ impl<'a> Bundler<'a> {
         if key.is_some() {
             self.journal = Some(Vec::new());
         }
-        let mut scanner = Scanner { bundler: self, module, places: None, private_scopes: Vec::new(), private_refs: HashMap::new(), chain_members: HashSet::new(), call_callees: HashSet::new(), ast: &parsed.ast, semantic: &parsed.semantic, edits: Vec::new(), statement_starts: HashSet::new(), shorthand: HashSet::new(), skip: HashSet::new(), written: HashSet::new(), fn_depth: 0, async_ctx: Vec::new(), site_next: HashMap::new(), has_tla: false, needs_require: false, top_decl: None, in_wrapper: false, name_hint: None, shared_names: None, es5: Default::default() };
+        let defines = self.module_defines(module.id);
+        let mut scanner = Scanner { bundler: self, module, defines, places: None, private_scopes: Vec::new(), private_refs: HashMap::new(), chain_members: HashSet::new(), call_callees: HashSet::new(), ast: &parsed.ast, semantic: &parsed.semantic, edits: Vec::new(), statement_starts: HashSet::new(), shorthand: HashSet::new(), skip: HashSet::new(), written: HashSet::new(), fn_depth: 0, async_ctx: Vec::new(), site_next: HashMap::new(), has_tla: false, needs_require: false, top_decl: None, in_wrapper: false, name_hint: None, shared_names: None, es5: Default::default() };
         let code = if module.kind == ModuleKind::Esm && scanner.bundler.registry { scanner.scan_registry(id) } else if module.kind == ModuleKind::Esm { scanner.scan_esm(id) } else { scanner.scan_wrapped(id) };
         self.code.insert(id, code);
         if let (Some(salt), Some((temp_count, temps, errors, aliases, outer))) = (key, before) {
@@ -2836,7 +2837,23 @@ impl<'a> Bundler<'a> {
         let mut params: Vec<(usize, String)> = self.param_consts.iter().filter(|((m, _), _)| *m == module.id).map(|((_, s), c)| (s.index(), format!("{c:?}"))).collect();
         params.sort_unstable();
         params.hash(&mut h);
+        // And the properties of objects nothing writes that it reads as values.
+        if self.shaken.frozen_folded {
+            if let Some(table) = self.linked.frozen(self.graph).of(module.id) {
+                let mut frozen: Vec<(usize, Vec<(&String, String)>)> = table.iter().map(|(s, props)| { let mut p: Vec<(&String, String)> = props.iter().map(|(k, v)| (k, format!("{v:?}"))).collect(); p.sort_unstable(); (s.index(), p) }).collect();
+                frozen.sort_unstable();
+                frozen.hash(&mut h);
+            }
+        }
         h.finish()
+    }
+
+    /// The build's definitions, with the properties of objects that nothing writes in `module` when the bundle folds them.
+    fn module_defines(&self, module: ModuleId) -> crate::define::Defines {
+        match self.shaken.frozen_folded.then(|| self.linked.frozen(self.graph).of(module)).flatten() {
+            Some(table) => self.graph.defines.with_frozen(table),
+            None => self.graph.defines.clone(),
+        }
     }
 
     /// The settings of the build that every scan depends on.
@@ -2908,6 +2925,8 @@ struct Scanner<'b, 'a> {
     call_callees: HashSet<NodeId>,
     ast: &'a Ast,
     semantic: &'a Semantic,
+    /// The build's definitions, and for this module the properties of objects that nothing writes.
+    defines: crate::define::Defines,
     edits: Vec<Edit>,
     /// Identifiers written as `{ a }` in an object, which become `{ a: renamed }`.
     /// Where the expression statements of a statement list (a block, a function body, a case, the program) begin.
@@ -3423,15 +3442,30 @@ impl<'a> Scanner<'_, 'a> {
                 }
             }
         }
-        if !self.bundler.graph.defines.is_empty() {
+        if !self.defines.is_empty() {
+            // `config.debug` where nothing writes `config` is the value that property has.
+            if matches!(ast[node].kind, NodeKind::Member { .. }) && !self.written.contains(&node) {
+                let text = match self.defines.frozen_value(ast, self.semantic, node) {
+                    Some(crate::define::Const::Null) => Some("null"),
+                    Some(crate::define::Const::Bool(true)) => Some("true"),
+                    Some(crate::define::Const::Bool(false)) => Some("false"),
+                    // `undefined` is a name that code can declare, and `void 0.x` is not `(void 0).x`.
+                    Some(crate::define::Const::Undefined) => Some("(void 0)"),
+                    _ => None,
+                };
+                if let Some(text) = text {
+                    self.push_ident_edit(node, vec![Piece::Text(text.to_string())]);
+                    return;
+                }
+            }
             if matches!(ast[node].kind, NodeKind::Ident(_) | NodeKind::Member { .. } | NodeKind::ImportMeta) && !self.written.contains(&node) {
-                if let Some(define) = self.bundler.graph.defines.lookup(ast, self.semantic, node) {
+                if let Some(define) = self.defines.lookup(ast, self.semantic, node) {
                     let text = define.replacement();
                     self.push_ident_edit(node, vec![Piece::Text(text)]);
                     return;
                 }
             }
-            if let Some(dead) = self.bundler.graph.defines.dead_branch(ast, self.semantic, node) {
+            if let Some(dead) = self.defines.dead_branch(ast, self.semantic, node) {
                 self.push(dead.node, vec![Piece::Text(dead.replacement.to_string())]);
                 let mut children = Vec::new();
                 ast.for_each_child(node, |c| children.push(c));

@@ -76,7 +76,7 @@ impl Purity<'_> {
                 Some(value) => {
                     let (live, dead) = if value.truthy() { (Some(cons), alt) } else { (alt, Some(cons)) };
                     // A `var` in the branch that never runs is still declared.
-                    !dead.is_some_and(|d| crate::compress::declares_var(ast, d)) && live.is_none_or(|l| self.statement_is_pure(l))
+                    !dead.is_some_and(|d| crate::compress::var_escapes(ast, self.semantic, d)) && live.is_none_or(|l| self.statement_is_pure(l))
                 }
                 None => false,
             },

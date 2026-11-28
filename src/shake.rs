@@ -72,6 +72,8 @@ pub struct Shaken {
     pub modules: Vec<ModuleShake>,
     /// The enum members the bundle replaces by their values; the parts do not use the enums for them.
     pub enums: EnumTable,
+    /// The reads of properties of objects that nothing writes were folded into their values (see `frozen`): the bundle writes them so.
+    pub frozen_folded: bool,
 }
 
 impl Shaken {
@@ -107,7 +109,7 @@ pub fn keep_everything(graph: &Graph) -> Shaken {
         module.included = true;
         module.live = vec![true; module.parts.len()];
     }
-    Shaken { modules, enums: EnumTable::empty() }
+    Shaken { modules, enums: EnumTable::empty(), frozen_folded: false }
 }
 
 /// Decides what to keep, starting from the graph's entry points.
@@ -143,7 +145,7 @@ pub fn shake_entries(graph: &Graph, linked: &Linked, entry_exports: bool) -> Sha
     for module in &mut modules {
         module.demand_known = true;
     }
-    Shaken { modules, enums }
+    Shaken { modules, enums, frozen_folded: true }
 }
 
 /// For each module-level symbol of a module, the parts that declare it.
@@ -497,7 +499,9 @@ fn build_parts(graph: &Graph, id: ModuleId, enums: Option<(&EnumTable, &Linked)>
     let (ModuleKind::Esm, Some(parsed)) = (module.kind, module.parsed.as_ref()) else { return ModuleShake::default() };
     use crate::ast::NodeKind;
     let (ast, semantic) = (&parsed.ast, &parsed.semantic);
-    let defines = Some(&graph.defines).filter(|d| !d.is_empty());
+    // Objects that nothing writes have the values of their properties here too: a branch they decide does not use what only it uses.
+    let own_defines = enums.map(|(_, l)| l.frozen(graph)).and_then(|f| f.of(id)).map(|table| graph.defines.with_frozen(table));
+    let defines = own_defines.as_ref().or(Some(&graph.defines)).filter(|d| !d.is_empty());
     let root = semantic.root_scope();
     let NodeKind::Program(body) = ast[ast.root].kind else { return ModuleShake::default() };
     let mut functions = HashMap::new();

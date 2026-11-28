@@ -1221,7 +1221,7 @@ fn constant_test(parsed: &parser::Parsed, n: NodeId) -> Option<bool> {
 fn removable(parsed: &parser::Parsed, n: NodeId) -> bool {
     match parsed.ast[n].kind {
         NodeKind::Empty => true,
-        NodeKind::If { test, cons, alt: None } => constant_test(parsed, test) == Some(false) && !crate::compress::declares_var(&parsed.ast, cons),
+        NodeKind::If { test, cons, alt: None } => constant_test(parsed, test) == Some(false) && !crate::compress::var_escapes(&parsed.ast, &parsed.semantic, cons),
         _ => false,
     }
 }
@@ -2339,8 +2339,12 @@ mod tests {
         assert_eq!(syntax("if (false) a(); else b()"), "b()");
         assert_eq!(syntax("x(); if (false) { a() } y()"), "x();y()");
         assert_eq!(syntax("if (c) if (false) a()"), "if(c);");
-        // A `var` in the dropped code still declares its name.
-        assert_eq!(syntax("if (false) { var v = 1 }"), "if(!1)var v=1");
+        // A `var` in the dropped code still declares its name, when anything else mentions the name.
+        assert_eq!(syntax("if (false) { var v = 1 } f(v)"), "if(!1)var v=1;f(v)");
+        assert_eq!(syntax("function g() { if (false) { var v = 1 } return v }"), "function g(){if(!1)var v=1;return v}");
+        // And when nothing else does, it goes with the code.
+        assert_eq!(syntax("if (false) { var v = 1 }"), "");
+        assert_eq!(syntax("function g(a) { if (false) { var v = a; for (var i = 0; i < v; i++) h(i) } return 1 }"), "function g(a){return 1}");
         assert_eq!(syntax("x = true ? a : b; y = false ? a : b"), "x=a;y=b");
         assert_eq!(syntax("function f() { if (a) if (true) return 1; else return 2; else return 3 }"), "function f(){if(a)return 1;else return 3}");
         assert_eq!(syntax("function f() { return undefined; return void 0 }"), "function f(){return;return}");

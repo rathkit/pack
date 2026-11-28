@@ -22,6 +22,7 @@ about stability.
 
 - The minifier cache is on by default (`RATHKIT_CACHE=off`, `0`, `false` or `no` turns it off). A warm minified build writes the same bytes as a cold one and is 9% to 32% faster on the eight workloads measured; the first build, which fills the cache, takes 0% to 13% longer. It writes under `$XDG_CACHE_HOME/rathkit/minify` (or `RATHKIT_CACHE_DIR`) and keeps the folder under 512 MB.
 - The minifier leaves out names declared inside a function that nothing reads (a `const`, `let` or `var` with an initializer that has no effect, a function, a class), and then the names only those read. Vue 94,887 to 94,568 bytes and TypeScript 3,545,980 to 3,545,815 on the benchmark workloads; the other thirteen are unchanged.
+- A property of an object that no code in the bundle writes, passes on, spreads or exports is the value it was given: `config.debug` is `false` where `config = { debug: false }` is only read. The branches it decides go, with what only they use (RxJS 24,480 to 24,247 bytes). A `var` in code that never runs goes with that code when nothing else mentions the name (24,247 to 24,112).
 
 ## 0.5.0-beta.0 - 2026-11-24
 

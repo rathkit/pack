@@ -47,9 +47,16 @@ pub struct Linked {
     /// Indexed by module: each import binding's symbol and where it leads.
     pub imports: Vec<HashMap<SymbolId, Binding>>,
     pub diagnostics: Vec<Diagnostic>,
+    /// The objects nothing writes (`frozen`), worked out the first time something asks.
+    frozen: std::sync::OnceLock<crate::frozen::Frozen>,
 }
 
 impl Linked {
+    /// The objects of the bundle that nothing writes, with the values of their properties that are known.
+    pub fn frozen(&self, graph: &Graph) -> &crate::frozen::Frozen {
+        self.frozen.get_or_init(|| crate::frozen::analyze(graph, self))
+    }
+
     pub fn has_errors(&self) -> bool {
         self.diagnostics.iter().any(|d| d.severity == Severity::Error)
     }
@@ -70,7 +77,7 @@ enum Lookup {
 /// Resolves every import and re-export in the graph.
 pub fn link(graph: &Graph) -> Linked {
     let linker = Linker { graph };
-    let mut linked = Linked { imports: Vec::with_capacity(graph.modules.len()), diagnostics: Vec::new() };
+    let mut linked = Linked { imports: Vec::with_capacity(graph.modules.len()), diagnostics: Vec::new(), frozen: Default::default() };
     for module in &graph.modules {
         let mut bindings = HashMap::new();
         let record = &module.record;
