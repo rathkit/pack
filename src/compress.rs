@@ -203,6 +203,133 @@ fn self_precedence_ok(ast: &Ast, left: NodeId) -> bool {
     !matches!(ast[left].kind, NodeKind::Sequence(_) | NodeKind::Assign { .. } | NodeKind::Conditional { .. } | NodeKind::Yield(_) | NodeKind::Function { .. })
 }
 
+/// What `unused_locals` finds: the declarators and the function and class statements that go.
+#[derive(Default)]
+pub(crate) struct Unused {
+    pub declarators: crate::fxhash::FastSet<NodeId>,
+    pub statements: crate::fxhash::FastSet<NodeId>,
+}
+
+/// Names declared inside a function that nothing reads: `const t = 'x';` that no code uses, a helper function nobody calls, a class never
+/// made. They go when what they hold has no effect (the rules of `purity`), and what they alone read can go with them: the reads are counted
+/// again without the removed code until no more names fall out.
+///
+/// Only names of a function or block scope are considered, never the top of a program: those are the shaker's, because other modules of the
+/// bundle may read them. A name that is read, written after its declaration (`let q; q = 3;`), reached by a `with` or an `eval`, or
+/// declared twice is left alone. Only a statement in a list (a block, a `case`) can go: `if (a) var b = 1;` is not one.
+pub(crate) fn unused_locals(source: &str, ast: &Ast, sem: &Semantic) -> Unused {
+    use crate::semantic::{SymbolId, SymbolKind, scope_flags, symbol_flags};
+    struct Item {
+        stmt: NodeId,
+        /// The declarator, for a `var`/`let`/`const`; `None` for a function or class statement.
+        declarator: Option<NodeId>,
+        sym: SymbolId,
+        /// Where the code that goes with it is (the initializer, or the whole function or class).
+        code: NodeId,
+        writes: u32,
+        gone: bool,
+    }
+    let root = sem.root_scope();
+    let purity = crate::purity::Purity { source, ast, semantic: sem, defines: None, pure_calls: &[], functions: None, consts: None, world: None, depth: std::cell::Cell::new(0) };
+    let mut items: Vec<Item> = Vec::new();
+    let mut stack = vec![ast.root];
+    while let Some(n) = stack.pop() {
+        ast.for_each_child(n, |c| stack.push(c));
+        let list = match ast[n].kind {
+            NodeKind::Block(list) => list,
+            NodeKind::Case { body, .. } => body,
+            _ => continue,
+        };
+        for &stmt in ast.list(list) {
+            match ast[stmt].kind {
+                NodeKind::VarDecl { kind: VarKind::Var | VarKind::Let | VarKind::Const, decls } => {
+                    for &d in ast.list(decls) {
+                        let NodeKind::VarDeclarator { target, init } = ast[d].kind else { continue };
+                        if !matches!(ast[target].kind, NodeKind::BindingIdent(_)) || init.is_some_and(|i| !purity.expr_is_pure(i)) {
+                            continue;
+                        }
+                        let Some(sym) = sem.symbol_of(target) else { continue };
+                        if !matches!(sem.symbol(sym).kind, SymbolKind::Var | SymbolKind::Let | SymbolKind::Const) {
+                            continue;
+                        }
+                        items.push(Item { stmt, declarator: Some(d), sym, code: init.unwrap_or(d), writes: init.is_some() as u32, gone: false });
+                    }
+                }
+                NodeKind::Function { name: Some(name), .. } | NodeKind::Class { name: Some(name), .. } => {
+                    let Some(sym) = sem.symbol_of(name) else { continue };
+                    let symbol = sem.symbol(sym);
+                    let kind_ok = match ast[stmt].kind {
+                        NodeKind::Class { .. } => symbol.kind == SymbolKind::Class,
+                        _ => matches!(symbol.kind, SymbolKind::Function | SymbolKind::LexicalFunction | SymbolKind::BlockFunction) && symbol.alias.is_none(),
+                    };
+                    if kind_ok && purity.statement_is_pure(stmt) {
+                        items.push(Item { stmt, declarator: None, sym, code: stmt, writes: 0, gone: false });
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = Unused::default();
+    if items.is_empty() {
+        return out;
+    }
+    items.sort_by_key(|i| (ast[i.code].span.start, std::cmp::Reverse(ast[i.code].span.end)));
+    let mut reads: crate::fxhash::FastMap<SymbolId, u32> = Default::default();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for k in 0..items.len() {
+            if items[k].gone {
+                continue;
+            }
+            let symbol = sem.symbol(items[k].sym);
+            let left = reads.get(&items[k].sym).copied().unwrap_or(symbol.reads);
+            if symbol.scope == root || left != 0 || symbol.writes != items[k].writes || symbol.flags & (symbol_flags::DYNAMIC | symbol_flags::EXPORTED) != 0 || sem.scope(symbol.scope).flags & scope_flags::HAS_EVAL != 0 {
+                continue;
+            }
+            items[k].gone = true;
+            changed = true;
+            // What it read is read no more. A name that is only written there is not counted as read.
+            let mut inner = vec![items[k].code];
+            let mut targets: crate::fxhash::FastSet<NodeId> = Default::default();
+            let (from, to) = (ast[items[k].code].span.start, ast[items[k].code].span.end);
+            while let Some(n) = inner.pop() {
+                if let NodeKind::Assign { target, .. } = ast[n].kind {
+                    targets.insert(target);
+                }
+                if matches!(ast[n].kind, NodeKind::Ident(_)) && !targets.contains(&n) {
+                    if let Some(sym) = sem.symbol_of(n) {
+                        let r = reads.entry(sym).or_insert(sem.symbol(sym).reads);
+                        *r = r.saturating_sub(1);
+                    }
+                }
+                ast.for_each_child(n, |c| inner.push(c));
+            }
+            // Items inside the code that went are gone with it (their reads were counted above).
+            for other in items.iter_mut().skip(k + 1) {
+                if ast[other.code].span.start >= to {
+                    break;
+                }
+                if ast[other.code].span.start >= from && ast[other.code].span.end <= to {
+                    other.gone = true;
+                }
+            }
+        }
+    }
+    for item in items.iter().filter(|i| i.gone) {
+        match item.declarator {
+            Some(d) => {
+                out.declarators.insert(d);
+            }
+            None => {
+                out.statements.insert(item.stmt);
+            }
+        }
+    }
+    out
+}
+
 pub(crate) fn plan(source: &str, ast: &Ast, sem: &Semantic, tokens: &[Token], barriers: &[u32], legacy: bool, shared_top: bool) -> Plan {
     let mut ctx = Ctx { legacy, shared_top, source, ast, sem, tokens, barriers, parent: vec![None; ast.node_count() + 1], actions: vec![Action::Keep; tokens.len()], locked: vec![false; tokens.len()], dead: Vec::new(), folded: Vec::new(), kept_semi: Vec::new(), done: Default::default(), visited: Default::default(), as_expr: Default::default(), inlined: Default::default(), seq_returns: Default::default(), closers: vec![false; tokens.len()], listed: Default::default(), joined_ifs: Default::default(), consumed: Default::default(), removed: Default::default(), texts: Vec::new(), text_index: Default::default() };
     let mut order = Vec::new();
@@ -214,7 +341,12 @@ pub(crate) fn plan(source: &str, ast: &Ast, sem: &Semantic, tokens: &[Token], ba
             stack.push(c);
         });
     }
-    ctx.inline_constants();
+    // Both leave out declarators, so what goes is decided before any of it is cut: two cuts in one statement would overlap.
+    let mut wanted = ctx.inline_constants();
+    wanted.extend(ctx.remove_unused_locals());
+    if !wanted.is_empty() {
+        ctx.drop_declarators(&wanted);
+    }
     for &n in &order {
         ctx.visit(n);
     }
@@ -307,11 +439,11 @@ struct Ctx<'a> {
 
 impl Ctx<'_> {
     /// `const k = 5; f(k);` is `f(5);`: see `inlinable_constants`. The use is written as the literal and the declarator goes.
-    fn inline_constants(&mut self) {
+    fn inline_constants(&mut self) -> crate::fxhash::FastSet<NodeId> {
         let (ast, tokens) = (self.ast, self.tokens);
         let found = inlinable_constants(ast, self.sem, self.shared_top);
         if found.is_empty() {
-            return;
+            return Default::default();
         }
         let mut by_decl: crate::fxhash::FastMap<NodeId, Vec<NodeId>> = Default::default();
         let mut ordered: Vec<(NodeId, NodeId)> = found.into_iter().collect();
@@ -334,20 +466,37 @@ impl Ctx<'_> {
             self.force_text(at, &better);
             kept.push((declarator, usage));
         }
-        // Group by statement (a declaration of several names) to leave out whole declarators with their commas.
+        let wanted: crate::fxhash::FastSet<NodeId> = kept.iter().map(|&(d, _)| d).collect();
+        let _ = &mut by_decl;
+        wanted
+    }
+
+    /// Names declared inside a function that nothing reads: see `unused_locals`.
+    fn remove_unused_locals(&mut self) -> crate::fxhash::FastSet<NodeId> {
+        let ast = self.ast;
+        let unused = unused_locals(self.source, ast, self.sem);
+        for &stmt in &unused.statements {
+            let (from, to) = (self.first_tok(ast[stmt].span.start), self.last_tok(ast[stmt].span.end) + 1);
+            self.dead.push((from, to));
+            self.removed.insert(stmt);
+        }
+        unused.declarators
+    }
+
+    /// Leave out the declarators in `wanted`: a statement whose declarators all go is left out whole, and in one that keeps some the
+    /// declarators that go are cut with their commas.
+    fn drop_declarators(&mut self, wanted: &crate::fxhash::FastSet<NodeId>) {
+        let ast = self.ast;
         let mut stack = vec![ast.root];
         let mut statements: Vec<NodeId> = Vec::new();
-        let wanted: crate::fxhash::FastSet<NodeId> = kept.iter().map(|&(d, _)| d).collect();
         while let Some(n) = stack.pop() {
             if let NodeKind::VarDecl { decls, .. } = ast[n].kind {
                 if ast.list(decls).iter().any(|d| wanted.contains(d)) {
                     statements.push(n);
                 }
-                continue;
             }
             ast.for_each_child(n, |c| stack.push(c));
         }
-        let _ = &mut by_decl;
         for stmt in statements {
             let NodeKind::VarDecl { decls, .. } = ast[stmt].kind else { continue };
             let list = ast.list(decls);
