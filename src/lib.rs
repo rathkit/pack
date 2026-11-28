@@ -28,6 +28,7 @@ pub mod literal;
 pub mod loader;
 pub mod analyze;
 pub mod metafile;
+pub mod frozen;
 pub mod paramconst;
 pub mod module;
 pub mod par;

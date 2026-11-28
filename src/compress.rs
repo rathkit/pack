@@ -51,6 +51,8 @@ pub(crate) struct Plan {
     pub texts: Vec<String>,
     /// Tokens that a `)` is written in front of (the end of a statement that was put in parentheses).
     pub closers: Vec<bool>,
+    /// The names declared inside functions that the plan leaves out.
+    pub unused: Unused,
 }
 
 /// `barriers` are source offsets (in order) where declarations on either side are not merged.
@@ -120,21 +122,12 @@ pub(crate) fn statement_leaves(ast: &Ast, s: NodeId) -> bool {
 ///
 /// `shared_top`: the text is a piece of a bundle, so what it declares at its top level may be read by the other pieces, and the one read
 /// this text holds is not all of them. Such names are left alone.
-pub(crate) fn inlinable_constants(ast: &Ast, sem: &Semantic, shared_top: bool) -> crate::fxhash::FastMap<NodeId, NodeId> {
+pub(crate) fn inlinable_constants(ast: &Ast, sem: &Semantic, tree: &Walk, shared_top: bool) -> crate::fxhash::FastMap<NodeId, NodeId> {
     use crate::semantic::{ScopeKind, SymbolKind, scope_flags, symbol_flags};
-    let mut parent: Vec<Option<NodeId>> = vec![None; ast.node_count() + 1];
-    let mut order = Vec::new();
-    let mut stack = vec![ast.root];
-    while let Some(n) = stack.pop() {
-        order.push(n);
-        ast.for_each_child(n, |c| {
-            parent[c.index()] = Some(n);
-            stack.push(c);
-        });
-    }
+    let (parent, order) = (&tree.parent, &tree.order);
     let root = sem.root_scope();
     let mut candidates: crate::fxhash::FastMap<crate::semantic::SymbolId, NodeId> = Default::default();
-    for &n in &order {
+    for &n in order.iter() {
         let NodeKind::VarDeclarator { target, init: Some(init) } = ast[n].kind else { continue };
         if !matches!(ast[target].kind, NodeKind::BindingIdent(_)) || !matches!(ast[init].kind, NodeKind::Num(_) | NodeKind::Str(_)) || ast[init].has(flags::PARENTHESIZED) {
             continue;
@@ -168,7 +161,7 @@ pub(crate) fn inlinable_constants(ast: &Ast, sem: &Semantic, shared_top: bool) -
     if candidates.is_empty() {
         return out;
     }
-    for &n in &order {
+    for &n in order.iter() {
         if !matches!(ast[n].kind, NodeKind::Ident(_)) {
             continue;
         }
@@ -176,6 +169,31 @@ pub(crate) fn inlinable_constants(ast: &Ast, sem: &Semantic, shared_top: bool) -
         let NodeKind::VarDeclarator { init: Some(init), .. } = ast[declarator].kind else { continue };
         if ast[n].span.start < ast[declarator].span.end || ast[n].has(flags::PARENTHESIZED) {
             continue;
+        }
+        // A `var` read in a function declaration: the function is there from the start and may run before the declaration does.
+        if sem.symbol_of(n).is_some_and(|sym| sem.symbol(sym).kind == SymbolKind::Var) {
+            let mut holder = parent[declarator.index()];
+            while let Some(p) = holder {
+                if matches!(ast[p].kind, NodeKind::Function { .. }) {
+                    break;
+                }
+                holder = parent[p.index()];
+            }
+            let mut up = parent[n.index()];
+            let mut hoisted = false;
+            while let Some(p) = up {
+                if Some(p) == holder {
+                    break;
+                }
+                if matches!(ast[p].kind, NodeKind::Function { .. }) && ast[p].has(flags::DECL) {
+                    hoisted = true;
+                    break;
+                }
+                up = parent[p.index()];
+            }
+            if hoisted {
+                continue;
+            }
         }
         let ok = parent[n.index()].is_some_and(|p| match ast[p].kind {
             NodeKind::ExportSpecifier { .. } | NodeKind::ImportSpecifier { .. } => false,
@@ -203,38 +221,144 @@ fn self_precedence_ok(ast: &Ast, left: NodeId) -> bool {
     !matches!(ast[left].kind, NodeKind::Sequence(_) | NodeKind::Assign { .. } | NodeKind::Conditional { .. } | NodeKind::Yield(_) | NodeKind::Function { .. })
 }
 
+/// The nodes of a tree in the order a walk finds them, and the node each one is in.
+pub(crate) struct Walk {
+    pub parent: Vec<Option<NodeId>>,
+    pub order: Vec<NodeId>,
+}
+
+pub(crate) fn walk(ast: &Ast) -> Walk {
+    let mut parent: Vec<Option<NodeId>> = vec![None; ast.node_count() + 1];
+    let mut order = Vec::with_capacity(ast.node_count());
+    let mut stack = vec![ast.root];
+    while let Some(n) = stack.pop() {
+        order.push(n);
+        ast.for_each_child(n, |c| {
+            parent[c.index()] = Some(n);
+            stack.push(c);
+        });
+    }
+    Walk { parent, order }
+}
+
+/// Names inside a function that hold one value for as long as the function runs, and each read of one: `const mode = 'fast'` and the reads
+/// of `mode` that come after it. Only what the function's own statements decide is looked at: the declaration is a statement of the function
+/// body, the name is written only by it, `eval` and `with` cannot reach it, and the value is one that folds (a literal, or what the names
+/// before it make). A read in a function declaration inside (it could run before the declaration does), or before the declaration, is not
+/// listed. The result is the values for the decisions of the minifier (`if (mode === 'slow')`); the reads stay as they are written.
+pub(crate) fn local_values(ast: &Ast, sem: &Semantic, tree: &Walk) -> crate::fxhash::FastMap<NodeId, crate::define::Const> {
+    use crate::semantic::{SymbolId, SymbolKind, scope_flags, symbol_flags};
+    let (parent, order) = (&tree.parent, &tree.order);
+    let root = sem.root_scope();
+    let mut declarators: Vec<(NodeId, NodeId, SymbolId, NodeId)> = Vec::new();
+    for &n in order.iter() {
+        let NodeKind::VarDeclarator { target, init: Some(init) } = ast[n].kind else { continue };
+        if !matches!(ast[target].kind, NodeKind::BindingIdent(_)) {
+            continue;
+        }
+        let Some(decl) = parent[n.index()] else { continue };
+        let NodeKind::VarDecl { .. } = ast[decl].kind else { continue };
+        // A statement of a function body: whatever comes after it in the text runs after it.
+        let Some(block) = parent[decl.index()] else { continue };
+        let Some(function) = parent[block.index()] else { continue };
+        if !matches!(ast[block].kind, NodeKind::Block(_)) || !matches!(ast[function].kind, NodeKind::Function { body, .. } if body == block) {
+            continue;
+        }
+        let Some(sym) = sem.symbol_of(target) else { continue };
+        let symbol = sem.symbol(sym);
+        if symbol.scope == root || !matches!(symbol.kind, SymbolKind::Var | SymbolKind::Let | SymbolKind::Const) || symbol.writes != 1 || symbol.flags & symbol_flags::DYNAMIC != 0 || sem.scope(symbol.scope).flags & scope_flags::HAS_EVAL != 0 {
+            continue;
+        }
+        declarators.push((n, init, sym, function));
+    }
+    let mut values: crate::fxhash::FastMap<NodeId, crate::define::Const> = Default::default();
+    if declarators.is_empty() {
+        return values;
+    }
+    declarators.sort_by_key(|&(n, ..)| ast[n].span.start);
+    // The value of each name that has one, in the order of the text (so that a name can be made from the ones before it).
+    // The reads of the names whose initializers fold, found in one pass over the tree once the names are known.
+    let mut wanted: crate::fxhash::FastSet<SymbolId> = Default::default();
+    for &(_, _, sym, _) in &declarators {
+        wanted.insert(sym);
+    }
+    let mut by_symbol: crate::fxhash::FastMap<SymbolId, Vec<NodeId>> = Default::default();
+    for &r in order.iter() {
+        if matches!(ast[r].kind, NodeKind::Ident(_)) && !ast[r].has(flags::ASSIGNED) {
+            if let Some(sym) = sem.symbol_of(r).filter(|s| wanted.contains(s)) {
+                by_symbol.entry(sym).or_default().push(r);
+            }
+        }
+    }
+    for (declarator, init, sym, function) in declarators {
+        // What the value is made of: names that have values are only looked up when the initializer has a name in it.
+        let mut has_name = false;
+        let mut sub = vec![init];
+        while let Some(w) = sub.pop() {
+            has_name |= matches!(ast[w].kind, NodeKind::Ident(_));
+            ast.for_each_child(w, |c| sub.push(c));
+        }
+        let defines = if has_name { crate::define::Defines::default().with_idents(std::sync::Arc::new(values.clone())) } else { crate::define::Defines::default() };
+        let Some(value) = defines.fold(ast, sem, init) else { continue };
+        let end = ast[declarator].span.end;
+        for &r in by_symbol.get(&sym).map(|v| v.as_slice()).unwrap_or(&[]) {
+            if ast[r].span.start < end {
+                continue;
+            }
+            // Up to the function that holds the declaration: a function declaration on the way may be called before the declaration runs.
+            let mut up = parent[r.index()];
+            let mut hoisted = false;
+            while let Some(p) = up {
+                if p == function {
+                    break;
+                }
+                if matches!(ast[p].kind, NodeKind::Function { .. }) && ast[p].has(flags::DECL) {
+                    hoisted = true;
+                    break;
+                }
+                up = parent[p.index()];
+            }
+            if !hoisted && up == Some(function) {
+                values.insert(r, value.clone());
+            }
+        }
+    }
+    values
+}
+
 /// What `unused_locals` finds: the declarators and the function and class statements that go.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct Unused {
     pub declarators: crate::fxhash::FastSet<NodeId>,
     pub statements: crate::fxhash::FastSet<NodeId>,
 }
 
-/// Names declared inside a function that nothing reads: `const t = 'x';` that no code uses, a helper function nobody calls, a class never
+/// Names declared inside a function that nothing reads (`unused_items`, then `unused_from`): `const t = 'x';` that no code uses, a helper function nobody calls, a class never
 /// made. They go when what they hold has no effect (the rules of `purity`), and what they alone read can go with them: the reads are counted
 /// again without the removed code until no more names fall out.
 ///
 /// Only names of a function or block scope are considered, never the top of a program: those are the shaker's, because other modules of the
 /// bundle may read them. A name that is read, written after its declaration (`let q; q = 3;`), reached by a `with` or an `eval`, or
 /// declared twice is left alone. Only a statement in a list (a block, a `case`) can go: `if (a) var b = 1;` is not one.
-pub(crate) fn unused_locals(source: &str, ast: &Ast, sem: &Semantic) -> Unused {
-    use crate::semantic::{SymbolId, SymbolKind, scope_flags, symbol_flags};
-    struct Item {
-        stmt: NodeId,
-        /// The declarator, for a `var`/`let`/`const`; `None` for a function or class statement.
-        declarator: Option<NodeId>,
-        sym: SymbolId,
-        /// Where the code that goes with it is (the initializer, or the whole function or class).
-        code: NodeId,
-        writes: u32,
-        gone: bool,
-    }
-    let root = sem.root_scope();
+/// A name inside a function that may go (see `unused_items`).
+#[derive(Clone)]
+pub(crate) struct Item {
+    stmt: NodeId,
+    /// The declarator, for a `var`/`let`/`const`; `None` for a function or class statement.
+    declarator: Option<NodeId>,
+    sym: crate::semantic::SymbolId,
+    /// Where the code that goes with it is (the initializer, or the whole function or class).
+    code: NodeId,
+    writes: u32,
+    gone: bool,
+}
+
+/// The names inside functions that could go when nothing reads them: found once, then asked about with `unused_from`.
+pub(crate) fn unused_items(source: &str, ast: &Ast, sem: &Semantic, tree: &Walk) -> Vec<Item> {
+    use crate::semantic::SymbolKind;
     let purity = crate::purity::Purity { source, ast, semantic: sem, defines: None, pure_calls: &[], functions: None, consts: None, world: None, depth: std::cell::Cell::new(0) };
     let mut items: Vec<Item> = Vec::new();
-    let mut stack = vec![ast.root];
-    while let Some(n) = stack.pop() {
-        ast.for_each_child(n, |c| stack.push(c));
+    for &n in &tree.order {
         let list = match ast[n].kind {
             NodeKind::Block(list) => list,
             NodeKind::Case { body, .. } => body,
@@ -270,11 +394,25 @@ pub(crate) fn unused_locals(source: &str, ast: &Ast, sem: &Semantic) -> Unused {
             }
         }
     }
+    items.sort_by_key(|i| (ast[i.code].span.start, std::cmp::Reverse(ast[i.code].span.end)));
+    items
+}
+
+/// Which of `items` go, when the reads in `gone` (a name read by code the minifier leaves out) are not counted.
+pub(crate) fn unused_from(items: &[Item], ast: &Ast, sem: &Semantic, gone: &crate::fxhash::FastSet<NodeId>) -> Unused {
+    use crate::semantic::{SymbolId, scope_flags, symbol_flags};
+    let root = sem.root_scope();
+    let mut items: Vec<Item> = items.to_vec();
+    let mut gone_reads: crate::fxhash::FastMap<SymbolId, u32> = Default::default();
+    for &n in gone {
+        if let Some(sym) = sem.symbol_of(n) {
+            *gone_reads.entry(sym).or_insert(0) += 1;
+        }
+    }
     let mut out = Unused::default();
     if items.is_empty() {
         return out;
     }
-    items.sort_by_key(|i| (ast[i.code].span.start, std::cmp::Reverse(ast[i.code].span.end)));
     let mut reads: crate::fxhash::FastMap<SymbolId, u32> = Default::default();
     let mut changed = true;
     while changed {
@@ -284,7 +422,7 @@ pub(crate) fn unused_locals(source: &str, ast: &Ast, sem: &Semantic) -> Unused {
                 continue;
             }
             let symbol = sem.symbol(items[k].sym);
-            let left = reads.get(&items[k].sym).copied().unwrap_or(symbol.reads);
+            let left = reads.get(&items[k].sym).copied().unwrap_or_else(|| symbol.reads.saturating_sub(gone_reads.get(&items[k].sym).copied().unwrap_or(0)));
             if symbol.scope == root || left != 0 || symbol.writes != items[k].writes || symbol.flags & (symbol_flags::DYNAMIC | symbol_flags::EXPORTED) != 0 || sem.scope(symbol.scope).flags & scope_flags::HAS_EVAL != 0 {
                 continue;
             }
@@ -298,9 +436,9 @@ pub(crate) fn unused_locals(source: &str, ast: &Ast, sem: &Semantic) -> Unused {
                 if let NodeKind::Assign { target, .. } = ast[n].kind {
                     targets.insert(target);
                 }
-                if matches!(ast[n].kind, NodeKind::Ident(_)) && !targets.contains(&n) {
+                if matches!(ast[n].kind, NodeKind::Ident(_)) && !targets.contains(&n) && !gone.contains(&n) {
                     if let Some(sym) = sem.symbol_of(n) {
-                        let r = reads.entry(sym).or_insert(sem.symbol(sym).reads);
+                        let r = reads.entry(sym).or_insert_with(|| sem.symbol(sym).reads.saturating_sub(gone_reads.get(&sym).copied().unwrap_or(0)));
                         *r = r.saturating_sub(1);
                     }
                 }
@@ -331,23 +469,40 @@ pub(crate) fn unused_locals(source: &str, ast: &Ast, sem: &Semantic) -> Unused {
 }
 
 pub(crate) fn plan(source: &str, ast: &Ast, sem: &Semantic, tokens: &[Token], barriers: &[u32], legacy: bool, shared_top: bool) -> Plan {
-    let mut ctx = Ctx { legacy, shared_top, source, ast, sem, tokens, barriers, parent: vec![None; ast.node_count() + 1], actions: vec![Action::Keep; tokens.len()], locked: vec![false; tokens.len()], dead: Vec::new(), folded: Vec::new(), kept_semi: Vec::new(), done: Default::default(), visited: Default::default(), as_expr: Default::default(), inlined: Default::default(), seq_returns: Default::default(), closers: vec![false; tokens.len()], listed: Default::default(), joined_ifs: Default::default(), consumed: Default::default(), removed: Default::default(), texts: Vec::new(), text_index: Default::default() };
-    let mut order = Vec::new();
-    let mut stack = vec![ast.root];
-    while let Some(n) = stack.pop() {
-        order.push(n);
-        ast.for_each_child(n, |c| {
-            ctx.parent[c.index()] = Some(n);
-            stack.push(c);
-        });
+    let tree = walk(ast);
+    let values = std::sync::Arc::new(local_values(ast, sem, &tree));
+    let items = unused_items(source, ast, sem, &tree);
+    let shared = Shared { tree: &tree, values: &values, items: &items };
+    let (first, late) = plan_with(source, ast, sem, tokens, barriers, legacy, shared_top, &shared, &Unused::default());
+    // Names that were read only by code the plan left out or folded (`const mode = 'fast'` and `if (mode === 'slow')`) are unused now: the
+    // plan is made again with them left out, because the rewrites around a declaration that goes (joined declarations) are decided with it.
+    match late {
+        Some(late) if late.declarators.len() + late.statements.len() > first.unused.declarators.len() + first.unused.statements.len() => plan_with(source, ast, sem, tokens, barriers, legacy, shared_top, &shared, &late).0,
+        _ => first,
     }
+}
+
+/// What every plan of one text needs.
+struct Shared<'a> {
+    tree: &'a Walk,
+    values: &'a std::sync::Arc<crate::fxhash::FastMap<NodeId, crate::define::Const>>,
+    items: &'a [Item],
+}
+
+/// The plan, and (for the first plan of a text) the names that would be unused once the reads the plan leaves out are not counted.
+#[allow(clippy::too_many_arguments)]
+fn plan_with(source: &str, ast: &Ast, sem: &Semantic, tokens: &[Token], barriers: &[u32], legacy: bool, shared_top: bool, shared: &Shared, extra: &Unused) -> (Plan, Option<Unused>) {
+    let mut ctx = Ctx { legacy, shared_top, defines: crate::define::Defines::default().with_idents(shared.values.clone()), source, ast, sem, tokens, barriers, parent: shared.tree.parent.clone(), actions: vec![Action::Keep; tokens.len()], locked: vec![false; tokens.len()], dead: Vec::new(), folded: Vec::new(), kept_semi: Vec::new(), done: Default::default(), visited: Default::default(), as_expr: Default::default(), inlined: Default::default(), seq_returns: Default::default(), closers: vec![false; tokens.len()], listed: Default::default(), joined_ifs: Default::default(), consumed: Default::default(), removed: Default::default(), texts: Vec::new(), text_index: Default::default() };
     // Both leave out declarators, so what goes is decided before any of it is cut: two cuts in one statement would overlap.
-    let mut wanted = ctx.inline_constants();
-    wanted.extend(ctx.remove_unused_locals());
+    let mut wanted = ctx.inline_constants(shared.tree);
+    let mut unused = unused_from(shared.items, ast, sem, &Default::default());
+    unused.declarators.extend(extra.declarators.iter().copied());
+    unused.statements.extend(extra.statements.iter().copied());
+    wanted.extend(ctx.remove_unused_locals(&unused));
     if !wanted.is_empty() {
         ctx.drop_declarators(&wanted);
     }
-    for &n in &order {
+    for &n in &shared.tree.order {
         ctx.visit(n);
     }
     // A `,` right before the `}`, `]` or `)` that closes a list is not needed. Not after a hole (`[a,,]` has two elements) or in `[,]`.
@@ -392,10 +547,26 @@ pub(crate) fn plan(source: &str, ast: &Ast, sem: &Semantic, tokens: &[Token], ba
             ctx.actions[i] = Action::KeptSemi;
         }
     }
-    Plan { actions: ctx.actions, interior, texts: ctx.texts, closers: ctx.closers }
+    // The reads the plan leaves out or writes as something else, of the names that could go.
+    let late = (extra.declarators.is_empty() && extra.statements.is_empty() && !shared.items.is_empty()).then(|| {
+        let symbols: crate::fxhash::FastSet<crate::semantic::SymbolId> = shared.items.iter().map(|i| i.sym).collect();
+        let mut gone: crate::fxhash::FastSet<NodeId> = Default::default();
+        for &n in &shared.tree.order {
+            if matches!(ast[n].kind, NodeKind::Ident(_)) && !ast[n].has(flags::ASSIGNED) && sem.symbol_of(n).is_some_and(|s| symbols.contains(&s)) {
+                let at = tokens.partition_point(|t| t.start < ast[n].span.start);
+                if at < tokens.len() && matches!(ctx.actions[at], Action::Skip | Action::Text(_)) {
+                    gone.insert(n);
+                }
+            }
+        }
+        unused_from(shared.items, ast, sem, &gone)
+    });
+    (Plan { actions: ctx.actions, interior, texts: ctx.texts, closers: ctx.closers, unused }, late)
 }
 
 struct Ctx<'a> {
+    /// What decides a condition: nothing the build defined, and the names that have one value inside a function (`local_values`).
+    defines: crate::define::Defines,
     /// The output is es5.
     legacy: bool,
     source: &'a str,
@@ -439,9 +610,9 @@ struct Ctx<'a> {
 
 impl Ctx<'_> {
     /// `const k = 5; f(k);` is `f(5);`: see `inlinable_constants`. The use is written as the literal and the declarator goes.
-    fn inline_constants(&mut self) -> crate::fxhash::FastSet<NodeId> {
+    fn inline_constants(&mut self, tree: &Walk) -> crate::fxhash::FastSet<NodeId> {
         let (ast, tokens) = (self.ast, self.tokens);
-        let found = inlinable_constants(ast, self.sem, self.shared_top);
+        let found = inlinable_constants(ast, self.sem, tree, self.shared_top);
         if found.is_empty() {
             return Default::default();
         }
@@ -471,32 +642,24 @@ impl Ctx<'_> {
         wanted
     }
 
-    /// Names declared inside a function that nothing reads: see `unused_locals`.
-    fn remove_unused_locals(&mut self) -> crate::fxhash::FastSet<NodeId> {
+    /// Names declared inside a function that nothing reads: see `unused_items`.
+    fn remove_unused_locals(&mut self, unused: &Unused) -> crate::fxhash::FastSet<NodeId> {
         let ast = self.ast;
-        let unused = unused_locals(self.source, ast, self.sem);
         for &stmt in &unused.statements {
             let (from, to) = (self.first_tok(ast[stmt].span.start), self.last_tok(ast[stmt].span.end) + 1);
             self.dead.push((from, to));
             self.removed.insert(stmt);
         }
-        unused.declarators
+        unused.declarators.clone()
     }
 
     /// Leave out the declarators in `wanted`: a statement whose declarators all go is left out whole, and in one that keeps some the
     /// declarators that go are cut with their commas.
     fn drop_declarators(&mut self, wanted: &crate::fxhash::FastSet<NodeId>) {
         let ast = self.ast;
-        let mut stack = vec![ast.root];
-        let mut statements: Vec<NodeId> = Vec::new();
-        while let Some(n) = stack.pop() {
-            if let NodeKind::VarDecl { decls, .. } = ast[n].kind {
-                if ast.list(decls).iter().any(|d| wanted.contains(d)) {
-                    statements.push(n);
-                }
-            }
-            ast.for_each_child(n, |c| stack.push(c));
-        }
+        let mut statements: Vec<NodeId> = wanted.iter().filter_map(|d| self.parent[d.index()]).filter(|&p| matches!(ast[p].kind, NodeKind::VarDecl { .. })).collect();
+        statements.sort_unstable_by_key(|s| s.index());
+        statements.dedup();
         for stmt in statements {
             let NodeKind::VarDecl { decls, .. } = ast[stmt].kind else { continue };
             let list = ast.list(decls);
@@ -611,7 +774,7 @@ impl Ctx<'_> {
         if matches!(node.kind, NodeKind::Template { .. }) && self.parent[n.index()].is_some_and(|p| matches!(ast[p].kind, NodeKind::TaggedTemplate { .. })) {
             return false;
         }
-        let Some(value) = crate::define::Defines::default().fold(ast, self.sem, n) else { return false };
+        let Some(value) = self.defines.fold(ast, self.sem, n) else { return false };
         use crate::define::Const;
         let text = match value {
             Const::Num(v) if v.is_finite() && v.is_sign_negative() && v != 0.0 => format!("-{}", shortest(-v)),
@@ -654,7 +817,7 @@ impl Ctx<'_> {
         if self.folded.iter().any(|&(a, b)| a <= first_token && last_token <= b) {
             return false;
         }
-        let Some(c) = crate::define::Defines::default().fold(ast, self.sem, left) else { return false };
+        let Some(c) = self.defines.fold(ast, self.sem, left) else { return false };
         // Where the value is used as a reference (`this` of a call, what `delete` deletes), the operand alone would mean something else.
         if let Some(parent) = self.parent[n.index()] {
             match ast[parent].kind {
@@ -745,6 +908,11 @@ impl Ctx<'_> {
                 if self.is(i, Punct::Semi) {
                     self.dead.push((i, i + 1));
                 }
+            }
+            // A statement that is a value (`null;`, what `null && f()` came to): nothing runs, so it is not written.
+            NodeKind::ExprStmt(_) if self.is_void_statement(n) => {
+                let (from, to) = (self.first_tok(node.span.start), self.last_tok(node.span.end) + 1);
+                self.dead.push((from, to));
             }
             NodeKind::Num(_) => {
                 let i = self.first_tok(node.span.start);
@@ -903,10 +1071,17 @@ impl Ctx<'_> {
         }
     }
 
+    /// A statement that is a value and nothing else (`null;`, what `null && f()` came to): it is not written, and so it is not part of a run of
+    /// expressions either.
+    fn is_void_statement(&self, s: NodeId) -> bool {
+        let NodeKind::ExprStmt(e) = self.ast[s].kind else { return false };
+        !self.ast[s].has(flags::DIRECTIVE) && self.in_statement_list(s) && self.defines.fold(self.ast, self.sem, e).is_some()
+    }
+
     /// Whether statement `s` is written as one expression followed by a `;`: an expression statement, or an `if` that became one.
     fn is_expression_statement(&self, s: NodeId) -> bool {
         match self.ast[s].kind {
-            NodeKind::ExprStmt(_) => !self.ast[s].has(flags::DIRECTIVE),
+            NodeKind::ExprStmt(_) => !self.ast[s].has(flags::DIRECTIVE) && !self.is_void_statement(s),
             NodeKind::If { .. } => self.as_expr.contains(&s),
             _ => false,
         }
@@ -916,6 +1091,7 @@ impl Ctx<'_> {
     /// stands for one.
     fn expression_terminator(&self, s: NodeId) -> Option<usize> {
         match self.ast[s].kind {
+            NodeKind::ExprStmt(_) if self.is_void_statement(s) => None,
             NodeKind::ExprStmt(_) => self.semi_of(s).filter(|&semi| self.actions[semi] == Action::Keep),
             _ => {
                 let start = self.first_tok(self.ast[s].span.start);
@@ -1033,7 +1209,7 @@ impl Ctx<'_> {
     /// The expression of a statement that is one, looking through a block whose braces went.
     fn sole_expression(&self, s: NodeId) -> Option<NodeId> {
         match self.ast[s].kind {
-            NodeKind::ExprStmt(e) if !self.ast[s].has(flags::DIRECTIVE) => Some(e),
+            NodeKind::ExprStmt(e) if !self.ast[s].has(flags::DIRECTIVE) && !self.is_void_statement(s) => Some(e),
             NodeKind::Block(list) => {
                 let [only] = self.ast.list(list) else { return None };
                 let open = self.first_tok(self.ast[s].span.start);
@@ -1900,7 +2076,8 @@ impl Ctx<'_> {
     fn can_stand_alone(&self, s: NodeId) -> bool {
         let node = &self.ast[s];
         match node.kind {
-            NodeKind::ExprStmt(_) => !node.has(flags::DIRECTIVE),
+            // Not written, so there would be nothing left for the `if` or loop to run: its braces stay.
+            NodeKind::ExprStmt(_) => !node.has(flags::DIRECTIVE) && !self.is_void_statement(s),
             NodeKind::VarDecl { kind, .. } => kind == VarKind::Var,
             NodeKind::If { .. } | NodeKind::For { .. } | NodeKind::ForIn { .. } | NodeKind::ForOf { .. } | NodeKind::While { .. } | NodeKind::DoWhile { .. } => true,
             NodeKind::Return(_) | NodeKind::Break(_) | NodeKind::Continue(_) | NodeKind::Throw(_) | NodeKind::Try { .. } | NodeKind::Switch { .. } | NodeKind::Debugger => true,
@@ -2311,7 +2488,7 @@ impl Ctx<'_> {
     // ---- branches that are decided ahead of time -----------------------------------------
 
     fn declares_var(&self, root: NodeId) -> bool {
-        declares_var(self.ast, root)
+        var_escapes(self.ast, self.sem, root)
     }
 
     fn in_statement_list(&self, n: NodeId) -> bool {
@@ -2323,7 +2500,7 @@ impl Ctx<'_> {
         if let NodeKind::Bool(value) = self.ast[test].kind {
             return Some(value);
         }
-        crate::define::Defines::default().eval(self.ast, self.sem, test).map(|c| c.truthy())
+        self.defines.eval(self.ast, self.sem, test).map(|c| c.truthy())
     }
 
     /// `if (true) a; else b;` is `a;`, and `if (false) a;` is nothing.
@@ -2482,6 +2659,61 @@ pub(crate) fn declares_var(ast: &Ast, root: NodeId) -> bool {
         ast.for_each_child(n, |c| stack.push(c));
     }
     false
+}
+
+/// Whether a `var` declared in `root` is seen from outside it, so that leaving `root` out would change what the rest of the program finds:
+/// a name read or written elsewhere (it is `undefined` there when `root` never runs, and a function-wide `var` makes the name exist), a
+/// property of the global object at the top of a script, a name `eval` or `with` can reach, or one that is not a plain `var` of its own
+/// (a parameter that is declared again, a pattern). A `var` that only `root` itself mentions goes with it.
+pub(crate) fn var_escapes(ast: &Ast, sem: &Semantic, root: NodeId) -> bool {
+    use crate::semantic::{ScopeKind, SymbolKind, scope_flags, symbol_flags};
+    if !declares_var(ast, root) {
+        return false;
+    }
+    let mut inside: crate::fxhash::FastMap<crate::semantic::SymbolId, (u32, u32)> = Default::default();
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        match ast[n].kind {
+            NodeKind::VarDecl { kind: VarKind::Var, decls } => {
+                for &d in ast.list(decls) {
+                    let NodeKind::VarDeclarator { target, init } = ast[d].kind else { return true };
+                    let NodeKind::BindingIdent(_) = ast[target].kind else { return true };
+                    let Some(sym) = sem.symbol_of(target) else { return true };
+                    let counts = inside.entry(sym).or_insert((0, 0));
+                    counts.1 += init.is_some() as u32;
+                }
+            }
+            NodeKind::Function { .. } | NodeKind::StaticBlock(_) => continue,
+            _ => {}
+        }
+        ast.for_each_child(n, |c| stack.push(c));
+    }
+    let root_scope = sem.root_scope();
+    for (&sym, _) in inside.iter() {
+        let symbol = sem.symbol(sym);
+        if symbol.kind != SymbolKind::Var || symbol.flags & (symbol_flags::DYNAMIC | symbol_flags::EXPORTED) != 0 || sem.scope(symbol.scope).flags & scope_flags::HAS_EVAL != 0 || (symbol.scope == root_scope && sem.scope(root_scope).kind != ScopeKind::Module) {
+            return true;
+        }
+    }
+    // Every mention of the names inside `root`, closures in it included.
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        if matches!(ast[n].kind, NodeKind::Ident(_)) {
+            if let Some(counts) = sem.symbol_of(n).and_then(|s| inside.get_mut(&s)) {
+                if ast[n].has(flags::ASSIGNED) {
+                    counts.1 += 1;
+                    counts.0 += ast[n].has(flags::READ_ALSO) as u32;
+                } else {
+                    counts.0 += 1;
+                }
+            }
+        }
+        ast.for_each_child(n, |c| stack.push(c));
+    }
+    inside.iter().any(|(&sym, &(reads, writes))| {
+        let symbol = sem.symbol(sym);
+        symbol.reads > reads || symbol.writes > writes
+    })
 }
 
 fn is_plain_identifier(text: &str) -> bool {

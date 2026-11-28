@@ -206,6 +206,10 @@ fn quote(text: &str) -> String {
 #[derive(Clone, Debug, Default)]
 pub struct Defines {
     list: Vec<Define>,
+    /// The properties of objects that nothing writes, in the module these definitions are for (see `frozen`).
+    frozen: Option<std::sync::Arc<crate::frozen::ModuleTable>>,
+    /// Reads of names inside one function that have one value (`const mode = 'fast'`), by the node that reads: see `compress::local_values`.
+    idents: Option<std::sync::Arc<crate::fxhash::FastMap<NodeId, Const>>>,
 }
 
 /// A branch that never runs, and what stands in its place.
@@ -235,7 +239,27 @@ impl Defines {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.list.is_empty()
+        self.list.is_empty() && self.frozen.is_none()
+    }
+
+    /// These definitions, and in one module the properties of the objects that nothing writes.
+    pub fn with_frozen(&self, table: &std::sync::Arc<crate::frozen::ModuleTable>) -> Defines {
+        Defines { list: self.list.clone(), frozen: Some(table.clone()), idents: self.idents.clone() }
+    }
+
+    /// These definitions, and the value of each read of a name that has one (`compress::local_values`).
+    pub fn with_idents(&self, idents: std::sync::Arc<crate::fxhash::FastMap<NodeId, Const>>) -> Defines {
+        Defines { list: self.list.clone(), frozen: self.frozen.clone(), idents: (!idents.is_empty()).then_some(idents) }
+    }
+
+    /// The value of `object.prop` when `object` is a name for an object that nothing writes and the property has a known value.
+    pub fn frozen_value(&self, ast: &Ast, sem: &Semantic, node: NodeId) -> Option<&Const> {
+        let table = self.frozen.as_ref()?;
+        let NodeKind::Member { object, .. } = ast[node].kind else { return None };
+        if !matches!(ast[object].kind, NodeKind::Ident(_)) {
+            return None;
+        }
+        table.get(&sem.symbol_of(object)?)?.get(crate::frozen::member_name(ast, node)?)
     }
 
     /// The definition that `node` is an instance of: a name nothing declares, or a chain of
@@ -300,6 +324,8 @@ impl Defines {
             NodeKind::Num(n) => Some(Const::Num(n.get())),
             NodeKind::Str(a) => Some(Const::Str(ast.atom(a).to_string())),
             NodeKind::Ident(a) if ast.atom(a) == "undefined" && sem.symbol_of(node).is_none() && self.lookup(ast, sem, node).is_none() => Some(Const::Undefined),
+            NodeKind::Ident(_) if self.idents.as_ref().is_some_and(|i| i.contains_key(&node)) => self.idents.as_ref().and_then(|i| i.get(&node)).cloned(),
+            NodeKind::Member { .. } if self.frozen_value(ast, sem, node).is_some() => self.frozen_value(ast, sem, node).cloned(),
             NodeKind::Ident(_) | NodeKind::Member { .. } | NodeKind::ImportMeta => self.lookup(ast, sem, node)?.value.clone(),
             NodeKind::Unary { op, arg } => match op {
                 UnaryOp::Not => Some(Const::Bool(!self.value(ast, sem, arg, full, depth + 1)?.truthy())),
@@ -387,7 +413,7 @@ impl Defines {
                 let taken = self.eval(ast, sem, test)?.truthy();
                 let dead = if taken { alt? } else { cons };
                 // A `var` in it would still be declared.
-                if crate::compress::declares_var(ast, dead) {
+                if crate::compress::var_escapes(ast, sem, dead) {
                     return None;
                 }
                 Some(Dead { node: dead, replacement: "{}" })

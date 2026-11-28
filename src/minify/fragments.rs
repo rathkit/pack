@@ -64,11 +64,11 @@ pub fn minify_chunk(source: &str, layout: &Layout, options: &Options, anchors: O
     let mode = std::env::var("RATHKIT_FRAGMENTS").unwrap_or_default();
     let ranges = if mode == "off" { Vec::new() } else { pieces(source.len(), layout) };
     if ranges.len() < 2 || !options.any() {
-        return run(source, options, anchors, &[]);
+        return run(source, options, anchors, &[], None);
     }
     if mode == "whole" {
         let barriers: Vec<u32> = ranges[1..].iter().map(|r| r.start as u32).collect();
-        return run(source, options, anchors, &barriers);
+        return run(source, options, anchors, &barriers, None);
     }
     let mut local = anchors.is_some().then(Vec::new);
     match in_pieces(source, layout, &ranges, options, local.as_mut()) {
@@ -79,7 +79,7 @@ pub fn minify_chunk(source: &str, layout: &Layout, options: &Options, anchors: O
             Ok(out)
         }
         Err(e) if mode == "strict" => Err(e),
-        Err(_) => run(source, options, anchors, &[]),
+        Err(_) => run(source, options, anchors, &[], None),
     }
 }
 
@@ -938,7 +938,7 @@ export { counter as total, bump };
         }
         assert!(ranges.len() > 2);
         let barriers: Vec<u32> = ranges[1..].iter().map(|r| r.start as u32).collect();
-        let whole = run(source, &options, None, &barriers).unwrap();
+        let whole = run(source, &options, None, &barriers, None).unwrap();
         let mut found = Vec::new();
         let pieces = in_pieces(source, &layout, &ranges, &options, Some(&mut found)).unwrap();
         // A last `;` is kept between pieces and dropped at the very end of one pass.
@@ -1013,7 +1013,7 @@ export { counter as total, bump };
         let layout = Layout { head: 0, tail: source.len(), cuts: c.clone(), reserved: Vec::new(), ..Layout::default() };
         let ranges = vec![0..c[0], c[0]..c[1], c[1]..c[2], c[2]..source.len()];
         let out = in_pieces(source, &layout, &ranges, &options, None).unwrap();
-        assert_eq!(out, run(source, &options, None, &[]).unwrap());
+        assert_eq!(out, run(source, &options, None, &[], None).unwrap());
         assert!(out.contains("loose=function") && out.contains("other=()=>loose()"), "{out}");
     }
 

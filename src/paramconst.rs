@@ -22,21 +22,79 @@ use crate::module::{ExportSource, ImportName, RequestKind};
 use crate::semantic::{Semantic, SymbolId, scope_flags};
 use std::collections::HashMap;
 
-/// The value of a parameter, by module and the symbol of the parameter.
-pub type ParamConsts = HashMap<(ModuleId, SymbolId), Const>;
+/// What the analysis found: the parameters that have one value, and the parameters that are an object at every call whose properties have
+/// one value (`options?.representation` where every caller writes `{ representation: 'date' }` or passes nothing).
+#[derive(Debug, Default)]
+pub struct ParamConsts {
+    /// The value of a parameter, by module and the symbol of the parameter.
+    pub values: HashMap<(ModuleId, SymbolId), Const>,
+    /// The properties of an object parameter.
+    pub props: HashMap<(ModuleId, SymbolId), PropFacts>,
+}
+
+impl ParamConsts {
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty() && self.props.is_empty()
+    }
+}
+
+/// The properties of a parameter that is an object (or nothing) at every call.
+#[derive(Clone, Debug, Default)]
+pub struct PropFacts {
+    /// A property that has one value in every object that is passed.
+    pub props: HashMap<String, Const>,
+    /// A property that does not: it is read as it is.
+    pub varies: std::collections::HashSet<String>,
+    /// Some call passes nothing (or `undefined`): `p?.k` is `undefined` there and `p.k` is an error.
+    pub nothing: bool,
+}
+
+impl PropFacts {
+    /// The value of `p.k` (or `p?.k` when `optional`) at every call, when it is one.
+    pub fn read(&self, key: &str, optional: bool) -> Option<Const> {
+        if self.varies.contains(key) {
+            return None;
+        }
+        let value = self.props.get(key).cloned().unwrap_or(Const::Undefined);
+        if !self.nothing {
+            return Some(value);
+        }
+        // Where nothing is passed, `p?.k` is `undefined`, so it is one value only when the objects have `undefined` there too; `p.k` is an error.
+        (optional && value == Const::Undefined).then_some(value)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 enum Lat {
     /// No call has been seen that passes anything yet.
     Bottom,
     One(Const),
+    /// An object written out at every call (or nothing, for some): what each property is.
+    Obj(Box<ObjLat>),
     Many,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ObjLat {
+    props: std::collections::BTreeMap<String, Lat>,
+    /// Some call passes nothing or `undefined`.
+    nothing: bool,
 }
 
 fn join(a: &Lat, b: &Lat) -> Lat {
     match (a, b) {
         (Lat::Bottom, x) | (x, Lat::Bottom) => x.clone(),
         (Lat::One(x), Lat::One(y)) if x == y => Lat::One(x.clone()),
+        (Lat::Obj(x), Lat::Obj(y)) => {
+            // A property one object has and the other does not is `undefined` in the other.
+            let mut props = std::collections::BTreeMap::new();
+            for key in x.props.keys().chain(y.props.keys()) {
+                let missing = Lat::One(Const::Undefined);
+                props.insert(key.clone(), join(x.props.get(key).unwrap_or(&missing), y.props.get(key).unwrap_or(&missing)));
+            }
+            Lat::Obj(Box::new(ObjLat { props, nothing: x.nothing || y.nothing }))
+        }
+        (Lat::Obj(x), Lat::One(Const::Undefined)) | (Lat::One(Const::Undefined), Lat::Obj(x)) => Lat::Obj(Box::new(ObjLat { props: x.props.clone(), nothing: true })),
         _ => Lat::Many,
     }
 }
@@ -46,6 +104,8 @@ struct Candidate {
     /// The symbol of each parameter that is a plain name, in order; `None` for any other kind (a default, a rest, a pattern).
     params: Vec<Option<SymbolId>>,
     state: Vec<Lat>,
+    /// Parameter by parameter: something in the function other than a read of a property uses it (it could be changed there).
+    used_whole: Vec<bool>,
     bad: bool,
 }
 
@@ -81,11 +141,11 @@ pub fn analyze(graph: &Graph, linked: &Linked, shaken: &crate::shake::Shaken) ->
             // Calls with one more argument than there are parameters are fine; `arguments` and `eval` can read any of them.
             let bad = reads_arguments(ast, sem, body) || has_eval(sem, plain.iter().flatten().next().copied());
             by_symbol.insert((module.id, symbol), candidates.len());
-            candidates.push(Candidate { module: module.id, state: vec![Lat::Bottom; plain.len()], params: plain, bad });
+            candidates.push(Candidate { module: module.id, state: vec![Lat::Bottom; plain.len()], used_whole: vec![false; plain.len()], params: plain, bad });
         }
     }
     if candidates.is_empty() {
-        return ParamConsts::new();
+        return ParamConsts::default();
     }
     // `export default addDays;` gives the function a second name, the one `import addDays from './addDays'` binds: the expression that is exported.
     let mut default_alias: HashMap<(ModuleId, NodeId), usize> = HashMap::new();
@@ -182,6 +242,15 @@ pub fn analyze(graph: &Graph, linked: &Linked, shaken: &crate::shake::Shaken) ->
             }
         }
     }
+    // The symbol of each parameter, to find the value a call passes when it passes a parameter on.
+    let mut param_at: HashMap<(ModuleId, SymbolId), (usize, usize)> = HashMap::new();
+    for (c, candidate) in candidates.iter().enumerate() {
+        for (i, p) in candidate.params.iter().enumerate() {
+            if let Some(symbol) = p {
+                param_at.insert((candidate.module, *symbol), (c, i));
+            }
+        }
+    }
     // Every reference to a candidate must be a call.
     let mut sites: Vec<Site> = Vec::new();
     for module in &graph.modules {
@@ -209,8 +278,27 @@ pub fn analyze(graph: &Graph, linked: &Linked, shaken: &crate::shake::Shaken) ->
         } else {
             Default::default()
         };
-        let mut stack: Vec<(NodeId, Option<NodeId>)> = vec![(ast.root, None)];
-        while let Some((n, parent)) = stack.pop() {
+        let mut stack: Vec<(NodeId, Option<NodeId>, Option<NodeId>)> = vec![(ast.root, None, None)];
+        while let Some((n, parent, grand)) = stack.pop() {
+            // A parameter that is used as a whole (passed on to code that is not a candidate, returned, written to) can be changed where the
+            // analysis cannot see; one that is only read property by property, or passed on to a candidate, cannot.
+            if matches!(ast[n].kind, NodeKind::Ident(_)) {
+                if let Some(&(c, i)) = sem.symbol_of(n).and_then(|s| param_at.get(&(module.id, s))) {
+                    let reads_property = parent.is_some_and(|p| match ast[p].kind {
+                        NodeKind::Member { object, .. } if object == n && crate::frozen::member_name_any(ast, p).is_some() => !grand.is_some_and(|g| match ast[g].kind {
+                            NodeKind::Assign { target, .. } => target == p,
+                            NodeKind::Update { arg, .. } | NodeKind::Unary { op: crate::ast::UnaryOp::Delete, arg } => arg == p,
+                            NodeKind::ArrayPattern(_) | NodeKind::ObjectPattern(_) | NodeKind::PatternProp { .. } | NodeKind::ForIn { .. } | NodeKind::ForOf { .. } => true,
+                            _ => false,
+                        }),
+                        NodeKind::Call { callee, args } => callee != n && ast.list(args).contains(&n) && !ast[p].has(flags::OPTIONAL) && matches!(ast[callee].kind, NodeKind::Ident(_)) && sem.symbol_of(callee).is_some_and(|s| names.contains_key(&s)),
+                        _ => false,
+                    });
+                    if !reads_property {
+                        candidates[c].used_whole[i] = true;
+                    }
+                }
+            }
             if matches!(ast[n].kind, NodeKind::Ident(_)) {
                 if let Some(&c) = sem.symbol_of(n).and_then(|s| names.get(&s)) {
                     match parent.map(|p| (p, ast[p].kind)) {
@@ -225,18 +313,9 @@ pub fn analyze(graph: &Graph, linked: &Linked, shaken: &crate::shake::Shaken) ->
             }
             ast.for_each_child(n, |child| {
                 if !(parent.is_none() && dead.contains(&child)) {
-                    stack.push((child, Some(n)));
+                    stack.push((child, Some(n), parent));
                 }
             });
-        }
-    }
-    // The symbol of each parameter, to find the value a call passes when it passes a parameter on.
-    let mut param_at: HashMap<(ModuleId, SymbolId), (usize, usize)> = HashMap::new();
-    for (c, candidate) in candidates.iter().enumerate() {
-        for (i, p) in candidate.params.iter().enumerate() {
-            if let Some(symbol) = p {
-                param_at.insert((candidate.module, *symbol), (c, i));
-            }
         }
     }
     // Joined over the calls until nothing changes (each value moves up a lattice of three levels, so this ends).
@@ -262,25 +341,55 @@ pub fn analyze(graph: &Graph, linked: &Linked, shaken: &crate::shake::Shaken) ->
             }
         }
         if !changed {
-            let mut out = ParamConsts::new();
+            let mut out = ParamConsts::default();
             for candidate in candidates.iter().filter(|c| !c.bad) {
                 let Some(parsed) = graph.module(candidate.module).parsed.as_ref() else { continue };
                 for (i, p) in candidate.params.iter().enumerate() {
-                    let (Some(symbol), Lat::One(value)) = (p, &candidate.state[i]) else { continue };
-                    if parsed.semantic.symbol(*symbol).writes == 0 && replaceable(value) {
-                        out.insert((candidate.module, *symbol), value.clone());
+                    let Some(symbol) = p else { continue };
+                    if parsed.semantic.symbol(*symbol).writes != 0 {
+                        continue;
+                    }
+                    match &candidate.state[i] {
+                        Lat::One(value) if replaceable(value) => {
+                            out.values.insert((candidate.module, *symbol), value.clone());
+                        }
+                        Lat::Obj(object) if !candidate.used_whole[i] => {
+                            let mut facts = PropFacts { nothing: object.nothing, ..PropFacts::default() };
+                            for (key, lat) in &object.props {
+                                match lat {
+                                    Lat::One(value) if property_value(value) => {
+                                        facts.props.insert(key.clone(), value.clone());
+                                    }
+                                    _ => {
+                                        facts.varies.insert(key.clone());
+                                    }
+                                }
+                            }
+                            out.props.insert((candidate.module, *symbol), facts);
+                        }
+                        _ => {}
                     }
                 }
             }
             return out;
         }
     }
-    ParamConsts::new()
+    ParamConsts::default()
 }
 
 /// Values that can be written where a name was read without a change of meaning in front of `.`, `(` or `[`.
 fn replaceable(value: &Const) -> bool {
     matches!(value, Const::Undefined | Const::Null | Const::Bool(_))
+}
+
+/// Values of a property that can be written where `p.k` was read: what `replaceable` allows, and strings and numbers (a number is written in
+/// parentheses, so `5.x` is not a problem).
+fn property_value(value: &Const) -> bool {
+    match value {
+        Const::Num(n) => n.is_finite(),
+        Const::Str(_) => true,
+        _ => replaceable(value),
+    }
 }
 
 /// Whether `eval` is called in the function (the scope of its parameter, or one inside it).
@@ -342,6 +451,29 @@ fn value_of(ast: &Ast, sem: &Semantic, module: ModuleId, node: NodeId, candidate
                 }
                 at = next;
             }
+        }
+        // An object written out: what each of its properties is (an object inside it is not followed).
+        NodeKind::Object(list) => {
+            let mut props = std::collections::BTreeMap::new();
+            for &p in ast.list(list) {
+                let NodeKind::Property { key, value, kind: crate::ast::PropKind::Init } = ast[p].kind else { return Lat::Many };
+                if ast[p].has(flags::COMPUTED) {
+                    return Lat::Many;
+                }
+                let name = match ast[key].kind {
+                    NodeKind::PropName(a) | NodeKind::Str(a) => ast.atom(a),
+                    _ => return Lat::Many,
+                };
+                if name == "__proto__" || props.contains_key(name) {
+                    return Lat::Many;
+                }
+                let lat = match again(value) {
+                    Lat::Obj(_) => Lat::Many,
+                    other => other,
+                };
+                props.insert(name.to_string(), lat);
+            }
+            Lat::Obj(Box::new(ObjLat { props, nothing: false }))
         }
         NodeKind::Binary { op: op @ (BinOp::LogAnd | BinOp::LogOr | BinOp::Nullish), left, right } => match again(left) {
             Lat::One(c) => {

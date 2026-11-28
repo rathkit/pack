@@ -86,3 +86,48 @@ fn a_default_export_called_under_another_name_counts() {
     assert_eq!(node(&dir, &["o.mjs"]), expected);
     assert!(out.contains("?.by"), "{out}");
 }
+
+const OPTIONS_LIB: &str = "
+export function fmt(date, options) {
+  const format = options?.format ?? 'extended';
+  const representation = options?.representation ?? 'complete';
+  let out = '';
+  if (representation !== 'time') { out += 'D' + (format === 'extended' ? '-' : ''); }
+  if (representation !== 'date') { out += 'GONE_time' + format; }
+  return out + date;
+}
+export function week(date, options) { return (options?.weekStartsOn ?? 0) + date; }
+export function mutates(date, options) { options.extra = 'KEPT_extra'; return options.extra + (options?.mode ?? 'none') + date; }
+export function passes(date, options) { return JSON.stringify(options) + (options?.mode ?? 'none') + date; }
+export function chain(date, options) { return options?.cb?.(date) ?? options?.locale?.name ?? date; }
+";
+
+#[test]
+fn an_object_that_every_call_writes_out_has_its_properties_as_values() {
+    let main = "
+import { fmt, week, mutates, passes, chain } from './lib.js';
+console.log(fmt('a', { representation: 'date' }), fmt('b', { representation: 'date', format: 'basic' }), fmt('c', { format: 'extended', representation: 'date' }));
+console.log(week(1, { weekStartsOn: 1 }), week(2, { weekStartsOn: 1 }), week(3, { weekStartsOn: 1, unused: true }));
+console.log(mutates(1, { mode: 'm' }), mutates(2, { mode: 'm' }), passes(1, { mode: 'p' }), passes(2, { mode: 'p' }));
+console.log(chain(1, { locale: { name: 'L' } }), chain(2, { cb: (d) => d + 10 }), chain(3, {}), chain(4, undefined));
+";
+    let dir = project("object-params", &[("lib.js", OPTIONS_LIB), ("main.js", main), ("package.json", "{\"type\":\"module\"}")]);
+    let expected = node(&dir, &["main.js"]);
+    let out = bundle(&dir, "main.js");
+    assert_eq!(node(&dir, &["o.mjs"]), expected);
+    // `fmt` is always given the representation 'date', so the branch for the time goes; `week` always has 1; an object a function writes to or
+    // hands on is not followed.
+    assert!(!out.contains("GONE_time"), "{out}");
+    assert!(out.contains("KEPT_extra"), "{out}");
+    assert!(out.contains("mode"), "{out}");
+}
+
+#[test]
+fn a_call_that_passes_nothing_keeps_what_a_chain_does_when_it_is_cut_short() {
+    let lib = "export function a(x, o) { return o?.a.b ?? x; }\nexport function b(x, o) { return o?.a ?? x; }\n";
+    let main = "import { a, b } from './lib.js';\nconsole.log(b(1, { a: undefined }), b(2), a(3));\ntry { console.log(a(4, { a: undefined })); } catch (e) { console.log(e.constructor.name); }\n";
+    let dir = project("object-chain", &[("lib.js", lib), ("main.js", main), ("package.json", "{\"type\":\"module\"}")]);
+    let expected = node(&dir, &["main.js"]);
+    bundle(&dir, "main.js");
+    assert_eq!(node(&dir, &["o.mjs"]), expected);
+}
