@@ -64,6 +64,16 @@ pub fn member_name<'a>(ast: &'a Ast, member: NodeId) -> Option<&'a str> {
     }
 }
 
+/// The property a member expression reads, `a.b`, `a["b"]` or `a?.b`.
+pub fn member_name_any<'a>(ast: &'a Ast, member: NodeId) -> Option<&'a str> {
+    let NodeKind::Member { prop, .. } = ast[member].kind else { return None };
+    match ast[prop].kind {
+        NodeKind::PropName(a) if !ast[member].has(flags::COMPUTED) => Some(ast.atom(a)),
+        NodeKind::Str(a) if ast[member].has(flags::COMPUTED) => Some(ast.atom(a)),
+        _ => None,
+    }
+}
+
 struct Candidate {
     props: Props,
     bad: bool,

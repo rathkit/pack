@@ -2800,7 +2800,7 @@ impl<'a> Bundler<'a> {
             self.journal = Some(Vec::new());
         }
         let defines = self.module_defines(module.id);
-        let mut scanner = Scanner { bundler: self, module, defines, places: None, private_scopes: Vec::new(), private_refs: HashMap::new(), chain_members: HashSet::new(), call_callees: HashSet::new(), ast: &parsed.ast, semantic: &parsed.semantic, edits: Vec::new(), statement_starts: HashSet::new(), shorthand: HashSet::new(), skip: HashSet::new(), written: HashSet::new(), fn_depth: 0, async_ctx: Vec::new(), site_next: HashMap::new(), has_tla: false, needs_require: false, top_decl: None, in_wrapper: false, name_hint: None, shared_names: None, es5: Default::default() };
+        let mut scanner = Scanner { bundler: self, module, defines, places: None, private_scopes: Vec::new(), private_refs: HashMap::new(), chain_members: HashSet::new(), chain_outer: HashSet::new(), call_callees: HashSet::new(), ast: &parsed.ast, semantic: &parsed.semantic, edits: Vec::new(), statement_starts: HashSet::new(), shorthand: HashSet::new(), skip: HashSet::new(), written: HashSet::new(), fn_depth: 0, async_ctx: Vec::new(), site_next: HashMap::new(), has_tla: false, needs_require: false, top_decl: None, in_wrapper: false, name_hint: None, shared_names: None, es5: Default::default() };
         let code = if module.kind == ModuleKind::Esm && scanner.bundler.registry { scanner.scan_registry(id) } else if module.kind == ModuleKind::Esm { scanner.scan_esm(id) } else { scanner.scan_wrapped(id) };
         self.code.insert(id, code);
         if let (Some(salt), Some((temp_count, temps, errors, aliases, outer))) = (key, before) {
@@ -2837,7 +2837,13 @@ impl<'a> Bundler<'a> {
         demanded.sort_unstable();
         demanded.hash(&mut h);
         // The parameters of this module that are written as the value they have.
-        let mut params: Vec<(usize, String)> = self.param_consts.iter().filter(|((m, _), _)| *m == module.id).map(|((_, s), c)| (s.index(), format!("{c:?}"))).collect();
+        let mut params: Vec<(usize, String)> = self.param_consts.values.iter().filter(|((m, _), _)| *m == module.id).map(|((_, s), c)| (s.index(), format!("{c:?}"))).collect();
+        // And the properties of the parameters that are objects (sorted: the tables are not).
+        params.extend(self.param_consts.props.iter().filter(|((m, _), _)| *m == module.id).map(|((_, s), f)| {
+            let mut props: Vec<String> = f.props.iter().map(|(k, v)| format!("{k}={v:?}")).chain(f.varies.iter().map(|k| format!("{k}~"))).collect();
+            props.sort_unstable();
+            (s.index() + (1 << 40), format!("{props:?}{}", f.nothing))
+        }));
         params.sort_unstable();
         params.hash(&mut h);
         // And the properties of objects nothing writes that it reads as values.
@@ -2924,6 +2930,8 @@ struct Scanner<'b, 'a> {
     private_refs: HashMap<NodeId, lower_class::Private>,
     /// Private member nodes already rewritten (or left to a chain), so no other rewrite touches them.
     chain_members: HashSet<NodeId>,
+    /// The outermost link of each optional chain walked so far.
+    chain_outer: HashSet<NodeId>,
     /// Identifiers called as functions, which a table module reads from an exports object without making it `this`.
     call_callees: HashSet<NodeId>,
     ast: &'a Ast,
@@ -3435,7 +3443,7 @@ impl<'a> Scanner<'_, 'a> {
             _ => {}
         }
         if !self.bundler.param_consts.is_empty() && matches!(ast[node].kind, NodeKind::Ident(_)) && !self.written.contains(&node) && !ast[node].has(crate::ast::flags::ASSIGNED) {
-            if let Some(value) = self.semantic.symbol_of(node).and_then(|s| self.bundler.param_consts.get(&(self.module.id, s))) {
+            if let Some(value) = self.semantic.symbol_of(node).and_then(|s| self.bundler.param_consts.values.get(&(self.module.id, s))) {
                 let text = match value {
                     crate::define::Const::Undefined => Some("undefined"),
                     crate::define::Const::Null => Some("null"),
@@ -3446,6 +3454,33 @@ impl<'a> Scanner<'_, 'a> {
                 // `undefined` is a name that code can declare: only where nothing here does.
                 if let Some(text) = text.filter(|t| *t != "undefined" || !self.module_declares_undefined()) {
                     self.push_ident_edit(node, vec![Piece::Text(text.to_string())]);
+                    return;
+                }
+            }
+        }
+        if let NodeKind::Chain(inner) = ast[node].kind {
+            self.chain_outer.insert(inner);
+        }
+        // `options.format` or `options?.format` where `options` is an object at every call, with that property the same in every one.
+        if !self.bundler.param_consts.props.is_empty() && matches!(ast[node].kind, NodeKind::Member { .. }) && !self.written.contains(&node) {
+            if let NodeKind::Member { object, .. } = ast[node].kind {
+                let facts = matches!(ast[object].kind, NodeKind::Ident(_)).then(|| self.semantic.symbol_of(object)).flatten().and_then(|s| self.bundler.param_consts.props.get(&(self.module.id, s)));
+                let value = facts.zip(crate::frozen::member_name_any(ast, node)).and_then(|(f, name)| {
+                    // Where some call passes nothing, `options?.a.b` ends at `options?.a` (the rest is not evaluated): the value stands in for the
+                    // whole chain only when this link is the last one.
+                    let ends_chain = !ast[node].has(crate::ast::flags::OPTIONAL) || self.chain_outer.contains(&node);
+                    if f.nothing && !ends_chain { None } else { f.read(name, ast[node].has(crate::ast::flags::OPTIONAL)) }
+                });
+                let text = match value {
+                    Some(crate::define::Const::Undefined) => Some(if self.module_declares_undefined() { "(void 0)".to_string() } else { "undefined".to_string() }),
+                    Some(crate::define::Const::Null) => Some("null".to_string()),
+                    Some(crate::define::Const::Bool(b)) => Some(b.to_string()),
+                    Some(crate::define::Const::Str(text)) => Some(json_string(&text)),
+                    Some(crate::define::Const::Num(n)) => Some(format!("({n})")),
+                    None => None,
+                };
+                if let Some(text) = text {
+                    self.push_ident_edit(node, vec![Piece::Text(text)]);
                     return;
                 }
             }
