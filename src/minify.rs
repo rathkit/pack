@@ -57,7 +57,14 @@ impl Options {
 /// Minifies `source`, an ES module. An error means the text could not be parsed, which would
 /// be a bug in whatever produced it.
 pub fn minify(source: &str, options: &Options) -> Result<String, String> {
-    run(source, options, None, &[])
+    run(source, options, None, &[], None)
+}
+
+/// As `minify`, also saying which names declared inside functions the syntax rewrites left out (for `verify`).
+fn minify_report(source: &str, options: &Options) -> Result<(String, crate::compress::Unused), String> {
+    let mut unused = crate::compress::Unused::default();
+    let out = run(source, options, None, &[], Some(&mut unused))?;
+    Ok((out, unused))
 }
 
 /// Where a token of the result came from: bytes `out..out + out_len` of the result are the
@@ -74,12 +81,12 @@ pub struct Anchor {
 /// text comes back unchanged.
 pub fn minify_with_anchors(source: &str, options: &Options) -> Result<(String, Vec<Anchor>), String> {
     let mut anchors = Vec::new();
-    let out = run(source, options, Some(&mut anchors), &[])?;
+    let out = run(source, options, Some(&mut anchors), &[], None)?;
     Ok((out, anchors))
 }
 
 /// `barriers`: see `compress::plan`.
-fn run(source: &str, options: &Options, anchors: Option<&mut Vec<Anchor>>, barriers: &[u32]) -> Result<String, String> {
+fn run(source: &str, options: &Options, anchors: Option<&mut Vec<Anchor>>, barriers: &[u32], unused_out: Option<&mut crate::compress::Unused>) -> Result<String, String> {
     let timing = std::env::var_os("RATHKIT_TIMING").is_some();
     let mut clock = std::time::Instant::now();
     let mut lap = |what: &str| {
@@ -114,6 +121,9 @@ fn run(source: &str, options: &Options, anchors: Option<&mut Vec<Anchor>>, barri
         }
         syntax.map(|handle| handle.join().expect("the syntax plan"))
     });
+    if let (Some(out), Some(plan)) = (unused_out, plan.as_ref()) {
+        *out = plan.unused.clone();
+    }
     plan_private_names(tokens, source, &parsed.semantic, options, &mut renames);
     lap("plans done");
     let out = emit(source, tokens, &renames, &asi, &facts, options, plan.as_ref(), anchors, false);
@@ -1213,16 +1223,16 @@ fn truth(ast: &Ast, n: NodeId) -> Option<bool> {
 }
 
 /// Whether a condition is the same every time: `true`, `!1`, `"a" === "a"`.
-fn constant_test(parsed: &parser::Parsed, n: NodeId) -> Option<bool> {
-    truth(&parsed.ast, n).or_else(|| crate::define::Defines::default().eval(&parsed.ast, &parsed.semantic, n).map(|c| c.truthy()))
+fn constant_test(parsed: &parser::Parsed, defines: &crate::define::Defines, n: NodeId) -> Option<bool> {
+    truth(&parsed.ast, n).or_else(|| defines.eval(&parsed.ast, &parsed.semantic, n).map(|c| c.truthy()))
 }
 
 /// A statement the minifier removes from a list: `;` and `if (false) ...;` without an `else`.
-fn removable(parsed: &parser::Parsed, n: NodeId) -> bool {
+fn removable(parsed: &parser::Parsed, defines: &crate::define::Defines, n: NodeId) -> bool {
     match parsed.ast[n].kind {
         NodeKind::Empty => true,
-        NodeKind::ExprStmt(e) => !parsed.ast[n].has(flags::DIRECTIVE) && crate::define::Defines::default().fold(&parsed.ast, &parsed.semantic, e).is_some(),
-        NodeKind::If { test, cons, alt: None } => constant_test(parsed, test) == Some(false) && !crate::compress::var_escapes(&parsed.ast, &parsed.semantic, cons),
+        NodeKind::ExprStmt(e) => !parsed.ast[n].has(flags::DIRECTIVE) && defines.fold(&parsed.ast, &parsed.semantic, e).is_some(),
+        NodeKind::If { test, cons, alt: None } => constant_test(parsed, defines, test) == Some(false) && !crate::compress::var_escapes(&parsed.ast, &parsed.semantic, cons),
         _ => false,
     }
 }
@@ -1293,7 +1303,7 @@ fn guard_pairs(a: &parser::Parsed, b: &parser::Parsed, test: NodeId, cons: NodeI
 }
 
 /// a statement list count as one declaration (the minifier joins them).
-fn children(parsed: &parser::Parsed, side: &Side, syntax: bool, original: bool, legacy: bool, inlined: &HashMap<NodeId, NodeId>, unused: &crate::compress::Unused) -> Vec<Side> {
+fn children(parsed: &parser::Parsed, side: &Side, syntax: bool, original: bool, legacy: bool, inlined: &HashMap<NodeId, NodeId>, unused: &crate::compress::Unused, defines: &crate::define::Defines) -> Vec<Side> {
     let ast = &parsed.ast;
     if let Some(list) = &side.declarators {
         return list.iter().map(|&c| Side::node(c)).collect();
@@ -1325,7 +1335,7 @@ fn children(parsed: &parser::Parsed, side: &Side, syntax: bool, original: bool, 
         let c = kids[index];
         index += 1;
         // Statements the minifier removes leave their neighbors next to each other.
-        if original && removable(parsed, c) {
+        if original && removable(parsed, defines, c) {
             continue;
         }
         // A function or class nothing uses is not there either.
@@ -1376,14 +1386,16 @@ fn children(parsed: &parser::Parsed, side: &Side, syntax: bool, original: bool, 
 /// statement without braces, joined declarations, an expression body for a `return`, `return`
 /// for `return undefined`, and the branch that runs for `if (true)` and `true ? a : b`.
 pub fn verify(source: &str, options: &Options) -> Result<(), String> {
-    let minified = minify(source, options)?;
+    let (minified, unused) = minify_report(source, options)?;
     let syntax = options.syntax;
     let a = parser::parse(source, ParseOptions::new(true)).map_err(|e| format!("original: {e}"))?;
     let b = parser::parse(&minified, ParseOptions::new(true)).map_err(|e| format!("minified: {e}"))?;
-    let inlined: HashMap<NodeId, NodeId> = if syntax { crate::compress::inlinable_constants(&a.ast, &a.semantic, false).into_iter().collect() } else { HashMap::default() };
+    let inlined: HashMap<NodeId, NodeId> = if syntax { crate::compress::inlinable_constants(&a.ast, &a.semantic, &crate::compress::walk(&a.ast), false).into_iter().collect() } else { HashMap::default() };
     let inlined_uses: HashMap<NodeId, NodeId> = inlined.iter().map(|(&d, &u)| (u, d)).collect();
     let no_inlined: HashMap<NodeId, NodeId> = HashMap::default();
-    let unused = if syntax { crate::compress::unused_locals(source, &a.ast, &a.semantic) } else { crate::compress::Unused::default() };
+    // What decides a condition in the original: the values that names inside a function have; in the result, only what is written.
+    let da = if syntax { crate::define::Defines::default().with_idents(std::sync::Arc::new(crate::compress::local_values(&a.ast, &a.semantic, &crate::compress::walk(&a.ast)))) } else { crate::define::Defines::default() };
+    let db = crate::define::Defines::default();
     let no_unused = crate::compress::Unused::default();
     let mut forward: HashMap<SymbolId, SymbolId> = HashMap::default();
     let mut backward: HashMap<SymbolId, SymbolId> = HashMap::default();
@@ -1397,8 +1409,8 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
             loop {
                 let nx = &a.ast[sx.id];
                 match nx.kind {
-                    NodeKind::If { test, cons, alt } if constant_test(&a, test).is_some() && !matches!(ny.kind, NodeKind::If { test: t, .. } if constant_test(&b, t).is_some()) => {
-                        let v = constant_test(&a, test).expect("constant");
+                    NodeKind::If { test, cons, alt } if constant_test(&a, &da, test).is_some() && !matches!(ny.kind, NodeKind::If { test: t, .. } if constant_test(&b, &db, t).is_some()) => {
+                        let v = constant_test(&a, &da, test).expect("constant");
                         match (v, alt) {
                             (true, _) => sx = Side::node(cons),
                             (false, Some(alt)) => sx = Side::node(alt),
@@ -1406,8 +1418,8 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                             (false, None) => return Err(format!("`if (false)` at {} is not an empty statement in the result", nx.span.start)),
                         }
                     }
-                    NodeKind::Conditional { test, cons, alt } if constant_test(&a, test).is_some() && !matches!(ny.kind, NodeKind::Conditional { test: t, .. } if constant_test(&b, t).is_some()) => {
-                        let v = constant_test(&a, test).expect("constant");
+                    NodeKind::Conditional { test, cons, alt } if constant_test(&a, &da, test).is_some() && !matches!(ny.kind, NodeKind::Conditional { test: t, .. } if constant_test(&b, &db, t).is_some()) => {
+                        let v = constant_test(&a, &da, test).expect("constant");
                         sx = Side::node(if v { cons } else { alt });
                     }
                     NodeKind::Block(list) if !matches!(ny.kind, NodeKind::Block(_)) && a.ast.list(list).len() == 1 => sx = Side::node(a.ast.list(list)[0]),
@@ -1441,8 +1453,7 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
                 (NodeKind::Num(na), NodeKind::Num(nb)) => na.get().to_bits() == nb.get().to_bits(),
                 // An expression of constants written as the value it has.
                 (NodeKind::Binary { .. } | NodeKind::Unary { .. } | NodeKind::Template { .. } | NodeKind::Conditional { .. }, _) => {
-                    let defines = crate::define::Defines::default();
-                    matches!((defines.fold(&a.ast, &a.semantic, x), defines.fold(&b.ast, &b.semantic, y)), (Some(left), Some(right)) if left == right)
+                    matches!((da.fold(&a.ast, &a.semantic, x), db.fold(&b.ast, &b.semantic, y)), (Some(left), Some(right)) if left == right)
                 }
                 _ => false,
             };
@@ -1747,8 +1758,8 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
             }
             _ => {}
         }
-        let mut ca = children(&a, &sx, syntax, true, options.legacy, &inlined, &unused);
-        let mut cb = children(&b, &sy, syntax, false, options.legacy, &no_inlined, &no_unused);
+        let mut ca = children(&a, &sx, syntax, true, options.legacy, &inlined, &unused, &da);
+        let mut cb = children(&b, &sy, syntax, false, options.legacy, &no_inlined, &no_unused, &db);
         if syntax {
             match (&nx.kind, &ny.kind) {
                 // `=> { return x; }` and `=> x`.
@@ -1808,7 +1819,7 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
             while i < ca.len() {
                 let item = ca[i].clone();
                 i += 1;
-                let removable = item.declarators.is_none() && removable(&a, item.id);
+                let removable = item.declarators.is_none() && removable(&a, &da, item.id);
                 if removable && in_list {
                     continue;
                 }
@@ -1955,11 +1966,25 @@ mod tests {
     }
 
     #[test]
+    fn a_name_with_one_value_decides_branches_and_goes_when_nothing_else_reads_it() {
+        assert_eq!(syntax("function f(x) { const mode = 'fast'; if (mode === 'slow') { g(x); } return x; }"), "function f(x){return x}");
+        assert_eq!(syntax("function f(x) { var h = null; h && setTimeout(function () { return h(x); }); return x; }"), "function f(x){return x}");
+        assert_eq!(syntax("function f(x) { const a = 'date', b = a !== 'time'; if (b) { g(x) } if (a !== 'date') { h(x) } return x; }"), "function f(x){g(x);return x}");
+        // A read the folds do not reach keeps the declaration; so does a read in a function declaration, which can run before it.
+        assert_eq!(syntax("function f(x) { const mode = 'fast'; if (mode === 'slow') { g(x); } return [x, mode]; }"), "function f(x){let mode='fast';return[x,mode]}");
+        assert!(syntax("function f(x) { g(); var h = null; function g() { return h === null; } return x; }").contains("null"));
+        // A name written again is not one value.
+        assert!(syntax("function f(x) { let m = 'fast'; if (x) m = 'slow'; if (m === 'slow') { g(x); } return x; }").contains("slow"));
+    }
+
+    #[test]
     fn a_constant_read_once_is_written_where_it_is_read() {
         assert_eq!(syntax("function f(x) { const k = 864e5; return x / k; } f(1);"), "function f(x){return x/864e5}f(1)");
         assert_eq!(syntax("function f(x) { const a = 'one', b = x, c = 'two'; return [a, b, c]; } f(1);"), "function f(x){let b=x;return['one',b,'two']}f(1)");
         // Read twice, assigned, read before the declaration, in a shorthand property, or by a member of a number: not touched.
-        assert!(syntax("function f(x) { const k = 5; return k + k + x; } f(1);").contains("let"));
+        assert!(syntax("function f(x) { const k = 5; return [k, k, x]; } f(1);").contains("let"));
+        // Read twice, and both reads decide a sum: the sum is worked out and the declaration is not needed.
+        assert_eq!(syntax("function f(x) { const k = 5; return k + k + x; } f(1);"), "function f(x){return 10+x}f(1)");
         assert!(syntax("function f(x) { let k = 5; k = x; return k; } f(1);").contains("let"));
         assert!(syntax("function f(x) { const k = 5; return { k }; } f(1);").contains("let"));
         assert!(syntax("function f(x) { const k = 5; return k.toFixed(x); } f(1);").contains("let"));

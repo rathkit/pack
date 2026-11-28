@@ -108,6 +108,18 @@ const CASES: &[Case] = &[
         kept: &["KEPT_a"],
     },
     Case {
+        name: "a name with one value decides the branches it is read in and goes with them",
+        source: "function f(x, options) { const mode = 'fast'; const flag = null; const level = 3; if (mode === 'slow') { x = 'GONE_slow' + x; } flag && x.push('GONE_flag'); if (level > 2) { x = x + 'KEPT_level'; } return x; }\nconsole.log(f('a'));",
+        gone: &["GONE_slow", "GONE_flag", "fast"],
+        kept: &["KEPT_level"],
+    },
+    Case {
+        name: "a name read by a function declaration that can run before it is declared is not taken for its value",
+        source: "function f() { const out = [g()]; var h = 'KEPT_h'; function g() { return h; } out.push(g()); return out.join(); }\nconsole.log(f());",
+        gone: &[],
+        kept: &["KEPT_h"],
+    },
+    Case {
         name: "a shadowing name does not keep the outer one",
         source: "function f() { const a = 'GONE_a'; { const a = 'KEPT_inner'; console.log(a); } return 1; }\nconsole.log(f());",
         gone: &["GONE_a"],
