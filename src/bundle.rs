@@ -2830,6 +2830,9 @@ impl<'a> Bundler<'a> {
         }
         let shake = &self.shaken.modules[module.id.index()];
         (shake.included, shake.demand_known, &shake.live).hash(&mut h);
+        let mut removed: Vec<u32> = shake.removed.iter().map(|n| n.index() as u32).collect();
+        removed.sort_unstable();
+        removed.hash(&mut h);
         let mut demanded: Vec<usize> = shake.demanded.iter().map(|s| s.index()).collect();
         demanded.sort_unstable();
         demanded.hash(&mut h);
@@ -3416,6 +3419,11 @@ impl<'a> Scanner<'_, 'a> {
         }
         if matches!(ast[node].kind, NodeKind::Class { .. }) && !self.bundler.graph.experimental_decorators && !self.skip.contains(&node) && self.needs_standard_lowering(node) {
             self.lower_nested_class(node);
+        }
+        // `X.p = value;` in a function, where nothing that stays reads `X`: the write cannot be seen.
+        if matches!(ast[node].kind, NodeKind::ExprStmt(_)) && self.bundler.shaken.modules[self.module.id.index()].removed.contains(&node) {
+            self.push(node, vec![Piece::Text(";".to_string())]);
+            return;
         }
         match ast[node].kind {
             NodeKind::Assign { target, .. } => {

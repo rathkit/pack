@@ -40,6 +40,18 @@ pub struct Part {
     pub default_value: Option<NodeId>,
     /// For one declarator of a `var`/`let`/`const` that has several: that declarator. The part is the declarator, `stmt` the whole declaration.
     pub declarator: Option<NodeId>,
+    /// For `X.p = value;` where `X` is a fresh object, function or class of this module and the value is free of effects: `X`. The statement
+    /// only matters when something that stays reads `X`; it is its own part, kept with `X` and not with the effects.
+    pub on: Option<SymbolId>,
+}
+
+/// A statement inside a function that writes a property of a fresh object of the module (`X.p = value;`, see `Part::on`): it stays when `X`
+/// stays, and what the value uses is used only then.
+#[derive(Clone, Debug)]
+pub struct Conditional {
+    pub stmt: NodeId,
+    pub on: SymbolId,
+    pub uses: Vec<Use>,
 }
 
 /// A module-level name a statement refers to.
@@ -65,6 +77,11 @@ pub struct ModuleShake {
     pub demanded: std::collections::HashSet<SymbolId>,
     /// `demanded` is complete (tree shaking ran); without it every name must be assumed to be used.
     pub demand_known: bool,
+    /// The writes of properties inside functions that stay only with the object they write (see `Conditional`), and which of them do.
+    pub conditionals: Vec<Conditional>,
+    pub conditional_live: Vec<bool>,
+    /// The statements of `conditionals` that do not stay: the writer leaves them out.
+    pub removed: std::collections::HashSet<NodeId>,
 }
 
 #[derive(Debug)]
@@ -108,6 +125,7 @@ pub fn keep_everything(graph: &Graph) -> Shaken {
     for module in &mut modules {
         module.included = true;
         module.live = vec![true; module.parts.len()];
+        module.conditional_live = vec![true; module.conditionals.len()];
     }
     Shaken { modules, enums: EnumTable::empty(), frozen_folded: false }
 }
@@ -133,7 +151,8 @@ pub fn shake_entries(graph: &Graph, linked: &Linked, entry_exports: bool) -> Sha
     let n = graph.modules.len();
     let built: Vec<(ModuleShake, BySymbol)> = if crate::par::worth_it(n, graph.modules.iter().map(|m| m.source.len()).sum()) { crate::par::map(n, build) } else { (0..n).map(build).collect() };
     let (mut modules, by_symbol): (Vec<ModuleShake>, Vec<BySymbol>) = built.into_iter().unzip();
-    let mut shaker = Shaker { graph, linked, modules: &mut modules, by_symbol, work: Vec::new(), exports_done: vec![false; graph.modules.len()], full: vec![false; graph.modules.len()] };
+    let cond_by_symbol: Vec<BySymbol> = modules.iter().map(conditionals_by_symbol).collect();
+    let mut shaker = Shaker { graph, linked, modules: &mut modules, by_symbol, cond_by_symbol, work: Vec::new(), exports_done: vec![false; graph.modules.len()], full: vec![false; graph.modules.len()] };
     for &entry in &graph.entries {
         shaker.work.push(Work::Module(entry));
         // A module that is not ES keeps all it has: its code runs when it is asked for.
@@ -144,6 +163,7 @@ pub fn shake_entries(graph: &Graph, linked: &Linked, entry_exports: bool) -> Sha
     shaker.run();
     for module in &mut modules {
         module.demand_known = true;
+        module.removed = module.conditionals.iter().zip(&module.conditional_live).filter(|(_, live)| !**live).map(|(c, _)| c.stmt).collect();
     }
     Shaken { modules, enums, frozen_folded: true }
 }
@@ -157,6 +177,18 @@ fn parts_by_symbol(module: &ModuleShake) -> BySymbol {
         for &symbol in &part.declares {
             map.entry(symbol).or_default().push(index);
         }
+        if let Some(on) = part.on {
+            map.entry(on).or_default().push(index);
+        }
+    }
+    map
+}
+
+/// For each module-level symbol of a module, the writes of properties inside functions that stay with it.
+fn conditionals_by_symbol(module: &ModuleShake) -> BySymbol {
+    let mut map = BySymbol::default();
+    for (index, c) in module.conditionals.iter().enumerate() {
+        map.entry(c.on).or_default().push(index);
     }
     map
 }
@@ -167,6 +199,7 @@ enum Work {
     /// Everything the module has: all parts and all exports (`import()`, `require()`).
     Full(ModuleId),
     Part(ModuleId, usize),
+    Conditional(ModuleId, usize),
     Symbol(ModuleId, SymbolId),
     Binding(Binding),
     /// Every export of the module is needed (an entry, or a namespace used as a value).
@@ -178,6 +211,7 @@ struct Shaker<'a> {
     linked: &'a Linked,
     modules: &'a mut Vec<ModuleShake>,
     by_symbol: Vec<BySymbol>,
+    cond_by_symbol: Vec<BySymbol>,
     work: Vec<Work>,
     exports_done: Vec<bool>,
     full: Vec<bool>,
@@ -190,6 +224,7 @@ impl Shaker<'_> {
                 Work::Module(m) => self.include(m),
                 Work::Full(m) => self.make_full(m),
                 Work::Part(m, i) => self.make_live(m, i),
+                Work::Conditional(m, i) => self.make_conditional_live(m, i),
                 Work::Symbol(m, symbol) => self.use_symbol(m, symbol),
                 Work::Binding(binding) => self.use_binding(binding),
                 Work::AllExports(m) => self.all_exports(m),
@@ -266,6 +301,9 @@ impl Shaker<'_> {
         for index in 0..self.modules[id.index()].parts.len() {
             self.work.push(Work::Part(id, index));
         }
+        for index in 0..self.modules[id.index()].conditionals.len() {
+            self.work.push(Work::Conditional(id, index));
+        }
         self.work.push(Work::AllExports(id));
     }
 
@@ -276,7 +314,22 @@ impl Shaker<'_> {
         self.include(id);
         // `take` avoids holding a borrow of the part while queueing work.
         let uses = std::mem::take(&mut self.modules[id.index()].parts[index].uses);
-        for used in &uses {
+        self.queue_uses(id, &uses);
+        self.modules[id.index()].parts[index].uses = uses;
+    }
+
+    fn make_conditional_live(&mut self, id: ModuleId, index: usize) {
+        if std::mem::replace(&mut self.modules[id.index()].conditional_live[index], true) {
+            return;
+        }
+        self.include(id);
+        let uses = std::mem::take(&mut self.modules[id.index()].conditionals[index].uses);
+        self.queue_uses(id, &uses);
+        self.modules[id.index()].conditionals[index].uses = uses;
+    }
+
+    fn queue_uses(&mut self, id: ModuleId, uses: &[Use]) {
+        for used in uses {
             match used {
                 Use::Symbol(symbol) => self.work.push(Work::Symbol(id, *symbol)),
                 Use::Member(symbol, name) => match self.linked.binding(id, *symbol) {
@@ -297,7 +350,6 @@ impl Shaker<'_> {
                 },
             }
         }
-        self.modules[id.index()].parts[index].uses = uses;
     }
 
     fn use_symbol(&mut self, id: ModuleId, symbol: SymbolId) {
@@ -310,6 +362,11 @@ impl Shaker<'_> {
         if let Some(parts) = self.by_symbol[id.index()].get(&symbol) {
             for &index in parts {
                 self.work.push(Work::Part(id, index));
+            }
+        }
+        if let Some(conditionals) = self.cond_by_symbol[id.index()].get(&symbol) {
+            for &index in conditionals {
+                self.work.push(Work::Conditional(id, index));
             }
         }
     }
@@ -385,8 +442,93 @@ pub(crate) fn follow_namespaces(graph: &Graph, target: ModuleId, names: &[String
     None
 }
 
+/// What `collect_uses` needs to tell writes of properties of fresh objects from other statements.
+struct CondCtx<'a> {
+    fresh: &'a std::collections::HashSet<SymbolId>,
+    purity: &'a Purity<'a>,
+    found: std::cell::RefCell<Vec<Conditional>>,
+}
+
+/// The module-level names whose value is made here and held by nothing else: a function or class declaration, or a `var`/`let`/`const` that is
+/// given an object, array, function or class and never assigned again. A write to a property of one can only be seen through its name.
+/// A class with a superclass, an accessor, a computed key or a decorator is left out (a write could run a setter), as is an object with an
+/// accessor or a `__proto__` key.
+fn fresh_values(ast: &crate::ast::Ast, semantic: &crate::semantic::Semantic, body: crate::ast::List) -> std::collections::HashSet<SymbolId> {
+    use crate::ast::{flags, MethodKind, NodeKind, PropKind};
+    let plain_class = |class: NodeId| -> bool {
+        let NodeKind::Class { superclass: None, members, .. } = ast[class].kind else { return false };
+        ast.decorators_of(class).is_empty()
+            && ast.list(members).iter().all(|&m| match ast[m].kind {
+                NodeKind::ClassMethod { kind: MethodKind::Method | MethodKind::Constructor, .. } => !ast[m].has(flags::COMPUTED) && ast.decorators_of(m).is_empty(),
+                NodeKind::ClassField { .. } => !ast[m].has(flags::COMPUTED) && !ast[m].has(flags::ACCESSOR) && ast.decorators_of(m).is_empty(),
+                _ => false,
+            })
+    };
+    let plain_object = |object: NodeId| -> bool {
+        let NodeKind::Object(list) = ast[object].kind else { return false };
+        ast.list(list).iter().all(|&p| match ast[p].kind {
+            NodeKind::Property { key, kind: PropKind::Init | PropKind::Method, .. } => !ast[p].has(flags::COMPUTED) && !matches!(ast[key].kind, NodeKind::PropName(a) | NodeKind::Str(a) if ast.atom(a) == "__proto__"),
+            _ => false,
+        })
+    };
+    let mut out = std::collections::HashSet::new();
+    for &stmt in ast.list(body) {
+        let declaration = match ast[stmt].kind {
+            NodeKind::ExportNamed(export) => ast.export(export).decl.unwrap_or(stmt),
+            _ => stmt,
+        };
+        match ast[declaration].kind {
+            NodeKind::Function { name: Some(n), .. } if ast[declaration].has(flags::DECL) => out.extend(semantic.symbol_of(n)),
+            NodeKind::Class { name: Some(n), .. } if ast[declaration].has(flags::DECL) && plain_class(declaration) => out.extend(semantic.symbol_of(n)),
+            NodeKind::VarDecl { decls, .. } => {
+                for &d in ast.list(decls) {
+                    let NodeKind::VarDeclarator { target, init: Some(init) } = ast[d].kind else { continue };
+                    if !matches!(ast[target].kind, NodeKind::BindingIdent(_)) {
+                        continue;
+                    }
+                    let fresh = match ast[init].kind {
+                        NodeKind::Function { .. } | NodeKind::Array(_) => true,
+                        NodeKind::Object(_) => plain_object(init),
+                        NodeKind::Class { .. } => plain_class(init),
+                        _ => false,
+                    };
+                    let Some(symbol) = semantic.symbol_of(target) else { continue };
+                    let s = semantic.symbol(symbol);
+                    if fresh && s.writes == 1 && s.flags & crate::semantic::symbol_flags::DYNAMIC == 0 {
+                        out.insert(symbol);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// `X.p = value;` as a statement, where `X` is a fresh value of the module (`fresh_values`), the property is named plainly and the value has
+/// no effect: `X` and the value.
+fn conditional_write(ast: &crate::ast::Ast, semantic: &crate::semantic::Semantic, root: crate::semantic::ScopeId, fresh: &std::collections::HashSet<SymbolId>, purity: &Purity, stmt: NodeId) -> Option<(SymbolId, NodeId)> {
+    use crate::ast::{flags, AssignOp, NodeKind};
+    let NodeKind::ExprStmt(e) = ast[stmt].kind else { return None };
+    if ast[stmt].has(flags::DIRECTIVE) {
+        return None;
+    }
+    let NodeKind::Assign { op: AssignOp::Assign, target, value } = ast[e].kind else { return None };
+    let NodeKind::Member { object, prop } = ast[target].kind else { return None };
+    let plain = match ast[prop].kind {
+        NodeKind::PropName(_) => !ast[target].has(flags::COMPUTED),
+        NodeKind::Str(_) => ast[target].has(flags::COMPUTED),
+        _ => false,
+    };
+    if !plain || !matches!(ast[object].kind, NodeKind::Ident(_)) {
+        return None;
+    }
+    let symbol = semantic.symbol_of(object)?;
+    (semantic.symbol(symbol).scope == root && fresh.contains(&symbol) && purity.expr_is_pure(value)).then_some((symbol, value))
+}
+
 /// Every module-level name the subtree at `root_node` refers to, however deeply nested.
-fn collect_uses(ast: &crate::ast::Ast, semantic: &crate::semantic::Semantic, root: crate::semantic::ScopeId, defines: Option<&crate::define::Defines>, enums: Option<(&EnumTable, &Linked)>, id: ModuleId, root_node: NodeId, stack: &mut Vec<NodeId>) -> Vec<Use> {
+fn collect_uses(ast: &crate::ast::Ast, semantic: &crate::semantic::Semantic, root: crate::semantic::ScopeId, defines: Option<&crate::define::Defines>, enums: Option<(&EnumTable, &Linked)>, id: ModuleId, root_node: NodeId, stack: &mut Vec<NodeId>, cond: Option<&CondCtx>) -> Vec<Use> {
     use crate::ast::NodeKind;
 let mut uses = Vec::new();
     stack.push(root_node);
@@ -400,6 +542,15 @@ let mut uses = Vec::new();
                 written.insert(arg);
             }
             _ => {}
+        }
+        // `X.p = value;` inside a function: used only when `X` is, so what it uses is a use of `X`'s and not of this statement's.
+        if let (Some(c), true) = (cond, node != root_node) {
+            if let Some((on, value)) = conditional_write(ast, semantic, root, c.fresh, c.purity, node) {
+                let mut inner = Vec::new();
+                let uses = collect_uses(ast, semantic, root, defines, enums, id, value, &mut inner, cond);
+                c.found.borrow_mut().push(Conditional { stmt: node, on, uses });
+                continue;
+            }
         }
         // `config.debug` where nothing writes `config` is a value: the object is not used by it.
         if matches!(ast[node].kind, NodeKind::Member { .. }) && !written.contains(&node) && defines.is_some_and(|d| d.frozen_value(ast, semantic, node).is_some()) {
@@ -535,6 +686,8 @@ fn build_parts(graph: &Graph, id: ModuleId, enums: Option<(&EnumTable, &Linked)>
     let purity = Purity { source: &module.source, ast, semantic, defines, pure_calls: &graph.pure_calls, functions: Some(&functions), consts: Some(consts), world: world.map(|w| (w, id)), depth: std::cell::Cell::new(0) };
     let mut parts = Vec::new();
     let mut stack = Vec::new();
+    let fresh = fresh_values(ast, semantic, body);
+    let cond = CondCtx { fresh: &fresh, purity: &purity, found: Default::default() };
     for &stmt in ast.list(body) {
         match ast[stmt].kind {
             NodeKind::Import(_) | NodeKind::ExportAll { .. } => continue,
@@ -567,7 +720,7 @@ fn build_parts(graph: &Graph, id: ModuleId, enums: Option<(&EnumTable, &Linked)>
             }
             _ => {}
         }
-        let uses_of = |root_node: NodeId, stack: &mut Vec<NodeId>| collect_uses(ast, semantic, root, defines, enums, id, root_node, stack);
+        let uses_of = |root_node: NodeId, stack: &mut Vec<NodeId>| collect_uses(ast, semantic, root, defines, enums, id, root_node, stack, Some(&cond));
         // A `var`/`let`/`const` of several declarators is one part for each, so that an unused one can go while the others stay.
         if let NodeKind::VarDecl { decls, .. } = ast[declaration].kind {
             let list = ast.list(decls);
@@ -580,16 +733,24 @@ fn build_parts(graph: &Graph, id: ModuleId, enums: Option<(&EnumTable, &Linked)>
                     // Destructuring reads properties and runs iterators, so only plain names are free of effects.
                     let effects = !(matches!(ast[target].kind, NodeKind::BindingIdent(_)) && init.is_none_or(|i| purity.expr_is_pure(i)));
                     let uses = uses_of(d, &mut stack);
-                    parts.push(Part { stmt, declares, uses, effects, default_value: None, declarator: Some(d) });
+                    parts.push(Part { stmt, declares, uses, effects, default_value: None, declarator: Some(d), on: None });
                 }
                 continue;
             }
         }
+        // `X.p = value;` at the top: kept with `X` and not for its effect.
+        if let Some((on, value)) = conditional_write(ast, semantic, root, &fresh, &purity, stmt) {
+            let uses = uses_of(value, &mut stack);
+            parts.push(Part { stmt, declares: Vec::new(), uses, effects: false, default_value: None, declarator: None, on: Some(on) });
+            continue;
+        }
         let uses = uses_of(stmt, &mut stack);
-        parts.push(Part { stmt, declares, uses, effects: !purity.statement_is_pure(stmt), default_value, declarator: None });
+        parts.push(Part { stmt, declares, uses, effects: !purity.statement_is_pure(stmt), default_value, declarator: None, on: None });
     }
     let live = vec![false; parts.len()];
-    ModuleShake { included: false, parts, live, demanded: Default::default(), demand_known: false }
+    let conditionals = cond.found.into_inner();
+    let conditional_live = vec![false; conditionals.len()];
+    ModuleShake { included: false, parts, live, demanded: Default::default(), demand_known: false, conditionals, conditional_live, removed: Default::default() }
 }
 
 #[cfg(test)]

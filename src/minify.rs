@@ -2350,6 +2350,12 @@ mod tests {
         // A statement that is a value runs nothing; a directive is not one.
         assert_eq!(syntax("function f(a) { null && a(); 1; void 0; 'x' + 'y'; return a }"), "function f(a){return a}");
         assert_eq!(syntax("function f(a) { 'use strict'; return a }"), "function f(a){'use strict';return a}");
+        // A statement that is not written is not a part of a run of expressions: nothing is joined to it with a comma.
+        assert_eq!(syntax("function f(a, b) { if (a) { b = 1 } else { b = 2; false && g(); } if (a && b) { c() } }"), "function f(a,b){if(a)b=1;else{b=2}a&&b&&c()}");
+        assert_eq!(syntax("function f(a, b) { a(); !!(1 > 2) && 0; b(); return a }"), "function f(a,b){a();b();return a}");
+        // The only statement of a block, so the block is empty and still needed in front of an `else`.
+        assert_eq!(syntax("function f(a) { if (a) { false && g(); } else { h(); } }"), "function f(a){if(a){}else h()}");
+        assert_eq!(syntax("function f(a) { while (a()) { null; } for (;;) { void 0 || 1; break } }"), "function f(a){while(a()){}for(;;){break}}");
         assert_eq!(syntax("function f() { if (a) if (true) return 1; else return 2; else return 3 }"), "function f(){if(a)return 1;else return 3}");
         assert_eq!(syntax("function f() { return undefined; return void 0 }"), "function f(){return;return}");
     }

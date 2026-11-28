@@ -747,7 +747,7 @@ impl Ctx<'_> {
                 }
             }
             // A statement that is a value (`null;`, what `null && f()` came to): nothing runs, so it is not written.
-            NodeKind::ExprStmt(e) if !node.has(flags::DIRECTIVE) && self.in_statement_list(n) && crate::define::Defines::default().fold(ast, self.sem, e).is_some() => {
+            NodeKind::ExprStmt(_) if self.is_void_statement(n) => {
                 let (from, to) = (self.first_tok(node.span.start), self.last_tok(node.span.end) + 1);
                 self.dead.push((from, to));
             }
@@ -908,10 +908,17 @@ impl Ctx<'_> {
         }
     }
 
+    /// A statement that is a value and nothing else (`null;`, what `null && f()` came to): it is not written, and so it is not part of a run of
+    /// expressions either.
+    fn is_void_statement(&self, s: NodeId) -> bool {
+        let NodeKind::ExprStmt(e) = self.ast[s].kind else { return false };
+        !self.ast[s].has(flags::DIRECTIVE) && self.in_statement_list(s) && crate::define::Defines::default().fold(self.ast, self.sem, e).is_some()
+    }
+
     /// Whether statement `s` is written as one expression followed by a `;`: an expression statement, or an `if` that became one.
     fn is_expression_statement(&self, s: NodeId) -> bool {
         match self.ast[s].kind {
-            NodeKind::ExprStmt(_) => !self.ast[s].has(flags::DIRECTIVE),
+            NodeKind::ExprStmt(_) => !self.ast[s].has(flags::DIRECTIVE) && !self.is_void_statement(s),
             NodeKind::If { .. } => self.as_expr.contains(&s),
             _ => false,
         }
@@ -921,6 +928,7 @@ impl Ctx<'_> {
     /// stands for one.
     fn expression_terminator(&self, s: NodeId) -> Option<usize> {
         match self.ast[s].kind {
+            NodeKind::ExprStmt(_) if self.is_void_statement(s) => None,
             NodeKind::ExprStmt(_) => self.semi_of(s).filter(|&semi| self.actions[semi] == Action::Keep),
             _ => {
                 let start = self.first_tok(self.ast[s].span.start);
@@ -1038,7 +1046,7 @@ impl Ctx<'_> {
     /// The expression of a statement that is one, looking through a block whose braces went.
     fn sole_expression(&self, s: NodeId) -> Option<NodeId> {
         match self.ast[s].kind {
-            NodeKind::ExprStmt(e) if !self.ast[s].has(flags::DIRECTIVE) => Some(e),
+            NodeKind::ExprStmt(e) if !self.ast[s].has(flags::DIRECTIVE) && !self.is_void_statement(s) => Some(e),
             NodeKind::Block(list) => {
                 let [only] = self.ast.list(list) else { return None };
                 let open = self.first_tok(self.ast[s].span.start);
@@ -1905,7 +1913,8 @@ impl Ctx<'_> {
     fn can_stand_alone(&self, s: NodeId) -> bool {
         let node = &self.ast[s];
         match node.kind {
-            NodeKind::ExprStmt(_) => !node.has(flags::DIRECTIVE),
+            // Not written, so there would be nothing left for the `if` or loop to run: its braces stay.
+            NodeKind::ExprStmt(_) => !node.has(flags::DIRECTIVE) && !self.is_void_statement(s),
             NodeKind::VarDecl { kind, .. } => kind == VarKind::Var,
             NodeKind::If { .. } | NodeKind::For { .. } | NodeKind::ForIn { .. } | NodeKind::ForOf { .. } | NodeKind::While { .. } | NodeKind::DoWhile { .. } => true,
             NodeKind::Return(_) | NodeKind::Break(_) | NodeKind::Continue(_) | NodeKind::Throw(_) | NodeKind::Try { .. } | NodeKind::Switch { .. } | NodeKind::Debugger => true,
