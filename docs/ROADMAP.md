@@ -90,7 +90,7 @@ Performance bars met: time, size and memory at or beyond the other benchmarked t
 - [ ] [3.9](https://github.com/rathkit/pack/issues/23) Size: CSS minification (shorthand and rule merging) `P1`
 - [x] [3.10](https://github.com/rathkit/pack/issues/24) Time: parallel code generation and per-chunk minify `P1`
 - [ ] [3.11](https://github.com/rathkit/pack/issues/25) Time: cheaper source maps `P1`
-- [ ] [3.2](https://github.com/rathkit/pack/issues/26) Persistent cache and a faster dev server start `P0`
+- [x] [3.2](https://github.com/rathkit/pack/issues/26) Persistent cache and a faster dev server start `P0`
 - [x] [3.4](https://github.com/rathkit/pack/issues/27) Memory: free per-module data after emit; worst-case inputs `P0`
 - [ ] [3.12](https://github.com/rathkit/pack/issues/28) Every workload where another tool wins is listed, with a reason and an issue `P1`
 - [x] [3.16](https://github.com/rathkit/pack/issues/86) Where esbuild is ahead on the 15-workload benchmark: time, size and warm rebuild `P1`
