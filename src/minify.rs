@@ -1292,7 +1292,7 @@ fn guard_pairs(a: &parser::Parsed, b: &parser::Parsed, test: NodeId, cons: NodeI
 }
 
 /// a statement list count as one declaration (the minifier joins them).
-fn children(parsed: &parser::Parsed, side: &Side, syntax: bool, original: bool, legacy: bool, inlined: &HashMap<NodeId, NodeId>) -> Vec<Side> {
+fn children(parsed: &parser::Parsed, side: &Side, syntax: bool, original: bool, legacy: bool, inlined: &HashMap<NodeId, NodeId>, unused: &crate::compress::Unused) -> Vec<Side> {
     let ast = &parsed.ast;
     if let Some(list) = &side.declarators {
         return list.iter().map(|&c| Side::node(c)).collect();
@@ -1327,9 +1327,14 @@ fn children(parsed: &parser::Parsed, side: &Side, syntax: bool, original: bool, 
         if original && removable(parsed, c) {
             continue;
         }
-        // A declaration of names that are written where they are read: it is not there, and the statements around it are not joined.
+        // A function or class nothing uses is not there either.
+        if original && unused.statements.contains(&c) {
+            run_kind = None;
+            continue;
+        }
+        // A declaration of names that are written where they are read, or that nothing reads: it is not there, and the statements around it are not joined.
         if let (true, NodeKind::VarDecl { decls, .. }) = (original, ast[c].kind) {
-            if ast.list(decls).iter().all(|d| inlined.contains_key(d)) {
+            if ast.list(decls).iter().all(|d| inlined.contains_key(d) || unused.declarators.contains(d)) {
                 run_kind = None;
                 continue;
             }
@@ -1346,7 +1351,7 @@ fn children(parsed: &parser::Parsed, side: &Side, syntax: bool, original: bool, 
         if let NodeKind::VarDecl { kind, decls } = ast[c].kind {
             // A `const` nobody assigns to is written `let`.
             let kind = if original && kind == crate::ast::VarKind::Const && crate::compress::const_is_let(ast, &parsed.semantic, c) { crate::ast::VarKind::Let } else { kind };
-            let own: Vec<NodeId> = ast.list(decls).iter().copied().filter(|d| !(original && inlined.contains_key(d))).collect();
+            let own: Vec<NodeId> = ast.list(decls).iter().copied().filter(|d| !(original && (inlined.contains_key(d) || unused.declarators.contains(d)))).collect();
             if run_kind == Some(kind) {
                 out.last_mut().and_then(|s| s.declarators.as_mut()).expect("a run").extend(own);
             } else {
@@ -1377,6 +1382,8 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
     let inlined: HashMap<NodeId, NodeId> = if syntax { crate::compress::inlinable_constants(&a.ast, &a.semantic, false).into_iter().collect() } else { HashMap::default() };
     let inlined_uses: HashMap<NodeId, NodeId> = inlined.iter().map(|(&d, &u)| (u, d)).collect();
     let no_inlined: HashMap<NodeId, NodeId> = HashMap::default();
+    let unused = if syntax { crate::compress::unused_locals(source, &a.ast, &a.semantic) } else { crate::compress::Unused::default() };
+    let no_unused = crate::compress::Unused::default();
     let mut forward: HashMap<SymbolId, SymbolId> = HashMap::default();
     let mut backward: HashMap<SymbolId, SymbolId> = HashMap::default();
     let mut private_forward: HashMap<&str, &str> = HashMap::default();
@@ -1739,8 +1746,8 @@ pub fn verify(source: &str, options: &Options) -> Result<(), String> {
             }
             _ => {}
         }
-        let mut ca = children(&a, &sx, syntax, true, options.legacy, &inlined);
-        let mut cb = children(&b, &sy, syntax, false, options.legacy, &no_inlined);
+        let mut ca = children(&a, &sx, syntax, true, options.legacy, &inlined, &unused);
+        let mut cb = children(&b, &sy, syntax, false, options.legacy, &no_inlined, &no_unused);
         if syntax {
             match (&nx.kind, &ny.kind) {
                 // `=> { return x; }` and `=> x`.
@@ -1987,7 +1994,7 @@ mod tests {
         assert_eq!(syntax("function f(a, b) { if (a) { b(); throw new Error('x'); } }"), "function f(a,b){if(a)throw b(),new Error('x')}");
         assert_eq!(syntax("function f(a, b) { for (let i = 0; i < 3; i++) { a(i); b(i) } d(); }"), "function f(a,b){for(let i=0;i<3;i++)a(i),b(i);d()}");
         // Not when a statement is not an expression, or a line break stands for a `;` that has no token to become a comma.
-        assert_eq!(syntax("function f(a, b) { if (a) { b(); var c = 1; } }"), "function f(a,b){if(a){b();var c=1}}");
+        assert_eq!(syntax("function f(a, b) { if (a) { b(); var c = 1; } return c; }"), "function f(a,b){if(a){b();var c=1}return c}");
         assert_eq!(syntax("function f(a, b) { if (a) { b()\n a() } }"), "function f(a,b){if(a){b();a()}}");
     }
 
@@ -2096,7 +2103,7 @@ mod tests {
         assert_eq!(syntax("function f(a, b, c, n) { if (a) return 1; if (b) return 2; c(n); c(a); return 3; }"), "function f(a,b,c,n){return a?1:b?2:(c(n),c(a),3)}");
         assert_eq!(syntax("function f(a, b, c) { if (a) return 1; if (b) c(); else a(); return 3; }"), "function f(a,b,c){return a?1:(b?c():a(),3)}");
         // Not when what follows the last return is a statement (the parenthesis ends where the `;` was), or something in between is not an expression.
-        assert_eq!(syntax("function f(a, b) { if (a) return 1; b(); return 2; function g() {} }"), "function f(a,b){if(a)return 1;b();return 2;function g(){}}");
+        assert_eq!(syntax("function f(a, b) { if (a) return 1; b(); return g; function g() {} }"), "function f(a,b){if(a)return 1;b();return g;function g(){}}");
         assert_eq!(syntax("function f(a, b) { if (a) return 1; var c = b(); return c; }"), "function f(a,b){if(a)return 1;return b()}");
         assert_eq!(syntax("function f(a, b) { if (a) return 1; b(); return 2 }"), "function f(a,b){if(a)return 1;b();return 2}");
     }
@@ -2189,7 +2196,7 @@ mod tests {
         assert_eq!(syntax("if (a) { if (b) c() } else d()"), "if(a){b&&c()}else d()");
         assert_eq!(syntax("if (a) { for (;;) { if (b) c() } } else d()"), "if(a){for(;;)b&&c()}else d()");
         assert_eq!(syntax("if (a) { let x = h(); f(x) }"), "if(a){let x=h();f(x)}");
-        assert_eq!(syntax("if (a) { let x = 1 }"), "if(a){let x=1}");
+        assert_eq!(syntax("if (a) { let x = 1; f(x); g(x) }"), "if(a){let x=1;f(x);g(x)}");
         assert_eq!(syntax("for (;;) { x() }\ny()"), "for(;;)x();y()");
         assert_eq!(syntax("do { x() } while (y)"), "do x();while(y)");
     }
